@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 虚拟环境
+.venv/
+backend/.venv/
+
+# 后端运行产物
+backend/logs/
+backend/dev.db
+*.db
+*.db-journal
+*.db.bak*
+*.sqlite3
+
+# 前端依赖与构建产物
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# 本地自签名证书
+frontend/certs/
+
+# 环境变量与密钥
+.env
+.env.*
+!.env.example
+
+# 日志
+*.log
+
+# 编辑器 / 系统文件
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp

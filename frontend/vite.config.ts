@@ -1,0 +1,35 @@
+import { fileURLToPath, URL } from 'node:url'
+import { readFileSync } from 'node:fs'
+import { defineConfig, type ServerOptions as ViteServerOptions } from 'vite'
+import vue from '@vitejs/plugin-vue'
+import basicSsl from '@vitejs/plugin-basic-ssl'
+import { ensureCert } from './gen-cert.mjs'
+
+// 局域网访问：使用覆盖当前局域网 IP 的自签名证书（gen-cert.mjs 会自动生成/更新）。
+// 若证书生成失败（例如依赖未安装），回退到 basicSsl 的 localhost 证书，保证本地开发可用。
+let https: ViteServerOptions['https']
+let plugins = [vue(), basicSsl()]
+try {
+  const certFiles = await ensureCert()
+  https = { key: readFileSync(certFiles.key), cert: readFileSync(certFiles.cert) }
+  plugins = [vue()]
+  console.log(`[easytask] 开发服务器使用自签名证书: ${certFiles.cert}`)
+} catch (e) {
+  // 证书生成失败时回退 basicSsl 的 localhost 证书，保证本地开发可用
+  console.warn('[easytask] 自签名证书生成失败，回退 basicSsl:', e)
+}
+
+export default defineConfig({
+  plugins,
+  resolve: {
+    alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
+  },
+  server: {
+    host: true,
+    port: 5173,
+    https,
+    proxy: {
+      '/api': { target: 'http://127.0.0.1:8000', changeOrigin: true },
+    },
+  },
+})

@@ -1,0 +1,64 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  @apply bg-slate-100 text-slate-800;
+}
+
+.clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ---- 移动端滑动交互 ---- */
+/* 阻止浏览器在页面边缘左右滑时触发“返回/前进/退出网页”的手势：
+   touch-action: pan-y 把横向手势完全交给 JS（右滑开侧栏），浏览器不再
+   把它当作“返回”手势；overscroll-behavior-x: none 双保险（尤其 iOS）。
+   纵向滚动仍保留，main 用 overscroll-behavior-y: contain 禁用原生下拉刷新。 */
+html,
+body {
+  touch-action: pan-y;
+  overscroll-behavior-x: none;
+}
+#app,
+main {
+  overscroll-behavior-x: none;
+  overscroll-behavior-y: contain;
+}
+/* 拖拽手柄交给 JS 全权控制，拖动更跟手，也不会触发浏览器返回手势 */
+.task-drag-handle,
+.drag-handle {
+  touch-action: none;
+}
+
+/* ---- 拖拽过程视觉反馈（vue-draggable-plus ghost/chosen/drag 类） ---- */
+.drag-ghost {
+  opacity: 0.35;
+}
+.drag-chosen {
+  opacity: 0.5;
+}
+.drag-active {
+  transform: rotate(1.5deg) scale(1.02);
+  box-shadow: 0 14px 28px -8px rgba(15, 23, 42, 0.28);
+  border-radius: 0.75rem;
+  cursor: grabbing !important;
+}
+
+/* 触屏设备没有 hover 状态，任务拖拽手柄默认可见，便于拖动 */
+@media (hover: none) {
+  .task-drag-handle {
+    opacity: 1 !important;
+    color: rgb(148 163 184);
+  }
+}

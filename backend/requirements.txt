@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+aiosmtplib
+argon2-cffi
+pydantic
+oss2
