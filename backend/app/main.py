@@ -19,9 +19,10 @@ from .routes import notify as notify_routes
 from .services.log_cleanup_worker import log_cleanup_worker
 from .services.reminder_worker import reminder_worker
 
-# 默认允许本机前后端联调；可通过环境变量 FRONTEND_ORIGINS 配置局域网访问地址
+# 默认允许本机前后端联调及 Capacitor Android WebView（https://localhost）；
+# 可通过环境变量 FRONTEND_ORIGINS 配置局域网访问地址
 # （多个用英文逗号分隔），满足 README 声称的局域网设备访问（BUG-25）
-_DEFAULT_ORIGINS = "http://localhost:5173,https://localhost:5173"
+_DEFAULT_ORIGINS = "http://localhost:5173,https://localhost:5173,http://localhost,https://localhost"
 FRONTEND_ORIGINS = [
     o.strip()
     for o in os.environ.get("FRONTEND_ORIGINS", _DEFAULT_ORIGINS).split(",")
@@ -67,7 +68,14 @@ async def lifespan(app: FastAPI):
     worker.cancel()
 
 
-app = FastAPI(title="EasyTask", lifespan=lifespan)
+# 生产环境关闭 Swagger/ReDoc 与 OpenAPI schema，避免暴露接口调试页面
+app = FastAPI(
+    title="EasyTask",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 app.add_middleware(
     CORSMiddleware,

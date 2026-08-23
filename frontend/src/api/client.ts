@@ -1,6 +1,9 @@
 const TOKEN_KEY = 'st_token'
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
+/** APK/手机端通过 VITE_API_BASE_URL 指向后端地址；网页开发模式留空走同源/代理 */
+const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? ''
+
 export function getToken(): string {
   return localStorage.getItem(TOKEN_KEY) ?? ''
 }
@@ -68,7 +71,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   const token = getToken()
   if (token) headers.Authorization = `Bearer ${token}`
-  const res = await fetch(path, {
+  const res = await fetch(`${API_BASE}${path}`, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),

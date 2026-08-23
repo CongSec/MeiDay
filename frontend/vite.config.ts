@@ -1,6 +1,6 @@
 import { fileURLToPath, URL } from 'node:url'
 import { readFileSync } from 'node:fs'
-import { defineConfig, type ServerOptions as ViteServerOptions } from 'vite'
+import { defineConfig, loadEnv, type ServerOptions as ViteServerOptions } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import basicSsl from '@vitejs/plugin-basic-ssl'
 import { ensureCert } from './gen-cert.mjs'
@@ -19,17 +19,28 @@ try {
   console.warn('[easytask] 自签名证书生成失败，回退 basicSsl:', e)
 }
 
-export default defineConfig({
-  plugins,
-  resolve: {
-    alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
-  },
-  server: {
-    host: true,
-    port: 5173,
-    https,
-    proxy: {
-      '/api': { target: 'http://127.0.0.1:8000', changeOrigin: true },
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  // 网页版可把静态资源放到 CDN，例如 https://static.example.com；留空则走原站相对路径。
+  const cdnBase = (env.VITE_CDN_BASE ?? process.env.VITE_CDN_BASE ?? '').trim().replace(/\/+$/, '')
+
+  return {
+    base: cdnBase ? `${cdnBase}/` : '/',
+    plugins,
+    build: {
+      // 生产构建不生成 .map，避免源码映射泄露
+      sourcemap: false,
     },
-  },
+    resolve: {
+      alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
+    },
+    server: {
+      host: true,
+      port: 5173,
+      https,
+      proxy: {
+        '/api': { target: 'http://127.0.0.1:8000', changeOrigin: true },
+      },
+    },
+  }
 })

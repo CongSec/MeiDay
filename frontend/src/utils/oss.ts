@@ -45,7 +45,7 @@ export function describeOssError(e: unknown): string {
       message ?? '',
     )
   if (corsish) {
-    return 'OSS 请求被浏览器拦截或网络不可达，通常是 Bucket 未配置 CORS（请允许当前前端域名 https://localhost:5173），或本地网络/DNS 异常'
+    return 'OSS 请求被浏览器拦截或网络不可达，通常是 Bucket 未配置 CORS（网页版请允许 https://localhost:5173，Android APK 请允许 https://localhost），或本地网络/DNS 异常'
   }
 
   switch (code) {

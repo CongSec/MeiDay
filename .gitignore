@@ -23,6 +23,13 @@ frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 
+# Android 签名密钥与本地配置（不要提交）
+*.jks
+*.keystore
+keystore.properties
+frontend/android/local.properties
+frontend/android/app/google-services.json
+
 # 本地自签名证书
 frontend/certs/
 
