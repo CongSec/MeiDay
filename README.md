@@ -25,13 +25,15 @@ python -m venv .venv
 ```powershell
 cd frontend
 Copy-Item .env.example .env.production
-Copy-Item .env.example .env.web.production
+Copy-Item .env.example .env.web
 ```
+
+Vite 按构建模式读取 env 文件：`npm run build:web` 使用 `--mode web`，所以网页版配置必须命名为 `.env.web`；`.env.web.production` 这种组合不会被读取。
 
 | 文件 | 何时读取 | 用途 |
 | --- | --- | --- |
 | `frontend/.env.production` | `npm run build` / `npm run apk:sync` | APK 打包时手机访问后端用的地址 |
-| `frontend/.env.web.production` | `npm run build:web` | 网页版 API 地址与可选 CDN 域名 |
+| `frontend/.env.web` | `npm run build:web` | 网页版 API 地址与可选 CDN 域名 |
 
 常用变量：
 
