@@ -11,7 +11,7 @@ export async function uploadAttachment(
   file: File,
 ): Promise<AttachmentMeta> {
   const id = crypto.randomUUID()
-  const client = createOssClient(creds)
+  const client = await createOssClient(creds)
   const key = paths.attachment(username, taskId, id)
   // 原始文件直传，Content-Type 保持文件原始类型（便于直接预览 / 下载）
   await client.put(key, file)
@@ -30,15 +30,15 @@ export async function downloadAttachment(
   creds: CredFields,
   meta: AttachmentMeta,
 ): Promise<Blob> {
-  const client = createOssClient(creds)
+  const client = await createOssClient(creds)
   const res = await client.get(meta.key)
   const bytes = await new Blob([res.content]).arrayBuffer()
   return new Blob([bytes], { type: meta.type || 'application/octet-stream' })
 }
 
 /** 从用户 OSS 删除单个附件二进制 */
-export async function deleteAttachment(creds: CredFields, meta: AttachmentMeta): Promise<void> {
-  const client = createOssClient(creds)
+async function deleteAttachment(creds: CredFields, meta: AttachmentMeta): Promise<void> {
+  const client = await createOssClient(creds)
   try {
     await client.delete(meta.key)
   } catch {

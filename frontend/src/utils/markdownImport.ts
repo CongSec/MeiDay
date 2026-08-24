@@ -26,11 +26,6 @@ export interface ImportResult {
   warnings: string[]
 }
 
-/** 解析时间：支持 2026-08-18 09:00 / 2026-08-18T09:00 / 2026/08/18 09:00 / 2026年8月18日 09:00 / 仅日期 2026-08-18 */
-export function parseImportTime(raw: string): string {
-  return parseImportTimeEx(raw).iso
-}
-
 function daysInMonth(y: number, mo: number): number {
   return new Date(Date.UTC(y, mo, 0)).getUTCDate()
 }

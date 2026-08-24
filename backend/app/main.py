@@ -8,14 +8,17 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .audit import action_label, client_ip, log_action
 from .auth import username_from_token
 from .db import init_db
 from .routes import auth as auth_routes
+from .routes import captcha as captcha_routes
 from .routes import credentials as cred_routes
 from .routes import logs as logs_routes
 from .routes import notify as notify_routes
+from .routes import sync as sync_routes
 from .services.log_cleanup_worker import log_cleanup_worker
 from .services.reminder_worker import reminder_worker
 
@@ -47,6 +50,8 @@ _SKIP_PATHS = {
     # 注册由 register 路由以新用户名写入（归属该用户自己），中间件跳过避免空用户重复记录
     "/api/register",
     "/api/health",
+    # 图形验证码图片（注册页每次刷新/点击都请求，跳过审计日志避免刷屏）
+    "/api/captcha",
     # 修改密码：由路由自行写入安全审计日志（修改密码/修改密码失败），中间件跳过避免重复
     "/api/change-password",
     # 客户端行为上报：由 /logs/client 路由写入带详情的审计日志
@@ -55,6 +60,9 @@ _SKIP_PATHS = {
     "/api/logs/all",
     "/api/logs/actions",
     "/api/settings/log-retention",
+    # 同步协调中心（2 秒轮询）：每次请求都写审计日志会刷爆 LogsView，直接跳过
+    "/api/sync/report",
+    "/api/sync/state",
 }
 
 
@@ -86,11 +94,18 @@ app.add_middleware(
 )
 
 
+def _is_sourcemap_path(path: str) -> bool:
+    """是否请求 sourcemap（构建侧已禁用并清理，这里兜底拦截，防止未来误配静态托管泄露源码）。"""
+    return path.rstrip("/").lower().endswith(".map")
+
+
 @app.middleware("http")
 async def audit_middleware(request: Request, call_next):
     """记录用户每一次请求：时间、IP、用户、行为、方法/路径、状态码、耗时。"""
     method = request.method
     path = request.url.path
+    if _is_sourcemap_path(path):
+        return JSONResponse({"detail": "Forbidden"}, status_code=403)
     if method == "OPTIONS" or path in _SKIP_PATHS:
         return await call_next(request)
     start = time.perf_counter()
@@ -118,9 +133,11 @@ async def audit_middleware(request: Request, call_next):
 
 
 app.include_router(auth_routes.router)
+app.include_router(captcha_routes.router)
 app.include_router(cred_routes.router)
 app.include_router(logs_routes.router)
 app.include_router(notify_routes.router)
+app.include_router(sync_routes.router)
 
 
 @app.get("/api/health")

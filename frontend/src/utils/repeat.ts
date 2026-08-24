@@ -90,22 +90,6 @@ export function nextRepeatDate(rule: RepeatRule, anchor: string): string | null 
   }
 }
 
-/** 完成一个重复任务后，生成下一次出现的任务（深拷贝，属性完全一致，仅日期按周期顺延）。
- *  兼容旧调用：等同 buildRepeatOccurrence(...)?.template。 */
-export function rollTask(task: Task, today: string): Task | null {
-  const occ = buildRepeatOccurrence(task, today)
-  return occ ? occ.template : null
-}
-
-/** 计算下一次提醒时间：按规则从 currentIso 推进一个周期（保留时分秒），无后续日期返回 null */
-export function nextReminderTime(rule: RepeatRule, currentIso: string): string | null {
-  const currentKey = dateKeyOf(currentIso)
-  const date = nextRepeatDate(rule, currentKey)
-  if (!date) return null
-  const offset = diffDaysKey(currentKey, date)
-  return addDays(currentIso, offset)
-}
-
 /** 构造发给服务器的重复提醒规则：服务器只存这一条规则（JSON），
  *  发完邮件后由 worker 按周期自行推进 reminder_time，不预注册未来 N 条提醒。
  *  名称/描述/起止/提醒时间会上传服务器（邮件展示需要）；附件等敏感内容仍只在用户 OSS。 */

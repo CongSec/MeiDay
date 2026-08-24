@@ -36,7 +36,6 @@ main {
   overscroll-behavior-y: contain;
 }
 /* 拖拽手柄交给 JS 全权控制，拖动更跟手，也不会触发浏览器返回手势 */
-.task-drag-handle,
 .drag-handle {
   touch-action: none;
 }
@@ -44,21 +43,51 @@ main {
 /* ---- 拖拽过程视觉反馈（vue-draggable-plus ghost/chosen/drag 类） ---- */
 .drag-ghost {
   opacity: 0.35;
+  -webkit-user-select: none;
+  user-select: none;
 }
 .drag-chosen {
-  opacity: 0.5;
+  opacity: 0.4;
+  -webkit-user-select: none;
+  user-select: none;
 }
 .drag-active {
-  transform: rotate(1.5deg) scale(1.02);
-  box-shadow: 0 14px 28px -8px rgba(15, 23, 42, 0.28);
+  /* 拖动跟随的克隆：不用 scale/rotate，避免拖动时文字发虚；
+     半透明可透出下方目标项，配合 swapThreshold 看到实时“占位排斥” */
+  opacity: 0.85;
+  will-change: transform;
+  backface-visibility: hidden;
+  box-shadow: 0 16px 32px -10px rgba(15, 23, 42, 0.3);
   border-radius: 0.75rem;
   cursor: grabbing !important;
+  -webkit-user-select: none;
+  user-select: none;
+}
+/* 触屏 fallback 跟随手指的克隆：强制 GPU 合成，滑动更顺滑；禁用文字选中 */
+.sortable-fallback {
+  will-change: transform;
+  backface-visibility: hidden;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
-/* 触屏设备没有 hover 状态，任务拖拽手柄默认可见，便于拖动 */
-@media (hover: none) {
-  .task-drag-handle {
-    opacity: 1 !important;
-    color: rgb(148 163 184);
-  }
+/* 任务卡整卡可拖（桌面原生/触屏长按）：禁用文字选择，拖动/长按不会选中内容 */
+.task-card,
+.task-card * {
+  -webkit-user-select: none !important;
+  -moz-user-select: none !important;
+  -ms-user-select: none !important;
+  user-select: none !important;
+  -webkit-touch-callout: none !important;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* 拖拽进行中（长按进入拖拽 / 跟随手指的克隆）：全局禁止文字选择，避免选中页面其他文字 */
+body.easytask-dragging,
+body.easytask-dragging * {
+  -webkit-user-select: none !important;
+  -moz-user-select: none !important;
+  -ms-user-select: none !important;
+  user-select: none !important;
+  -webkit-touch-callout: none !important;
 }

@@ -1,4 +1,6 @@
+import ipaddress
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -13,17 +15,26 @@ logger = logging.getLogger("easytask.audit")
 DEFAULT_LOG_RETENTION_DAYS = 30
 RETENTION_KEY = "log_retention_days"
 
-# 常见请求 -> 中文行为标签（未知请求回退为 "METHOD /path"）
+# 受信反向代理网段（配合 client_ip 取真实来源 IP，BUG-10 安全加固）。
+# 默认仅信任本机回环 127.0.0.1/::1，覆盖 README 描述的「网页版走 Nginx 同源反代」部署；
+# 若代理部署在其他主机/网段，可用环境变量 TRUSTED_PROXIES 追加（英文逗号分隔的 IP 或 CIDR）。
+_TRUSTED_PROXY_NETWORKS = [
+    ipaddress.ip_network(net.strip())
+    for net in os.environ.get("TRUSTED_PROXIES", "").split(",")
+    if net.strip()
+]
+
+# 中间件会审计的请求 -> 中文行为标签（未知请求回退为 "METHOD /path"）。
+# 登录/注册/验证码/清理等路径被中间件跳过（见 main._SKIP_PATHS），由各路由自行留痕。
 ACTION_LABELS = {
-    ("POST", "/api/login"): "登录",
-    ("POST", "/api/login/legacy"): "登录迁移",
-    ("POST", "/api/register"): "注册",
     ("POST", "/api/logout"): "登出",
     ("GET", "/api/me"): "获取用户信息",
     ("PUT", "/api/credentials"): "更新邮箱/存储凭证",
+    ("POST", "/api/credentials/oss-check"): "测试 OSS 连接",
     ("PUT", "/api/reminders/sync"): "同步提醒清单",
     ("GET", "/api/logs"): "查看操作日志",
-    ("GET", "/api/logs/actions"): "查询日志行为列表",
+    ("GET", "/api/notify-prefs"): "查询通知设置",
+    ("PUT", "/api/notify-prefs"): "更新通知设置",
 }
 
 # 后台邮件操作的行为名（非 HTTP 请求，由 reminder worker 写入）
@@ -31,16 +42,71 @@ EMAIL_ACTIONS = ("email_send", "email_fail", "email_suppressed")
 
 
 def client_ip(request: Request) -> str:
-    """取真实客户端 IP。
+    """取真实客户端 IP（审计日志、爆破统计、安全邮件均依赖此值）。
 
-    不再信任 X-Forwarded-For：该头可被任意客户端伪造，若直接取第一段，
-    攻击者可把审计/爆破统计的 IP 污染成任意值（BUG-10）。直接使用 TCP
-    连接对端地址（request.client.host）。若部署在受信反向代理后需记录
-    真实来源 IP，应改用代理层约定的可信头并在代理侧覆盖。
+    默认使用 TCP 连接对端地址（request.client.host），它由内核给出、不可伪造；
+    但部署在受信反向代理（如 README 描述的 Nginx 同源反代）后，对端恒为代理
+    地址（本机通常是 127.0.0.1），直接记录将永远拿不到真实来源 IP。
+
+    处理方式（BUG-10 安全加固：既防伪造，又能记录真实外网 IP）：
+    - 仅当 TCP 对端是受信代理（本机回环或 TRUSTED_PROXIES 指定网段）时，
+      才解析代理透传的 X-Forwarded-For / X-Real-IP；
+    - X-Forwarded-For 取【最右侧】的合法 IP：该条目由最后一个受信代理追加，
+      客户端只能伪造左侧条目、无法覆盖右侧追加项，因此拿到真实 IP 的同时防伪造；
+    - 对端不是受信代理时（客户端直连后端，如 APK 直连局域网 IP），
+      一律忽略转发头、用 TCP 对端地址，杜绝伪造头污染审计/爆破统计。
     """
     client = request.client
-    return client.host if client else ""
+    if not client:
+        return ""
+    peer = _normalize_ip(client.host) or client.host
+    if _is_trusted_proxy(peer):
+        xff = request.headers.get("x-forwarded-for", "")
+        if xff:
+            for cand in reversed([s.strip() for s in xff.split(",") if s.strip()]):
+                cleaned = _normalize_ip(cand)
+                if cleaned:
+                    return cleaned
+        xri = _normalize_ip(request.headers.get("x-real-ip", ""))
+        if xri:
+            return xri
+    return peer
 
+
+def _is_trusted_proxy(host: str) -> bool:
+    """判断 TCP 对端是否属于受信反向代理（本机回环或 TRUSTED_PROXIES 网段）。"""
+    if not host:
+        return False
+    h = host.split("%")[0].strip()  # 去掉 IPv6 zone 后缀（如 fe80::1%eth0）
+    if h in ("127.0.0.1", "::1", "localhost"):
+        return True
+    try:
+        addr = ipaddress.ip_address(h)
+    except ValueError:
+        return False
+    return any(addr in net for net in _TRUSTED_PROXY_NETWORKS)
+
+
+def _normalize_ip(entry: str) -> str:
+    """清洗/规范化一个 IP 条目：去掉可能的端口、校验合法、并把 IPv4-mapped IPv6
+    （如 ::ffff:10.240.4.186，uvicorn/反代可能上报这种形式）统一成普通 IPv4；
+    非法则返回空串（调用方回退对端地址）。"""
+    s = (entry or "").strip()
+    if not s:
+        return ""
+    # IPv6 形如 [::1]:port 或 ::1；IPv4 形如 1.2.3.4:port 或 1.2.3.4
+    if s.startswith("["):
+        s = s.lstrip("[").split("]")[0]
+    elif s.count(":") == 1 and s.rsplit(":", 1)[1].isdigit():
+        s = s.rsplit(":", 1)[0]
+    try:
+        addr = ipaddress.ip_address(s)
+    except ValueError:
+        return ""
+    # ::ffff:1.2.3.4 归一化为 1.2.3.4
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+        return str(addr.ipv4_mapped)
+    return s
 
 def action_label(method: str, path: str) -> str:
     return ACTION_LABELS.get((method, path), f"{method} {path}")
@@ -113,6 +179,7 @@ def query_logs(
     username: str = "",
     action: str = "",
     ip: str = "",
+    high_risk: str = "",
     limit: int = 100,
     offset: int = 0,
 ) -> tuple[list[dict], int]:
@@ -127,6 +194,9 @@ def query_logs(
     if ip:
         where.append("ip=?")
         params.append(ip)
+    if high_risk in ("0", "1"):
+        where.append("is_high_risk=?")
+        params.append(int(high_risk))
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     with get_conn() as conn:
         total = conn.execute(

@@ -2,7 +2,7 @@
 import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { VueDraggable } from 'vue-draggable-plus'
-import { getDragOptions } from '@/utils/drag'
+import { getDragOptions, setDragging } from '@/utils/drag'
 import { useAuthStore } from '@/stores/auth'
 import { useProjectsStore } from '@/stores/projects'
 import { useTasksStore } from '@/stores/tasks'
@@ -10,10 +10,9 @@ import { useUiStore } from '@/stores/ui'
 import TaskCard from '@/components/TaskCard.vue'
 import TaskModal from '@/components/TaskModal.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
-import { nowIso, sortByEndTime, toLocalInput, todayKey } from '@/utils/time'
+import { nowIso, toLocalInput, todayKey } from '@/utils/time'
 import { isTaskVisibleToday } from '@/utils/todayFilter'
 import { UNCATEGORIZED, type Subtask, type Task } from '@/types'
-import { safeDetail } from '@/utils/audit'
 import { useSync } from '@/composables/useSync'
 
 const auth = useAuthStore()
@@ -42,10 +41,21 @@ onMounted(async () => {
     mobileActions.title = MOBILE_TITLE
   }
   if (!projects.loaded) await projects.load()
-  // 同时加载未分类任务文件（today.json）：无项目导入/新建的任务也应在今日视图可见
-  await tasks.loadAllProgressive([...projects.projects.map((p) => p.id), UNCATEGORIZED])
+  // 先从本地 IDB 恢复缓存（不访问 OSS）判断哪些项目今日有任务；未分类(today.json)一并纳入。
+  // 本地缓存不完整（全新设备/首次进入）时，无法判断哪些项目今日有任务：必须全量加载
+  // 所有项目的任务文件（渐进分批），否则今日视图首次进入为空，只有手动点开项目才拉取
+  // 数据（跨设备新增的今日任务也会一直不出现）。
+  // 已有完整缓存时只刷「今日相关」项目 + 未分类，避免重复进入时全量下载几百个项目的
+  // tasks/trash/repeats 数据包（OSS 请求/内存风暴）。
+  const allIds = [...projects.projects.map((p) => p.id), UNCATEGORIZED]
+  const cachedIds = await tasks.loadFromIdb(allIds)
+  const fullyCached = allIds.every((id) => cachedIds.includes(id))
+  const todayIds = tasks.todayRelevantProjectIds(allIds)
+  const toLoad = fullyCached ? [...new Set([UNCATEGORIZED, ...todayIds])] : allIds
+  await tasks.loadAllProgressive(toLoad)
 })
 onUnmounted(() => {
+  setDragging(false)
   if (mobileActions) {
     mobileActions.newTask = null
     if (mobileActions.title === MOBILE_TITLE) mobileActions.title = ''
@@ -59,9 +69,24 @@ const filtered = computed(() => {
 })
 
 const sorted = computed(() => {
-  const pend = filtered.value.filter((t) => t.status === 'pending')
-  const done = filtered.value.filter((t) => t.status === 'completed')
-  return [...sortByEndTime(pend), ...sortByEndTime(done)]
+  const orderMap = new Map<string, number>()
+  tasks.todayOrder.forEach((id, idx) => orderMap.set(id, idx))
+  const byOrder = (a: Task, b: Task) => (orderMap.get(a.id) ?? 0) - (orderMap.get(b.id) ?? 0)
+  const fallback = (a: Task, b: Task) => {
+    const sa = a.sort ?? Number.MAX_SAFE_INTEGER
+    const sb = b.sort ?? Number.MAX_SAFE_INTEGER
+    if (sa !== sb) return sa - sb
+    return (a.endTime || '').localeCompare(b.endTime || '')
+  }
+  const group = (list: Task[]) => {
+    const registered = list.filter((t) => orderMap.has(t.id)).sort(byOrder)
+    const unregistered = list.filter((t) => !orderMap.has(t.id)).sort(fallback)
+    return [...registered, ...unregistered]
+  }
+  return [
+    ...group(filtered.value.filter((t) => t.status === 'pending')),
+    ...group(filtered.value.filter((t) => t.status === 'completed')),
+  ]
 })
 
 const todayDone = computed(() => filtered.value.filter((t) => t.status === 'completed').length)
@@ -74,34 +99,36 @@ const todayPct = computed(() =>
 const dragList = ref<Task[]>([])
 
 /** 统一拖拽参数（触屏 fallback 拖拽更丝滑） */
-const dragOptions = getDragOptions()
+const dragOptions = getDragOptions({ wholeCard: true })
+
+/**
+ * 今日可见任务的结构指纹（id:status:updatedAt）：
+ * 只跟踪影响列表结构的字段（增删 / 完成状态 / 可见性 / 内容更新时间），
+ * 避免 deep watch 在任意任务字段变化（如编辑子任务）时深遍历整个列表并全量重建；
+ * 任务内容的渲染由 TaskCard 直接响应任务对象的变化，无需重建 dragList。
+ */
+const visibleKey = computed(() => {
+  let key = ''
+  for (const t of tasks.all) {
+    if (isTaskVisibleToday(t, today)) key += `${t.id}:${t.status}:${t.updatedAt}\n`
+  }
+  return key
+})
 
 watch(
-  filtered,
+  [visibleKey, () => tasks.todayOrder],
   () => {
-    const next = sorted.value
-    const cur = dragList.value
-    // 同步合并可能带来「同 id 但内容已更新」的新对象；若仅 id/顺序相同但 updatedAt
-    // 已变，也必须刷新 dragList，否则要刷新浏览器才看得到新数据。
-    if (
-      cur.length === next.length &&
-      cur.every((t, i) => t.id === next[i].id && t.updatedAt === next[i].updatedAt)
-    )
-      return
-    const curIds = new Set(cur.map((t) => t.id))
-    // 用 next 里的新对象替换 cur 中同 id 的旧对象（保留手动拖拽顺序），新增的排到末尾
-    const kept = cur
-      .map((t) => next.find((n) => n.id === t.id))
-      .filter((t): t is Task => !!t)
-    const fresh = next.filter((n) => !curIds.has(n.id))
-    const pend = kept.filter((t) => t.status === 'pending')
-    const done = kept.filter((t) => t.status === 'completed')
-    cur.splice(0, cur.length, ...[...pend, ...sortByEndTime(fresh.filter((t) => t.status === 'pending')), ...done, ...sortByEndTime(fresh.filter((t) => t.status === 'completed'))])
+    dragList.value = sorted.value
   },
-  { immediate: true, deep: true },
+  { immediate: true },
 )
 
+function onDragStart() {
+  setDragging(true)
+}
+
 function onDragEnd() {
+  setDragging(false)
   const byProject = new Map<string, Task[]>()
   for (const t of dragList.value) {
     if (t.status !== 'pending') continue
@@ -129,6 +156,8 @@ function onDragEnd() {
     while (ai < arr.length) ordered.push(arr[ai++])
     tasks.setOrder(pid, ordered)
   }
+  const visibleIds = dragList.value.map((t) => t.id)
+  if (visibleIds.join('|') !== tasks.todayOrder.join('|')) tasks.setTodayOrder(visibleIds)
 }
 
 const projectOf = (id: string) => (id ? projects.byId(id) : undefined)
@@ -151,13 +180,16 @@ function openEdit(task: Task) {
   modalOpen.value = true
 }
 
-function onSaved(task: Task) {
-  tasks.upsert(task)
+function onSaved() {
   ui.toast('任务已保存')
 }
 
-function onToggle(id: string) {
-  tasks.toggleComplete(id)
+async function onToggle(id: string) {
+  const t = tasks.all.find((x) => x.id === id)
+  const completing = !!t && t.status !== 'completed'
+  const ok = await tasks.toggleCompleteConfirmed(id)
+  if (!ok) return
+  ui.toast(completing ? '任务已完成，已同步到服务端' : '已取消完成，已同步到服务端')
 }
 
 function onAddSubtask(task: Task) {
@@ -172,17 +204,7 @@ function onEditSubtask(task: Task, sub: Subtask) {
   modalOpen.value = true
 }
 
-function onSavedSubtask(parentTaskId: string, sub: Subtask) {
-  const task = tasks.all.find((t) => t.id === parentTaskId)
-  if (!task) return
-  const idx = task.subtasks.findIndex((s) => s.id === sub.id)
-  const isNewSub = idx < 0
-  if (idx >= 0) task.subtasks[idx] = sub
-  else task.subtasks.push(sub)
-  tasks.touchTask(parentTaskId, {
-    action: isNewSub ? '新增子任务' : '修改子任务',
-    detail: safeDetail(`子任务ID：${sub.id}，所属任务ID：${parentTaskId}`),
-  })
+function onSavedSubtask() {
   ui.toast('子任务已保存')
   // 保存子任务后退出子任务模式，避免“新建任务”按钮被劫持
   subtaskParent.value = null
@@ -202,10 +224,13 @@ function onDelete(id: string) {
   if (t) deleteTarget.value = t
 }
 
-function confirmDelete() {
-  if (deleteTarget.value) tasks.softDelete(deleteTarget.value.id)
+async function confirmDelete() {
+  if (!deleteTarget.value) return
+  const t = deleteTarget.value
+  // 确认按钮前端立即生效：关弹窗；保存结果由回显后的 toast 提示
   deleteTarget.value = null
-  ui.toast('已移入回收站')
+  const ok = await tasks.softDeleteConfirmed(t.id)
+  if (ok) ui.toast('已移入回收站')
 }
 </script>
 
@@ -260,7 +285,7 @@ function confirmDelete() {
       </div>
 
       <div class="mt-4">
-        <VueDraggable v-model="dragList" v-bind="dragOptions" handle=".task-drag-handle" item-key="id" class="space-y-2" @end="onDragEnd">
+        <VueDraggable v-model="dragList" v-bind="dragOptions" item-key="id" class="space-y-2" @start="onDragStart" @end="onDragEnd">
           <TaskCard
             v-for="t in dragList"
             :key="t.id"
@@ -303,4 +328,3 @@ function confirmDelete() {
     />
   </div>
 </template>
-

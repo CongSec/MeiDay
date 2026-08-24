@@ -2,14 +2,18 @@
 import { computed, onMounted, onUnmounted, provide, reactive, ref } from 'vue'
 import Sidebar from '@/components/Sidebar.vue'
 import ProjectModal from '@/components/ProjectModal.vue'
+import UploadIndicator from '@/components/UploadIndicator.vue'
 import ImportModal from '@/components/ImportModal.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useProjectsStore } from '@/stores/projects'
 import { useTasksStore } from '@/stores/tasks'
 import { useUiStore } from '@/stores/ui'
 import { useRouter } from 'vue-router'
+import { isDragging } from '@/utils/drag'
 import { useSync } from '@/composables/useSync'
-import type { Task } from '@/types'
+import { startSyncPoll, stopSyncPoll } from '@/composables/useSyncPoll'
+import { ensureLegalCalendar } from '@/utils/legalWorkday'
+import { UNCATEGORIZED, type Task } from '@/types'
 
 const auth = useAuthStore()
 const projects = useProjectsStore()
@@ -41,6 +45,7 @@ let touchStartY = 0
 let touchStartAt = 0
 let swipeOpen = false
 let pullTracking = false
+let pullY = 0
 
 /** 打开侧栏的最小横向滑动距离（“轻滑”即可触发） */
 const SWIPE_OPEN_DIST = 28
@@ -48,6 +53,10 @@ const SWIPE_OPEN_DIST = 28
 const SWIPE_HORIZONTAL_DIST = 20
 /** 允许的最大滑动时长（ms）：超过则视为慢拖，不触发开侧栏 */
 const SWIPE_MAX_DURATION = 800
+/** 下拉刷新的“开始接管”最小下拉距离(px)：小于它不拦截滚动，避免向下滚动列表时轻微抖动误触发刷新 */
+const PULL_ENGAGE_DIST = 10
+/** 下拉刷新只接管“快速下拉”：触摸后 300ms 内开始下移才算滚动；长按任务(≥300ms)后拖动属于拖拽排序，不触发刷新 */
+const PULL_ENGAGE_MS = 300
 
 /** 下拉刷新指示状态 */
 const refreshState = ref<'idle' | 'pulling' | 'ready' | 'refreshing'>('idle')
@@ -61,7 +70,7 @@ const mainEl = ref<HTMLElement | null>(null)
 
 /** 触摸点是否落在拖拽手柄等由 JS 全权控制的手势区 */
 function isGestureHandle(el: EventTarget | null): boolean {
-  return !!el && el instanceof HTMLElement && !!el.closest('.task-drag-handle, .drag-handle')
+  return !!el && el instanceof HTMLElement && !!el.closest('.drag-handle')
 }
 
 /** 触摸点是否在弹窗内（任务编辑/项目/导入/附件预览等 fixed inset-0 z-50 遮罩）：
@@ -114,6 +123,7 @@ function onDrawerTouchStart(e: TouchEvent) {
   if (swipeOpen && t.clientX < EDGE_BACK_ZONE && !isInteractive(e.target)) {
     if (e.cancelable) e.preventDefault()
   }
+  pullY = mainEl.value?.scrollTop ?? 0
   // 下拉刷新：抽屉关闭、页面滚动到顶部、非拖拽手柄/非同步中/非弹窗内
   pullTracking =
     !ui.drawerOpen &&
@@ -135,8 +145,21 @@ function onDrawerTouchMove(e: TouchEvent) {
   if (swipeOpen && dx > SWIPE_HORIZONTAL_DIST && Math.abs(dx) > Math.abs(dy)) {
     if (e.cancelable) e.preventDefault()
   }
-  // 下拉刷新：页面顶部向下拉动
-  if (pullTracking && dy > 0 && Math.abs(dy) > Math.abs(dx)) {
+  // 左滑关闭：抽屉打开时，一旦出现明确向左意图（dx<-阈值且横向占优）同样阻止浏览器默认手势，
+  // 保证左滑关闭流畅，也不会误触浏览器返回/前进手势。
+  if (ui.drawerOpen && dx < -SWIPE_HORIZONTAL_DIST && Math.abs(dx) > Math.abs(dy)) {
+    if (e.cancelable) e.preventDefault()
+  }
+  // 下拉刷新：页面顶部向下拉动（仅接管触摸后 300ms 内的“快速下拉”，
+  // 长按任务 ≥300ms 再拖动属于拖拽排序，不再触发刷新）
+  if (
+    !isDragging() &&
+    pullTracking &&
+    Date.now() - touchStartAt < PULL_ENGAGE_MS &&
+    dy > PULL_ENGAGE_DIST &&
+    Math.abs(dy) > Math.abs(dx) &&
+    (mainEl.value?.scrollTop ?? pullY) <= pullY
+  ) {
     if (e.cancelable) e.preventDefault()
     const dist = Math.min(dy * 0.45, 90)
     pullDist.value = dist
@@ -151,23 +174,27 @@ async function onDrawerTouchEnd(e: TouchEvent) {
   const dy = t.clientY - touchStartY
   const dt = Date.now() - touchStartAt
   const horizontal = Math.abs(dx) >= Math.abs(dy)
+  // 长按拖拽中（任务整卡拖动）不触发开侧栏/下拉刷新，交给 vue-draggable-plus 处理
+  const dragging = isDragging()
 
-  // 全局右滑开侧栏（任意位置向右轻滑即开）/ 抽屉打开时在右侧遮罩左滑关闭
-  if (swipeOpen && horizontal && dx > SWIPE_OPEN_DIST && dt <= SWIPE_MAX_DURATION) {
-    ui.openDrawer()
-  } else if (ui.drawerOpen && horizontal && dx < 0 && touchStartX > 256 && dt <= SWIPE_MAX_DURATION) {
-    ui.closeDrawer()
-  }
+  if (!dragging) {
+    // 全局右滑开侧栏（任意位置向右轻滑即开）/ 抽屉打开时左滑关闭（侧栏内或遮罩上均可）
+    if (swipeOpen && horizontal && dx > SWIPE_OPEN_DIST && dt <= SWIPE_MAX_DURATION) {
+      ui.openDrawer()
+    } else if (ui.drawerOpen && horizontal && dx < 0 && dt <= SWIPE_MAX_DURATION) {
+      ui.closeDrawer()
+    }
 
-  // 下拉刷新：松手时达到阈值即触发同步
-  if (pullTracking) {
-    if (refreshState.value === 'ready' && !syncing.value) {
-      refreshState.value = 'refreshing'
-      pullDist.value = 44
-      void doRefresh()
-    } else {
-      refreshState.value = 'idle'
-      pullDist.value = 0
+    // 下拉刷新：松手时达到阈值即触发同步
+    if (pullTracking) {
+      if (refreshState.value === 'ready' && !syncing.value) {
+        refreshState.value = 'refreshing'
+        pullDist.value = 44
+        void doRefresh()
+      } else {
+        refreshState.value = 'idle'
+        pullDist.value = 0
+      }
     }
   }
 
@@ -186,6 +213,8 @@ onUnmounted(() => {
   document.removeEventListener('touchstart', onDrawerTouchStart)
   document.removeEventListener('touchmove', onDrawerTouchMove)
   document.removeEventListener('touchend', onDrawerTouchEnd)
+  // 离开主界面（登出/跳登录）即停止同步轮询
+  stopSyncPoll()
 })
 
 onMounted(async () => {
@@ -209,7 +238,15 @@ onMounted(async () => {
 
 async function bootstrap() {
   await projects.load()
-  await tasks.loadFromIdb(projects.projects.map((p) => p.id))
+  // 未分类任务（today.json）一并恢复缓存，侧栏角标/今日计数在进入今日视图前也准确
+  await tasks.loadFromIdb([...projects.projects.map((p) => p.id), UNCATEGORIZED])
+  // 今日任务跨项目顺序表：先从本地缓存恢复（不访问 OSS），再交由同步轮询刷新
+  await tasks.loadTodayOrder()
+  // 登录/自动解锁完成后启动同步协调轮询（幂等）
+  startSyncPoll()
+  // 预取今年/明年的法定节假日安排（重复任务「每个法定工作日」用），失败静默走内置兜底
+  void ensureLegalCalendar(new Date().getFullYear())
+  void ensureLegalCalendar(new Date().getFullYear() + 1)
 }
 
 async function onUnlock() {
@@ -243,10 +280,11 @@ function newProject() {
   projectModalOpen.value = true
 }
 
-function onImported(list: Task[]) {
-  tasks.bulkAdd(list)
+async function onImported(list: Task[]) {
   const subCount = list.reduce((n, t) => n + t.subtasks.length, 0)
-  ui.toast(`已导入 ${list.length} 个任务${subCount ? `（含 ${subCount} 个子任务）` : ''}`)
+  // 确认式导入：涉及项目的任务全部落盘成功才提示（失败时 store 已回滚并弹错误提示）
+  const ok = await tasks.bulkAddConfirmed(list)
+  if (ok) ui.toast(`已导入 ${list.length} 个任务${subCount ? `（含 ${subCount} 个子任务）` : ''}`)
 }
 </script>
 
@@ -378,15 +416,16 @@ function onImported(list: Task[]) {
       <div
         v-for="t in ui.toasts"
         :key="t.id"
-        class="px-4 py-2 rounded-lg shadow-lg text-sm text-white"
+        class="px-4 py-2 rounded-lg shadow-lg text-sm text-white cursor-pointer"
         :class="t.type === 'ok' ? 'bg-slate-800' : 'bg-red-500'"
+        title="点击关闭"
+        @click="ui.dismiss(t.id)"
       >
         {{ t.text }}
       </div>
     </div>
+    <UploadIndicator />
   </div>
 </template>
-
-
 
 

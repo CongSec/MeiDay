@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
-    "build:web": "vue-tsc --noEmit && vite build --mode web",
+    "build": "vue-tsc --noEmit && vite build && node scripts/clean-sourcemaps.mjs",
+    "build:web": "vue-tsc --noEmit && vite build --mode web && node scripts/clean-sourcemaps.mjs",
     "preview": "vite preview",
     "cert": "node gen-cert.mjs",
     "apk:sync": "npm run build && cap sync android",

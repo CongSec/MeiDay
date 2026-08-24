@@ -2,7 +2,7 @@
 import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { VueDraggable } from 'vue-draggable-plus'
-import { getDragOptions } from '@/utils/drag'
+import { getDragOptions, setDragging } from '@/utils/drag'
 import { useProjectsStore } from '@/stores/projects'
 import { useTasksStore } from '@/stores/tasks'
 import { useUiStore } from '@/stores/ui'
@@ -11,7 +11,6 @@ import TaskModal from '@/components/TaskModal.vue'
 import ProjectModal from '@/components/ProjectModal.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import type { Subtask, Task } from '@/types'
-import { safeDetail } from '@/utils/audit'
 import { useSync } from '@/composables/useSync'
 
 const route = useRoute()
@@ -46,7 +45,7 @@ const progressPct = computed(() =>
 const dragList = ref<Task[]>([])
 
 /** 统一拖拽参数（触屏 fallback 拖拽更丝滑） */
-const dragOptions = getDragOptions()
+const dragOptions = getDragOptions({ wholeCard: true })
 
 watch(
   pending,
@@ -64,7 +63,12 @@ watch(
   { immediate: true },
 )
 
+function onDragStart() {
+  setDragging(true)
+}
+
 function onDragEnd() {
+  setDragging(false)
   const full = tasks.tasks[projectId.value] ?? []
   const done = full.filter((t) => t.status !== 'pending')
   tasks.setOrder(projectId.value, [...dragList.value, ...done])
@@ -80,13 +84,23 @@ onMounted(async () => {
     mobileActions.newTask = () => openNew()
   }
   if (!projects.loaded) await projects.load()
+  tasks.pinViewProject(projectId.value)
   await tasks.loadProject(projectId.value)
 })
 onUnmounted(() => {
+  setDragging(false)
+  tasks.unpinViewProject(projectId.value)
   if (mobileActions) {
     mobileActions.newTask = null
     if (mobileActions.title === mobileTitle) mobileActions.title = ''
   }
+})
+
+// 同一项目页组件被复用时（项目 A -> 项目 B 直接切换），重新固定并加载新项目
+watch(projectId, (id, oldId) => {
+  if (oldId) tasks.unpinViewProject(oldId)
+  tasks.pinViewProject(id)
+  void tasks.loadProject(id)
 })
 
 /** 手机端头部标题跟随项目名（重命名后同步更新） */
@@ -118,13 +132,16 @@ function openEdit(task: Task) {
   taskModalOpen.value = true
 }
 
-function onSaved(task: Task) {
-  tasks.upsert(task)
+function onSaved() {
   ui.toast('任务已保存')
 }
 
-function onToggle(id: string) {
-  tasks.toggleComplete(id)
+async function onToggle(id: string) {
+  const t = tasks.all.find((x) => x.id === id)
+  const completing = !!t && t.status !== 'completed'
+  const ok = await tasks.toggleCompleteConfirmed(id)
+  if (!ok) return
+  ui.toast(completing ? '任务已完成，已同步到服务端' : '已取消完成，已同步到服务端')
 }
 
 function onAddSubtask(task: Task) {
@@ -139,17 +156,7 @@ function onEditSubtask(task: Task, sub: Subtask) {
   taskModalOpen.value = true
 }
 
-function onSavedSubtask(parentTaskId: string, sub: Subtask) {
-  const task = tasks.all.find((t) => t.id === parentTaskId)
-  if (!task) return
-  const idx = task.subtasks.findIndex((s) => s.id === sub.id)
-  const isNewSub = idx < 0
-  if (idx >= 0) task.subtasks[idx] = sub
-  else task.subtasks.push(sub)
-  tasks.touchTask(parentTaskId, {
-    action: isNewSub ? '新增子任务' : '修改子任务',
-    detail: safeDetail(`子任务ID：${sub.id}，所属任务ID：${parentTaskId}`),
-  })
+function onSavedSubtask() {
   ui.toast('子任务已保存')
   // 保存子任务后退出子任务模式，避免“新建任务”按钮被劫持
   subtaskParent.value = null
@@ -175,16 +182,21 @@ function askTrashProject() {
 
 async function confirmTrashProject() {
   if (!project.value) return
-  await projects.deleteProject(project.value.id)
+  const p = project.value
+  // 确认按钮前端立即生效：关弹窗 + 跳转；保存结果由回显后的 toast 提示
   trashProjectOpen.value = false
-  ui.toast('项目已移入回收站，可在回收站恢复')
   router.push('/today')
+  const ok = await projects.deleteProject(p.id)
+  if (ok) ui.toast('项目已移入回收站，可在回收站恢复')
 }
 
-function confirmDelete() {
-  if (deleteTarget.value) tasks.softDelete(deleteTarget.value.id)
+async function confirmDelete() {
+  if (!deleteTarget.value) return
+  const t = deleteTarget.value
+  // 确认按钮前端立即生效：关弹窗；保存结果由回显后的 toast 提示
   deleteTarget.value = null
-  ui.toast('已移入回收站')
+  const ok = await tasks.softDeleteConfirmed(t.id)
+  if (ok) ui.toast('已移入回收站')
 }
 </script>
 
@@ -246,7 +258,7 @@ function confirmDelete() {
       </div>
 
       <div class="mt-4">
-        <VueDraggable v-model="dragList" v-bind="dragOptions" handle=".task-drag-handle" item-key="id" class="space-y-2" @end="onDragEnd">
+        <VueDraggable v-model="dragList" v-bind="dragOptions" item-key="id" class="space-y-2" @start="onDragStart" @end="onDragEnd">
           <TaskCard
             v-for="t in dragList"
             :key="t.id"

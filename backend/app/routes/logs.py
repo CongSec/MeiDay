@@ -25,14 +25,15 @@ def get_logs(
     username: str = Depends(get_username),
     action: str = Query(default="", description="按行为过滤"),
     ip: str = Query(default="", description="按 IP 过滤"),
+    high_risk: str = Query(default="", description="高危过滤：空=全部，1=仅高危，0=仅非高危"),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
-    """按时间倒序返回【当前登录用户自己】的操作日志，支持 行为/IP 过滤与分页。
+    """按时间倒序返回【当前登录用户自己】的操作日志，支持 行为/IP/高危 过滤与分页。
 
     权限隔离：强制以当前会话用户过滤，其他用户（含其注册/登录等）的日志不可见。
     """
-    rows, total = query_logs(username=username, action=action, ip=ip, limit=limit, offset=offset)
+    rows, total = query_logs(username=username, action=action, ip=ip, high_risk=high_risk, limit=limit, offset=offset)
     return {"total": total, "offset": offset, "limit": limit, "items": rows}
 
 
@@ -46,6 +47,21 @@ def get_log_actions(username: str = Depends(get_username)):
             (username,),
         ).fetchall()
     return {"items": [{"action": r["action"], "count": r["cnt"]} for r in rows]}
+
+
+@router.get("/logs/ips")
+def get_log_ips(username: str = Depends(get_username)):
+    """【当前登录用户自己】出现过的 IP 及次数（用于前端 IP 分类筛选下拉）。
+
+    与 /logs/actions 同构：按 IP 分组统计、倒序，空 IP 不参与分类。
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT ip, COUNT(*) AS cnt FROM audit_logs "
+            "WHERE username=? AND ip <> '' GROUP BY ip ORDER BY cnt DESC",
+            (username,),
+        ).fetchall()
+    return {"items": [{"ip": r["ip"], "count": r["cnt"]} for r in rows]}
 
 
 @router.post("/logs/client")

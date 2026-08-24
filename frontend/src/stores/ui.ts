@@ -45,5 +45,8 @@ export const useUiStore = defineStore('ui', {
         this.toasts = this.toasts.filter((t) => t.id !== id)
       }, 2600)
     },
+    dismiss(id: number) {
+      this.toasts = this.toasts.filter((t) => t.id !== id)
+    },
   },
 })

@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useProjectsStore } from '@/stores/projects'
 import { useAuthStore } from '@/stores/auth'
+import { useTasksStore } from '@/stores/tasks'
+import { useUiStore } from '@/stores/ui'
 import { fromLocalInput, nowIso, toLocalInput } from '@/utils/time'
-import { deleteAttachments, downloadAttachment, formatSize, isPreviewable, uploadAttachment } from '@/utils/attachments'
+import { deleteAttachments, downloadAttachment, formatSize, isPreviewable } from '@/utils/attachments'
+import { cancelSessionUploads, cancelUploadByMetaId, commitUploads, enqueueUploads, getActiveUploadCount, subscribeUploads, type BackgroundUploadState } from '@/utils/backgroundUpload'
 import AttachmentPreviewModal from './AttachmentPreviewModal.vue'
 import { REPEAT_TYPES } from '@/types'
+import { ensureLegalCalendar } from '@/utils/legalWorkday'
 import type { AttachmentMeta, RepeatRule, RepeatType, Subtask, Task } from '@/types'
 
 const props = defineProps<{
@@ -27,7 +31,18 @@ const emit = defineEmits<{
 }>()
 
 const projects = useProjectsStore()
+const tasks = useTasksStore()
 const auth = useAuthStore()
+const ui = useUiStore()
+/** 记住「上次新建任务时选择的项目」：按用户记忆到 localStorage（今日视图新建任务默认用它，不再固定用第一个项目） */
+const lastProjectKey = computed(() => `st_last_project:${auth.username}`)
+function lastProjectId(): string {
+  const id = localStorage.getItem(lastProjectKey.value)
+  return id && projects.projects.some((p) => p.id === id) ? id : ''
+}
+function rememberProject(id: string) {
+  if (id) localStorage.setItem(lastProjectKey.value, id)
+}
 
 const name = ref('')
 const description = ref('')
@@ -45,6 +60,9 @@ const repeatInterval = ref(1)
 const repeatWeekdays = ref<number[]>([])
 const repeatMonthDay = ref(1)
 const repeatEndAfter = ref('')
+// 打开任务编辑即可预取法定节假日安排（编辑重复任务的「每个法定工作日」时用）
+void ensureLegalCalendar(new Date().getFullYear())
+void ensureLegalCalendar(new Date().getFullYear() + 1)
 const monthDayTouched = ref(false)
 const WEEKDAY_SHORT = ['日', '一', '二', '三', '四', '五', '六']
 
@@ -60,15 +78,38 @@ const originalIds = ref<Set<string>>(new Set())
 /** 本次打开弹窗中被移除的附件（仅在保存时真正删除 OSS 文件；取消保存则保留） */
 const removedAttachments = ref<AttachmentMeta[]>([])
 const savedFlag = ref(false)
+/** 保存已提交（后台写 OSS 中）：仅用于防重复提交，弹窗已立即关闭 */
+const saving = ref(false)
 const uploading = ref(false)
+const activeUploadCount = ref(0)
+/** 附件后台上传队列的会话标识：每次打开弹窗一个新会话（选择文件即入队上传，保存不等待） */
+const sessionUid = ref('')
+let unsubUploads: (() => void) | null = null
+/** 新子任务在打开弹窗时生成 id（附件上传归属与最终保存共用，避免保存时才确定） */
+const localSubtaskId = ref('')
 const uploadErr = ref('')
 const previewMeta = ref<AttachmentMeta | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
+/** 描述文本框引用：内容变多时自动增高 */
+const descriptionRef = ref<HTMLTextAreaElement | null>(null)
+
+/** 描述文本框随内容自动增高（上限 200px，超出出现滚动条） */
+function autoResizeDescription() {
+  const el = descriptionRef.value
+  if (!el) return
+  el.style.height = 'auto'
+  el.style.height = `${Math.min(el.scrollHeight, 200)}px`
+}
 
 watch(
   () => props.open,
   (v) => {
     if (!v) return
+    // 新会话：重置后台上传队列订阅（旧会话已由保存/取消清理，这里只换订阅）
+    sessionUid.value = crypto.randomUUID()
+    unsubUploads?.()
+    unsubUploads = subscribeUploads(sessionUid.value, onBackgroundUpload)
+    uploading.value = false
     const isSub = !!props.subtaskMode
     const t = isSub ? null : props.task
     const s = isSub ? props.subtask : null
@@ -79,7 +120,10 @@ watch(
       : toLocalInput(t?.startTime) || (t ? '' : props.initialStart ?? '')
     end.value = toLocalInput(isSub ? s?.endTime : t?.endTime)
     reminder.value = toLocalInput(isSub ? s?.reminderTime : t?.reminderTime)
-    projectId.value = t?.projectId ?? props.projectId ?? projects.projects[0]?.id ?? ''
+    projectId.value =
+      t?.projectId ??
+      props.projectId ??
+      (lastProjectId() || (projects.projects[0]?.id ?? ''))
     status.value = t?.status === 'completed' ? 'completed' : 'pending'
     const r = isSub ? null : (t?.repeat ?? null)
     repeatEnabled.value = !!r
@@ -92,11 +136,13 @@ watch(
     err.value = ''
     uploadErr.value = ''
     localTaskId.value = t?.id ?? crypto.randomUUID()
+    localSubtaskId.value = isSub ? (s?.id ?? crypto.randomUUID()) : ''
     attachments.value = [...(isSub ? (s?.attachments ?? []) : (t?.attachments ?? []))]
     originalIds.value = new Set(attachments.value.map((a) => a.id))
     removedAttachments.value = []
     savedFlag.value = false
     previewMeta.value = null
+    void nextTick(autoResizeDescription)
   },
 )
 
@@ -111,35 +157,52 @@ watch(repeatType, (t) => {
   }
 })
 
+/** 纯关闭弹窗（不清理附件；保存提交后立即调用） */
 function close() {
-  // 未保存就关闭：把本次新上传（不在原附件列表中）的 OSS 文件清理掉，避免残留孤文件
-  if (!savedFlag.value && auth.creds) {
-    const newOnes = attachments.value.filter((a) => !originalIds.value.has(a.id))
-    if (newOnes.length) void deleteAttachments(auth.creds, newOnes)
-  }
-  savedFlag.value = false
   emit('update:open', false)
+}
+
+/** 用户主动取消（点取消/空白处）：关闭并清理本次新上传的孤文件（未保存的编辑不保留） */
+function cancel() {
+  // 正在保存时视为提交后的关闭，附件属于正在保存的任务，不清理
+  if (saving.value) {
+    close()
+    return
+  }
+  // 取消：停止本次会话的后台上传并清理孤文件（未保存的编辑不保留）
+  cancelSessionUploads(sessionUid.value)
+  cleanupNewUploads()
+  savedFlag.value = false
+  close()
+}
+
+/** 清理本次打开弹窗中新上传但未保存（或保存失败）的 OSS 孤文件 */
+function cleanupNewUploads() {
+  if (!auth.creds) return
+  const newOnes = attachments.value.filter((a) => !originalIds.value.has(a.id))
+  if (newOnes.length) void deleteAttachments(auth.creds, newOnes)
 }
 
 /** 编辑已有主任务时移入回收站：先关弹窗，由父组件弹出确认框 */
 function askDelete() {
   if (props.subtaskMode || !props.task) return
   const id = props.task.id
-  close()
+  cancel()
   emit('delete', id)
 }
 
 const MAX_ATTACH_SIZE = 50 * 1024 * 1024 // 单个附件最大 50MB
 const MAX_ATTACH_COUNT = 10 // 每个任务最多 10 个附件
 
-async function onPickFiles(e: Event) {
+function onPickFiles(e: Event) {
   const input = e.target as HTMLInputElement
   const files = Array.from(input.files ?? [])
   if (!files.length) return
-  uploading.value = true
   uploadErr.value = ''
   try {
-    if (!auth.creds || !auth.username) throw new Error('缺少会话信息，请重新登录')
+    const creds = auth.creds
+    const username = auth.username
+    if (!creds || !username) throw new Error('缺少会话信息，请重新登录')
     if (!taskIdForAtt.value) throw new Error('任务尚未创建，请先保存任务后再添加附件')
     // BUG-28: 限制附件大小与数量，避免大文件全量 base64 进内存导致浏览器卡死
     const oversized = files.find((f) => f.size > MAX_ATTACH_SIZE)
@@ -147,16 +210,43 @@ async function onPickFiles(e: Event) {
     if (attachments.value.length + files.length > MAX_ATTACH_COUNT) {
       throw new Error(`单个任务最多 ${MAX_ATTACH_COUNT} 个附件`)
     }
-    for (const f of files) {
-      const meta = await uploadAttachment(auth.creds, auth.username, taskIdForAtt.value, f)
-      attachments.value.push(meta)
-    }
+    // 选中的文件立即进入后台队列上传（不阻塞弹窗操作）；保存任务时未传完的部分由
+    // 队列继续上传，完成后写回任务 JSON 并统一提示“文件上传成功，任务保存成功”
+    enqueueUploads(
+      files.map((f) => ({
+        id: crypto.randomUUID(),
+        uid: sessionUid.value,
+        creds,
+        username,
+        file: f,
+        taskId: taskIdForAtt.value,
+        subtaskId: props.subtaskMode ? (props.subtask?.id ?? localSubtaskId.value) : null,
+        projectId: props.subtaskMode ? (props.parentTask?.projectId ?? '') : projectId.value,
+      })),
+    )
+    refreshUploading()
   } catch (err) {
     uploadErr.value = (err as Error).message || '上传失败'
   } finally {
-    uploading.value = false
     input.value = ''
   }
+}
+
+/** 后台队列状态变化：把完成的上传加入附件展示列表；失败在未保存前显示行内错误 */
+function onBackgroundUpload(item: BackgroundUploadState) {
+  if (item.uid !== sessionUid.value) return
+  if (item.state === 'done' && item.meta) {
+    const meta = item.meta
+    if (!attachments.value.some((a) => a.id === meta.id)) attachments.value.push(meta)
+  } else if (item.state === 'failed' && !item.committed) {
+    uploadErr.value = item.error || '上传失败'
+  }
+  refreshUploading()
+}
+
+function refreshUploading() {
+  activeUploadCount.value = getActiveUploadCount(sessionUid.value)
+  uploading.value = activeUploadCount.value > 0
 }
 
 function removeAttachment(a: AttachmentMeta) {
@@ -164,6 +254,8 @@ function removeAttachment(a: AttachmentMeta) {
   // 避免“删除→取消”就把云端附件删掉（BUG-16）
   attachments.value = attachments.value.filter((x) => x.id !== a.id)
   removedAttachments.value.push(a)
+  // 该附件若仍在后台队列（未保存前删除）：取消对应上传并清理孤文件
+  cancelUploadByMetaId(sessionUid.value, a.id)
 }
 
 function preview(a: AttachmentMeta) {
@@ -218,7 +310,11 @@ function validateTimes(start: string, end: string, reminder: string): string | n
   return null
 }
 
-function submit() {
+async function submit() {
+  // 确认式保存进行中，禁止重复提交
+  if (saving.value) return
+  // 快照本次保存时“已上传完成”的附件 id：尚未传完的不在保存 JSON 中，由后台队列写回
+  const savedMetaIds = new Set(attachments.value.map((a) => a.id))
   if (props.subtaskMode) {
     if (!name.value.trim()) {
       err.value = '请输入子任务名称'
@@ -231,7 +327,7 @@ function submit() {
     }
     const now = nowIso()
     const sub: Subtask = {
-      id: props.subtask?.id ?? crypto.randomUUID(),
+      id: props.subtask?.id ?? localSubtaskId.value,
       name: name.value.trim(),
       description: description.value,
       startTime: fromLocalInput(start.value),
@@ -242,9 +338,26 @@ function submit() {
       updatedAt: now,
       attachments: attachments.value,
     }
-    savedFlag.value = true
-    emit('savedSubtask', props.parentTask?.id ?? '', sub)
-    close()
+    // 点保存立即关闭弹窗；提示由回显后的 toast 负责（成功才提示，失败回滚并弹错误提示）
+    saving.value = true
+    emit('update:open', false)
+    try {
+      const ok = await tasks.saveSubtaskConfirmed(props.parentTask?.id ?? '', sub)
+      if (!ok) {
+        // 保存失败：store 已弹错误提示，这里清理本次新上传的孤文件并停止后台上传
+        cleanupNewUploads()
+        cancelSessionUploads(sessionUid.value)
+        return
+      }
+      // 保存成功：未传完的附件由后台队列继续上传，完成后写回子任务 JSON 并统一提示
+      commitUploads(sessionUid.value, { projectId: props.parentTask?.projectId ?? '', savedMetaIds })
+      const remainingUploads = getActiveUploadCount(sessionUid.value)
+      if (remainingUploads > 0) ui.toast(`附件后台继续上传中（剩余 ${remainingUploads} 个）`)
+      savedFlag.value = true
+      emit('savedSubtask', props.parentTask?.id ?? '', sub)
+    } finally {
+      saving.value = false
+    }
     return
   }
   if (!name.value.trim()) {
@@ -278,10 +391,6 @@ function submit() {
     subtasks: props.task?.subtasks ?? [],
     attachments: attachments.value,
   }
-  // BUG-16: 真正删除“本次移除”的附件 OSS 文件（取消保存时不会走到这里）
-  if (removedAttachments.value.length && auth.creds) {
-    void deleteAttachments(auth.creds, removedAttachments.value)
-  }
   // 重复任务：生成规则写入任务（仅主任务模式；子任务不支持重复）
   let repeat: RepeatRule | undefined
   if (repeatEnabled.value) {
@@ -298,10 +407,38 @@ function submit() {
     if (repeatEndAfter.value) repeat.endAfter = repeatEndAfter.value
   }
   task.repeat = repeat
-  savedFlag.value = true
-  emit('saved', task)
-  close()
+  // 记住新建任务时选择的项目：下次在今日视图新建任务时默认用它
+  if (!props.task) rememberProject(task.projectId)
+  // 点保存立即关闭弹窗；提示由回显后的 toast 负责（成功才提示，失败回滚并弹错误提示）
+  saving.value = true
+  emit('update:open', false)
+  try {
+    const ok = await tasks.saveTaskConfirmed(task)
+    if (!ok) {
+      // 保存失败：store 已弹错误提示，这里清理本次新上传的孤文件并停止后台上传
+      cleanupNewUploads()
+      cancelSessionUploads(sessionUid.value)
+      return
+    }
+    // BUG-16: 真正删除“本次移除”的附件 OSS 文件（确认保存成功后才执行）
+    if (removedAttachments.value.length && auth.creds) {
+      void deleteAttachments(auth.creds, removedAttachments.value)
+    }
+    // 保存成功：未传完的附件由后台队列继续上传，完成后写回任务 JSON 并统一提示
+    commitUploads(sessionUid.value, { projectId: task.projectId, savedMetaIds })
+    const remainingUploads = getActiveUploadCount(sessionUid.value)
+    if (remainingUploads > 0) ui.toast(`附件后台继续上传中（剩余 ${remainingUploads} 个）`)
+    savedFlag.value = true
+    emit('saved', task)
+  } finally {
+    saving.value = false
+  }
 }
+onUnmounted(() => {
+  unsubUploads?.()
+  // 弹窗被卸载时清理尚未提交保存的上传（已提交保存的继续后台完成，不受影响）
+  cancelSessionUploads(sessionUid.value)
+})
 </script>
 
 <template>
@@ -309,7 +446,7 @@ function submit() {
     v-if="open"
     class="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center px-3 py-3"
     title="点击空白处取消编辑"
-    @click.self="close"
+    @click.self="cancel"
   >
     <div class="bg-white rounded-xl shadow-xl p-4 w-full max-w-xl max-h-[96dvh] overflow-y-auto">
       <div class="text-base font-semibold">
@@ -328,11 +465,13 @@ function submit() {
         <div>
           <label class="text-xs text-slate-500 block mb-0.5">描述</label>
           <textarea
+            ref="descriptionRef"
             v-model="description"
             rows="1"
             maxlength="5000"
-            class="w-full border rounded-lg px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-brand/50 resize-none"
+            class="w-full border rounded-lg px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-brand/50 resize-none max-h-[200px] overflow-y-auto"
             placeholder="可选"
+            @input="autoResizeDescription"
           />
         </div>
         <div class="grid grid-cols-2 gap-2">
@@ -415,7 +554,8 @@ function submit() {
               :disabled="uploading"
               @click="fileInput?.click()"
             >
-              {{ uploading ? '上传中…' : '＋ 添加附件' }}
+              <template v-if="uploading">上传中…（剩余 {{ activeUploadCount }}）</template>
+              <template v-else>＋ 添加附件</template>
             </button>
           </div>
           <input ref="fileInput" type="file" multiple class="hidden" @change="onPickFiles" />
@@ -468,11 +608,11 @@ function submit() {
             移入回收站
           </button>
           <div class="flex justify-end gap-2 ml-auto">
-            <button type="button" class="px-4 py-1.5 rounded-lg text-sm text-slate-600 hover:bg-slate-100" @click="close">
+            <button type="button" class="px-4 py-1.5 rounded-lg text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-50" :disabled="saving" @click="cancel">
               取消
             </button>
-            <button type="submit" class="px-4 py-1.5 rounded-lg text-sm text-white bg-brand hover:bg-brand-dark font-medium">
-              保存
+            <button type="submit" class="px-4 py-1.5 rounded-lg text-sm text-white bg-brand hover:bg-brand-dark font-medium disabled:opacity-60" :disabled="saving">
+              {{ saving ? '保存中…' : '保存' }}
             </button>
           </div>
         </div>

@@ -4,9 +4,9 @@ import { createOssClient, describeOssError, paths } from '@/utils/oss'
 import { compareAndSwapPut, mergeStats, mergeStatsAfterSave, versionToken } from '@/utils/sync'
 import { enrichOssError } from '@/utils/ossDiag'
 import { idbGet, idbPut } from '@/utils/idb'
+import { queueSyncChange } from '@/utils/syncReport'
 import { nowIso, todayKey } from '@/utils/time'
 import type { UserStats } from '@/types'
-
 /**
  * 用户统计 store（全部存于用户 OSS 的 stats.json，不上服务器）。
  *
@@ -20,26 +20,20 @@ import type { UserStats } from '@/types'
  * tasks 记录当天每个任务的最近完成/取消状态，供多端冲突合并时逐任务去重；
  * firstProjectAt 取最早非空，天然安全且不丢历史。
  */
-
 let statsSaveTimer: number | undefined
-
 function emptyStats(): UserStats {
   return { daily: {}, updated_at: nowIso() }
 }
-
 function isServerEmptyError(e: unknown): boolean {
   const err = e as { code?: string | number }
   return err?.code === 'NoSuchKey' || err?.code === 'NoSuchBucket'
 }
-
 function cacheKey(username: string): string {
   return `stats:${username}`
 }
-
 function etagKey(username: string): string {
   return `etag:${username}:stats`
 }
-
 export const useStatsStore = defineStore('stats', {
   state: () => ({
     stats: null as UserStats | null,
@@ -76,7 +70,7 @@ export const useStatsStore = defineStore('stats', {
         return
       }
       try {
-        const client = createOssClient(auth.creds)
+        const client = await createOssClient(auth.creds)
         const etag = await idbGet<string>('kv', etagKey(auth.username))
         const res = await client.get(
           paths.stats(auth.username),
@@ -118,7 +112,7 @@ export const useStatsStore = defineStore('stats', {
     async save(snapshot?: UserStats) {
       const auth = useAuthStore()
       if (!auth.creds || !auth.username) return
-      const client = createOssClient(auth.creds)
+      const client = await createOssClient(auth.creds)
       let stats = (snapshot ?? this.stats ?? emptyStats())
       const key = paths.stats(auth.username)
       const eKey = etagKey(auth.username)
@@ -128,6 +122,7 @@ export const useStatsStore = defineStore('stats', {
           const result = await compareAndSwapPut<UserStats>(client, key, stats, knownEtag)
           if (result.ok) {
             if (result.etag) await idbPut('kv', eKey, result.etag)
+            queueSyncChange(auth.username, 'stats')
             await idbPut('kv', cacheKey(auth.username), stats)
             if (snapshot && this.stats) {
               // 快照保存成功不代表内存没有变化：远端合并结果只回填到未再改动的当天，
@@ -207,7 +202,6 @@ export const useStatsStore = defineStore('stats', {
     },
   },
 })
-
 // 页面隐藏/关闭前尽量落盘，减少“防抖 500ms 内关闭导致 OSS 未保存”
 if (typeof window !== 'undefined') {
   const onHide = () => {

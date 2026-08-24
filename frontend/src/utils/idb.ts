@@ -93,6 +93,11 @@ export async function idbClearUserCache(username: string): Promise<void> {
     tx.objectStore('profile').delete(username)
     // 统计缓存：key 为 `stats:{username}`
     idbDeletePrefix(tx.objectStore('kv'), `stats:${username}`)
+    // 同步游标：登出即清除，下次登录以全量同步为准（本地数据缓存已清空，增量会漏未变化项目）
+    idbDeletePrefix(tx.objectStore('kv'), `sync:version:${username}`)
+    // 注意：sync:pending:{username}（待发上报队列）刻意保留，登出时先尽力冲刷；
+    // 若当时离线，下次同账号登录会补报，避免其它设备漏掉这次变更。
+
     tx.oncomplete = () => resolve()
     tx.onerror = () => reject(tx.error)
   })

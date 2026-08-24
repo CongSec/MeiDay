@@ -1,49 +1,82 @@
-# Python
+# ===== Python =====
 __pycache__/
 *.py[cod]
 *.egg-info/
+*.egg
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.tox/
+.nox/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
 
-# 虚拟环境
+# ===== 虚拟环境 / 本地环境 =====
 .venv/
+venv/
+env/
 backend/.venv/
 
-# 后端运行产物
+# ===== 后端运行产物 =====
 backend/logs/
 backend/dev.db
 *.db
 *.db-journal
 *.db.bak*
 *.sqlite3
+*.pid
+*.seed
 
-# 前端依赖与构建产物
-frontend/node_modules/
+# ===== 前端依赖与构建产物 =====
+node_modules/
 frontend/dist/
 frontend/.vite/
+*.tsbuildinfo
 
-# Android 签名密钥与本地配置（不要提交）
+# ===== Android 构建产物与本地配置（不要提交）=====
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+*.hprof
+.gradle/
+build/
+local.properties
+keystore.properties
 *.jks
 *.keystore
-keystore.properties
-frontend/android/local.properties
+frontend/android/captures/
 frontend/android/app/google-services.json
 
-# 本地自签名证书
+# ===== 本地自签名证书 =====
 frontend/certs/
+*.pem
+*.key
 
-# 环境变量与密钥
+# ===== 环境变量与密钥 =====
 .env
 .env.*
 !.env.example
 
-# 日志
+# ===== 日志 =====
 *.log
+*.log.*
 
-# 编辑器 / 系统文件
+# ===== 编辑器 / IDE / 系统文件 =====
 .vscode/
 .idea/
+*.code-workspace
+.history/
+*.iml
 .DS_Store
 Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
 *.swp
+*.swo
+*~

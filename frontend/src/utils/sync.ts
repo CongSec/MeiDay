@@ -9,7 +9,7 @@ import type { DeletedProject, Profile, Project, StatsDailyEntry, StatsTaskDelta,
  * 的读-写模式，避免所有写入请求 400 失败。
  */
 
-export type CasResult<T> =
+type CasResult<T> =
   | { ok: true; etag: string }
   | { ok: false; reason: 'conflict'; remote: T | null; remoteEtag: string | null }
 
@@ -183,7 +183,7 @@ export async function compareAndSwapPut<T>(
 }
 
 /** 时间比较：a 比 b 新则 >0，相等则 =0，更旧则 <0 */
-export function compareTime(a: string, b: string): number {
+function compareTime(a: string, b: string): number {
   return (a || '').localeCompare(b || '')
 }
 
@@ -205,7 +205,7 @@ export function mergeTasks(local: Task[], remote: Task[]): Task[] {
   return [...byId.values()]
 }
 
-/** 合并多个“已删除任务”集合；同 id 保留 deletedAt/updatedAt 最新的 tombstone */
+/** 合并多个“已从活跃列表移除的任务”集合（回收站 tombstone：含已删除与已完成）；同 id 保留 updatedAt 最新的 tombstone */
 export function mergeDeletedTombstones(...groups: Task[][]): Task[] {
   const byId = new Map<string, Task>()
   for (const group of groups) {
@@ -233,7 +233,7 @@ export function applyDeletedTombstones(active: Task[], deleted: Task[]): Task[] 
 }
 
 /** 合并两个项目列表（按 id 去重，保留两侧全部项目；同 id 以远端为基准） */
-export function mergeProjects(local: Project[], remote: Project[]): Project[] {
+function mergeProjects(local: Project[], remote: Project[]): Project[] {
   const byId = new Map<string, Project>()
   for (const p of remote) byId.set(p.id, p)
   for (const p of local) {
@@ -250,7 +250,7 @@ export function applyDeletedProjectTombstones(active: Project[], deleted: Delete
 }
 
 /** 合并已删除项目列表（按 id 去重，同 id 以远端为基准） */
-export function mergeDeletedProjects(local: DeletedProject[], remote: DeletedProject[]): DeletedProject[] {
+function mergeDeletedProjects(local: DeletedProject[], remote: DeletedProject[]): DeletedProject[] {
   const byId = new Map<string, DeletedProject>()
   for (const p of remote) byId.set(p.id, p)
   for (const p of local) {

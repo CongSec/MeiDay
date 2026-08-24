@@ -45,6 +45,15 @@ LEGAL_CALENDAR: dict[int, dict[str, list[str]]] = {
 }
 
 
+# V-001 纵深防御：与前端 TaskModal.vue 输入上限一致。DB 中可能残留历史脏数据/
+# 被篡改的 repeat_rule（如超大 interval），会让 weekly 分支循环约 7n 次、或让
+# daily/monthly 分支日期溢出（年份超出 strptime 范围），此处直接按“无法推进”处理。
+_REPEAT_INTERVAL_MAX = 365
+# weekly 分支迭代预算：合法规则最坏 7*n+7 次（n<=365 时 <2563），预算 20000 留足余量；
+# 即使未来放宽 interval 上限，单次计算也始终有界。
+_REPEAT_MAX_ITER = 20000
+
+
 def add_days_key(date_key: str, days: int) -> str:
     dt = datetime.strptime(date_key, "%Y-%m-%d") + timedelta(days=days)
     return dt.strftime("%Y-%m-%d")
@@ -108,6 +117,9 @@ def next_legal_workday(date_key: str) -> str:
 def next_repeat_date(rule: dict, anchor: str) -> str | None:
     """计算严格晚于 anchor（YYYY-MM-DD）的下一个重复日期；无后续日期返回 None。"""
     n = max(1, int(rule.get("interval") or 1))
+    if n > _REPEAT_INTERVAL_MAX:
+        # V-001：超大 interval 会放大 weekly 循环次数/引发日期溢出，按“无法推进”处理
+        return None
     rtype = rule.get("type")
     if rtype == "daily":
         return add_days_key(anchor, n)
@@ -116,7 +128,7 @@ def next_repeat_date(rule: dict, anchor: str) -> str | None:
         if not wds:
             return add_days_key(anchor, 7 * n)
         anchor_week = diff_days_key("1970-01-01", anchor) // 7
-        for i in range(1, 7 * n + 8):
+        for i in range(1, min(7 * n + 8, _REPEAT_MAX_ITER + 1)):
             d = add_days_key(anchor, i)
             if weekday_of(d) not in wds:
                 continue

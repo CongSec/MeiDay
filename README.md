@@ -55,3 +55,14 @@ npm run apk:debug   # 生成调试 APK
 - 生产环境后端已关闭 Swagger/ReDoc/OpenAPI，`/docs`、`/redoc`、`/openapi.json` 均不可访问。
 - 前端生产构建关闭 sourcemap，避免源码映射泄露。
 - `.env.*`、签名密钥、证书、构建产物等均已加入 `.gitignore`，不要用 `git add -f` 强制提交。
+
+### 客户端 IP 记录（审计日志 / 安全邮件）
+
+- 后端默认用 TCP 连接对端地址记录 IP；网页版经 Nginx 同源反代访问时，对端恒为本机回环
+  127.0.0.1。为记录真实外网 IP，后端在【确认对端是受信代理】后才解析代理透传的
+  `X-Forwarded-For`（取最右侧条目，防客户端伪造），否则一律使用 TCP 对端地址。
+- Nginx 需透传真实 IP（本机反代默认生效）：`proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`
+  或 `proxy_set_header X-Real-IP $remote_addr;`（任一即可，优先 X-Forwarded-For）。
+- 默认信任本机回环（127.0.0.1/::1）；若反向代理部署在其它主机/网段，为后端设置环境变量
+  `TRUSTED_PROXIES`（英文逗号分隔的 IP 或 CIDR），如 `TRUSTED_PROXIES=10.0.0.0/8,192.168.1.10`。
+

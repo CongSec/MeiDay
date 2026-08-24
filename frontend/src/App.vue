@@ -3,6 +3,7 @@ import { onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { idbClearUserCache } from '@/utils/idb'
+import { stopSyncPoll } from '@/composables/useSyncPoll'
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -10,6 +11,7 @@ const router = useRouter()
 onMounted(() => {
   window.addEventListener('st:unauthorized', async () => {
     const username = auth.username
+    stopSyncPoll()
     auth.reset()
     // 401 时同样清理项目/任务内存，避免残留其它账号数据
     const { useTasksStore } = await import('@/stores/tasks')

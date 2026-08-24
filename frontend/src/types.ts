@@ -53,6 +53,8 @@ export interface Task {
   isReminded: boolean
   createdAt: string
   updatedAt: string
+  /** 排序位置（拖拽排序后写入；旧数据缺失时按截止时间排序） */
+  sort?: number
   /** 子任务列表（旧数据可能缺失，读取时统一补空数组） */
   subtasks: Subtask[]
   /** 附件列表（旧数据可能缺失，读取时统一补空数组） */
@@ -121,16 +123,6 @@ export interface CredFields {
   smtpPass: string
   notifyEmail: string
 }
-
-export const CRED_FIELDS: { key: keyof CredFields; label: string }[] = [
-  { key: 'ossAk', label: 'OSS AccessKey' },
-  { key: 'ossSk', label: 'OSS SecretKey' },
-  { key: 'bucket', label: 'OSS Bucket' },
-  { key: 'region', label: 'OSS Region' },
-  { key: 'smtpUser', label: '发件邮箱 (QQ)' },
-  { key: 'smtpPass', label: 'SMTP 授权码' },
-  { key: 'notifyEmail', label: '收件邮箱' },
-]
 
 /** 重复任务的“后备模板”：完成后不立刻生成下一次，而是先把下一次出现存成模板，
  *  等 dueDate（东八区 YYYY-MM-DD）当天再由前端物化为实际任务显示。

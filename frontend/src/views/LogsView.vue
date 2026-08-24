@@ -9,9 +9,12 @@ const items = ref<AuditLog[]>([])
 const total = ref(0)
 const loading = ref(false)
 const actions = ref<{ action: string; count: number }[]>([])
+const ips = ref<{ ip: string; count: number }[]>([])
 
 const action = ref('')
 const ip = ref('')
+/** 高危筛选：''=全部，'1'=仅高危，'0'=仅非高危 */
+const highRisk = ref<'' | '0' | '1'>('')
 const limit = ref(100)
 const offset = ref(0)
 const autoRefresh = ref(false)
@@ -43,6 +46,7 @@ async function load() {
     const r = await api.getLogs({
       action: action.value,
       ip: ip.value,
+      highRisk: highRisk.value,
       limit: limit.value,
       offset: offset.value,
     })
@@ -51,14 +55,23 @@ async function load() {
   } finally {
     loading.value = false
   }
-  // 同步刷新“全部行为”下拉计数，避免清空/刷新后括号里的数字对不上
-  await refreshActions()
+  // 同步刷新“全部行为 / IP”下拉计数，避免清空/刷新后括号里的数字对不上
+  await Promise.all([refreshActions(), refreshIps()])
 }
 
 async function refreshActions() {
   try {
     const r = await api.getLogActions()
     actions.value = r.items
+  } catch {
+    /* ignore */
+  }
+}
+
+async function refreshIps() {
+  try {
+    const r = await api.getLogIps()
+    ips.value = r.items
   } catch {
     /* ignore */
   }
@@ -210,12 +223,24 @@ onUnmounted(() => {
       </div>
       <div>
         <label class="text-[11px] text-slate-400 block mb-1">IP</label>
-        <input
-          v-model="ip"
-          class="w-40 border rounded-lg px-2.5 py-1.5 text-sm outline-none focus:ring-2 focus:ring-brand/50"
-          placeholder="如 127.0.0.1"
-          @keyup.enter="applyFilter"
-        />
+        <select v-model="ip" class="w-44 border rounded-lg px-2.5 py-1.5 text-sm bg-white" @change="applyFilter">
+          <option value="">全部IP</option>
+          <option v-for="i in ips" :key="i.ip" :value="i.ip">
+            {{ i.ip }}（{{ i.count }}）
+          </option>
+        </select>
+      </div>
+      <div>
+        <label class="text-[11px] text-slate-400 block mb-1">高危</label>
+        <select
+          v-model="highRisk"
+          class="w-28 border rounded-lg px-2.5 py-1.5 text-sm bg-white"
+          @change="applyFilter"
+        >
+          <option value="">全部</option>
+          <option value="1">🚨 仅高危</option>
+          <option value="0">仅非高危</option>
+        </select>
       </div>
       <div>
         <label class="text-[11px] text-slate-400 block mb-1">每页</label>

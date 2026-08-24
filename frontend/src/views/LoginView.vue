@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { api, type CaptchaResult } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
@@ -13,6 +14,31 @@ const confirm = ref('')
 const remember = ref(true)
 const err = ref('')
 const busy = ref(false)
+
+// 图形验证码（仅注册时需要）：图片来自后端，验证码单次使用、绑定 IP
+const captcha = ref<CaptchaResult | null>(null)
+const captchaCode = ref('')
+const captchaLoading = ref(false)
+
+async function loadCaptcha() {
+  if (captchaLoading.value) return
+  captchaLoading.value = true
+  try {
+    captcha.value = await api.getCaptcha()
+    captchaCode.value = ''
+  } catch (e) {
+    err.value = (e as Error).message || '验证码获取失败，请稍后重试'
+  } finally {
+    captchaLoading.value = false
+  }
+}
+
+function switchMode(m: 'login' | 'register') {
+  mode.value = m
+  err.value = ''
+  // 每次进入注册都刷新一张新验证码（旧的可能已被校验作废）
+  if (m === 'register') void loadCaptcha()
+}
 
 async function submit() {
   err.value = ''
@@ -29,17 +55,31 @@ async function submit() {
       err.value = '密码至少 8 位'
       return
     }
+    if (!captcha.value || !captchaCode.value.trim()) {
+      err.value = '请输入图形验证码'
+      return
+    }
   }
   busy.value = true
   try {
     if (mode.value === 'login') {
       await auth.login(username.value.trim(), password.value, remember.value)
     } else {
-      await auth.register({ username: username.value.trim(), password: password.value }, remember.value)
+      await auth.register(
+        {
+          username: username.value.trim(),
+          password: password.value,
+          captchaId: captcha.value!.id,
+          captchaCode: captchaCode.value.trim(),
+        },
+        remember.value,
+      )
     }
     router.push('/today')
   } catch (e) {
     err.value = (e as Error).message || '操作失败'
+    // 验证码单次使用：注册失败（验证码错/已过期/重名等）后刷新一张新图
+    if (mode.value === 'register') void loadCaptcha()
   } finally {
     busy.value = false
   }
@@ -61,14 +101,14 @@ async function submit() {
         <button
           class="py-1.5 rounded-md font-medium transition"
           :class="mode === 'login' ? 'bg-white text-brand shadow-sm' : 'text-slate-500'"
-          @click="mode = 'login'; err = ''"
+          @click="switchMode('login')"
         >
           登录
         </button>
         <button
           class="py-1.5 rounded-md font-medium transition"
           :class="mode === 'register' ? 'bg-white text-brand shadow-sm' : 'text-slate-500'"
-          @click="mode = 'register'; err = ''"
+          @click="switchMode('register')"
         >
           注册
         </button>
@@ -99,6 +139,31 @@ async function submit() {
           autocomplete="new-password"
           class="w-full border rounded-lg px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-brand/50"
         />
+        <div v-if="mode === 'register'" class="flex items-center gap-2">
+          <input
+            v-model="captchaCode"
+            name="captcha_code"
+            placeholder="验证码"
+            autocomplete="off"
+            maxlength="4"
+            class="w-full border rounded-lg px-3 py-2.5 text-sm uppercase tracking-widest outline-none focus:ring-2 focus:ring-brand/50"
+          />
+          <button
+            type="button"
+            class="shrink-0 h-11 w-24 rounded-lg border border-slate-200 overflow-hidden bg-white flex items-center justify-center"
+            :disabled="captchaLoading"
+            :title="captchaLoading ? '加载中…' : '点击刷新验证码'"
+            @click="loadCaptcha"
+          >
+            <img
+              v-if="captcha"
+              :src="captcha.image"
+              alt="验证码"
+              class="h-full w-full object-cover"
+            />
+            <span v-else class="text-[10px] text-slate-400">{{ captchaLoading ? '加载中…' : '点击获取' }}</span>
+          </button>
+        </div>
         <div v-if="err" class="text-sm text-red-500">{{ err }}</div>
         <label class="flex items-center gap-2 text-xs text-slate-500 select-none">
           <input type="checkbox" v-model="remember" class="accent-brand" />

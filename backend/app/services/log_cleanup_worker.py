@@ -2,11 +2,15 @@ import asyncio
 import logging
 
 from ..audit import delete_logs_older_than, get_log_retention_days, log_action
+from ..db import delete_sync_changes_older_than
 
 logger = logging.getLogger("easytask.log_cleanup")
 
 # 自动清理周期：每 6 小时一次（启动时立即执行一次）
 CLEANUP_INTERVAL_HOURS = 6
+# 同步协调中心事件保留期：7 天（离线设备用 full_sync 补拉；保留期内设备按增量对齐，
+# 避免超期后所有设备登录即全量下载）
+SYNC_CHANGES_RETENTION_HOURS = 7 * 24
 
 
 async def _run_cleanup_once() -> None:
@@ -14,6 +18,8 @@ async def _run_cleanup_once() -> None:
     try:
         days = get_log_retention_days()
         deleted = delete_logs_older_than(days)
+        # 同步协调中心的事件保留 7 天：离线设备靠 full_sync 全量补拉
+        delete_sync_changes_older_than(SYNC_CHANGES_RETENTION_HOURS)
         if deleted:
             log_action(
                 "自动清理过期日志",

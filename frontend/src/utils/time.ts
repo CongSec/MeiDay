@@ -27,21 +27,9 @@ export function dateKeyOf(iso: string): string {
   return iso.slice(0, 10)
 }
 
-export function formatDisplay(iso: string | null | undefined): string {
-  if (!iso) return '-'
-  const [, time] = iso.split('T')
-  return `${iso.slice(5, 10)} ${time ? time.slice(0, 5) : ''}`
-}
-
 export function formatTodayTitle(iso: string): string {
   const [, time] = iso.split('T')
   return `${iso.slice(5, 10)} ${time ? time.slice(0, 5) : ''}`
-}
-
-/** 仅用于展示，不改变语义（全程东八区，不做 UTC 转换） */
-export function isInRange(iso: string, startKey: string, endKey: string): boolean {
-  const k = dateKeyOf(iso)
-  return k >= startKey && k <= endKey
 }
 
 export function sortByEndTime<T extends { endTime: string }>(tasks: T[]): T[] {

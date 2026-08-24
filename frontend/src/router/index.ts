@@ -1,12 +1,14 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 import { getToken } from '@/api/client'
-import LoginView from '@/views/LoginView.vue'
-import LayoutView from '@/views/LayoutView.vue'
-import TodayView from '@/views/TodayView.vue'
-import ProjectView from '@/views/ProjectView.vue'
-import TrashView from '@/views/TrashView.vue'
-import SettingsView from '@/views/SettingsView.vue'
-import LogsView from '@/views/LogsView.vue'
+
+// 路由级按需加载：每个视图独立分包，首屏只加载当前页，减少首包体积与首屏解析耗时
+const LoginView = () => import('@/views/LoginView.vue')
+const LayoutView = () => import('@/views/LayoutView.vue')
+const TodayView = () => import('@/views/TodayView.vue')
+const ProjectView = () => import('@/views/ProjectView.vue')
+const TrashView = () => import('@/views/TrashView.vue')
+const SettingsView = () => import('@/views/SettingsView.vue')
+const LogsView = () => import('@/views/LogsView.vue')
 
 const router = createRouter({
   history: createWebHashHistory(),

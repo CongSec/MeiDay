@@ -71,7 +71,7 @@ export async function enrichOssError(e: unknown, fallback = describeOssError(e))
       region: creds.region,
     })
     ui.showOssError({
-      title: diag.ok ? 'OSS 连接恢复' : 'OSS 加载失败',
+      title: diag.cors_configured === false ? 'Bucket 未配置 CORS' : 'OSS 加载失败',
       hint: diag.ok ? fallback : hintFromDiag(diag),
       code: diag.code != null ? String(diag.code) : null,
       status: diag.status,

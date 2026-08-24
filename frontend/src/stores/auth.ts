@@ -3,6 +3,7 @@ import { api } from '@/api/client'
 import { ApiError, clearSavedPassword, clearToken, getSavedPassword, getToken, savePassword, setToken } from '@/api/client'
 import type { LoginResponse, SmtpPlain } from '@/api/client'
 import { idbClearUserCache } from '@/utils/idb'
+import { flushPendingSyncReports } from '@/utils/syncReport'
 import { useUiStore } from './ui'
 import { decryptCreds, deriveUserKey, encryptCreds, passwordVerifier } from '@/utils/crypto'
 import type { CredFields } from '@/types'
@@ -56,13 +57,15 @@ export const useAuthStore = defineStore('auth', {
       else clearSavedPassword()
       if (this.credError) useUiStore().toast(this.credError, 'error')
     },
-    async register(body: { username: string; password: string; encrypted_creds?: string | null; smtp_plain?: SmtpPlain | null }, remember = true) {
+    async register(body: { username: string; password: string; encrypted_creds?: string | null; smtp_plain?: SmtpPlain | null; captchaId: string; captchaCode: string }, remember = true) {
       const passwordHash = await passwordVerifier(body.password)
       await api.register({
         username: body.username,
         passwordHash,
         encrypted_creds: body.encrypted_creds,
         smtp_plain: body.smtp_plain,
+        captchaId: body.captchaId,
+        captchaCode: body.captchaCode,
       })
       await this.login(body.username, body.password, remember)
     },
@@ -165,6 +168,8 @@ export const useAuthStore = defineStore('auth', {
         useProjectsStore().flushProfile(),
         useStatsStore().flush(),
       ])
+      // 尽力把待发变更上报发给中心服务器（队列按用户隔离，登出时保留、下次登录补报）
+      await flushPendingSyncReports(username)
       this.reset()
       useTasksStore().resetAll()
       useProjectsStore().resetAll()

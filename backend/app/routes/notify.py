@@ -6,8 +6,6 @@ from ..schemas import NotifyPrefs, NotifyPrefsRequest
 
 router = APIRouter(prefix="/api", tags=["notify"])
 
-_DEFAULTS = {"login_success": False, "login_failed": True, "key_view": True}
-
 
 @router.get("/notify-prefs", response_model=NotifyPrefs)
 def get_notify_prefs(username: str = Depends(get_username)):
@@ -29,7 +27,7 @@ def get_notify_prefs(username: str = Depends(get_username)):
 @router.put("/notify-prefs", response_model=NotifyPrefs)
 def update_notify_prefs(body: NotifyPrefsRequest, username: str = Depends(get_username)):
     """更新安全邮件通知开关：只更新提交的字段，未提交字段保持不变。"""
-    cur = _DEFAULTS.copy()
+    cur = NotifyPrefs().model_dump()
     cur.update(get_notify_prefs(username).model_dump())
     if body.login_success is not None:
         cur["login_success"] = body.login_success

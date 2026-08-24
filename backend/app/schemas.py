@@ -1,8 +1,9 @@
 import base64
 import re
+from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, field_validator
 
 
 def _strip(v: str) -> str:
@@ -28,11 +29,21 @@ def _is_valid_verifier(v: str) -> bool:
 
 class RegisterRequest(BaseModel):
     """注册：客户端只发送 SHA-256(password) 的 base64 校验子（不可逆密文），
-    服务端对校验子再做 argon2 慢哈希存储，避免明文密码出现在网络中。"""
+    服务端对校验子再做 argon2 慢哈希存储，避免明文密码出现在网络中。
+
+    同时要求图形验证码（captchaId + captchaCode，单次使用、绑定 IP），
+    对抗换 IP 批量注册。"""
     username: str
     passwordHash: str
     encrypted_creds: Optional[str] = None
     smtp_plain: Optional["SmtpPlain"] = None
+    captchaId: str = ""
+    captchaCode: str = ""
+
+    @field_validator("captchaId", "captchaCode", mode="before")
+    @classmethod
+    def _captcha(cls, v):
+        return _strip(v)[:128]
 
     @field_validator("username", mode="before")
     @classmethod
@@ -150,6 +161,32 @@ class OssCheckRequest(BaseModel):
             raise ValueError("OSS 诊断参数不能为空")
         return v
 
+    @field_validator("bucket", mode="after")
+    @classmethod
+    def _bucket_len(cls, v):
+        if len(v) > 63:
+            raise ValueError("bucket 名称不能超过 63 字符")
+        return v
+
+    @field_validator("region", mode="before")
+    @classmethod
+    def _region(cls, v):
+        """校验 OSS region（V-002）：只允许标准 OSS 区域标识（字母/数字/连字符）。
+
+        此前 region 仅做非空校验，攻击者提交 127.0.0.1:8999/x 之类字形会被原样拼进
+        endpoint，使后端向任意 host:port 发起 TLS 出站连接（SSRF 面 / 内网探测）。
+        此处兼容老客户端误填完整域名（https:// + .aliyuncs.com 后缀）后，剥离并校验
+        剩余部分，禁止 IP 字形、端口、路径、点号等，并把结果归一化为小写。
+        """
+        v = _strip(v)
+        if not v:
+            raise ValueError("OSS region 不能为空")
+        # 与路由 _norm_oss_region 相同的兼容性剥离（幂等）
+        region = v.replace("https://", "").replace("http://", "").replace(".aliyuncs.com", "")
+        if not re.fullmatch(r"[A-Za-z0-9-]{1,63}", region):
+            raise ValueError("OSS region 格式无效（仅允许标准 OSS 区域标识）")
+        return region.lower()
+
 class CredentialsRequest(BaseModel):
     encrypted_creds: str
     smtp_plain: Optional[SmtpPlain] = None
@@ -160,6 +197,17 @@ class CredentialsRequest(BaseModel):
         if not (v or "").strip():
             raise ValueError("凭证密文不能为空")
         return v
+
+# ---------- 重复任务提醒规则（V-001）----------
+
+# 合法重复类型（与前端 repeat.ts / TaskModal.vue 保持一致）
+REPEAT_TYPES = ("daily", "weekly", "workday", "monthly", "legalWorkday")
+# interval 上限：与前端输入框 max=365 对齐；超大 interval 会让
+# repeat_calendar.next_repeat_date 的 weekly 分支循环约 7n 次（CPU 放大 / DoS）。
+REPEAT_INTERVAL_MAX = 365
+# 可选星期几：0=周日 … 6=周六（与前端 JS getDay 一致）
+REPEAT_WEEKDAY_SET = frozenset(range(7))
+
 
 class ReminderTask(BaseModel):
     id: str
@@ -176,6 +224,74 @@ class ReminderTask(BaseModel):
     # 重复任务提醒规则（可选）：服务器 reminders 行只存这一条规则（JSON），
     # 不预注册未来 N 条提醒；发完邮件后由 worker 按周期自行推进 reminder_time。
     repeatRule: Optional[dict] = None
+
+    @field_validator("repeatRule", mode="before")
+    @classmethod
+    def _repeat_rule(cls, v):
+        """校验重复提醒规则（V-001）：type / interval / weekdays / monthDay / endAfter。
+
+        此前 repeatRule 只声明为 Optional[dict]、无任何字段级约束，攻击者可绕过前端
+        直接提交超大 interval（如 300000），使 next_repeat_date 的 weekly 分支循环约 7n 次，
+        单请求即可阻塞后端 ~47s（CPU 放大 / 拒绝服务）。此处按前端合法取值范围收紧，
+        并做类型归一化（interval/monthDay 转 int、weekdays 排序去重），避免把字符串等
+        畸形类型写入 reminders 表 JSON。
+        """
+        if v is None:
+            return v
+        if not isinstance(v, dict):
+            raise ValueError("重复规则必须是对象")
+        rtype = v.get("type")
+        if rtype not in REPEAT_TYPES:
+            raise ValueError("重复类型无效")
+        interval = v.get("interval")
+        if interval is not None:
+            try:
+                interval = int(interval)
+            except (TypeError, ValueError):
+                raise ValueError("重复间隔必须是整数")
+            if not (1 <= interval <= REPEAT_INTERVAL_MAX):
+                raise ValueError(f"重复间隔需在 1-{REPEAT_INTERVAL_MAX} 之间")
+        weekdays = v.get("weekdays")
+        if weekdays is not None:
+            if not isinstance(weekdays, list) or not weekdays:
+                raise ValueError("每周重复需至少选择一个星期几")
+            if len(weekdays) > 7:
+                raise ValueError("星期几不能超过 7 个")
+            seen = set()
+            for w in weekdays:
+                try:
+                    w = int(w)
+                except (TypeError, ValueError):
+                    raise ValueError("星期几必须是整数")
+                if w not in REPEAT_WEEKDAY_SET:
+                    raise ValueError("星期几需在 0-6 之间")
+                seen.add(w)
+            if len(seen) != len(weekdays):
+                raise ValueError("星期几不能重复")
+        month_day = v.get("monthDay")
+        if month_day is not None:
+            try:
+                month_day = int(month_day)
+            except (TypeError, ValueError):
+                raise ValueError("每月日期必须是整数")
+            if not (1 <= month_day <= 31):
+                raise ValueError("每月日期需在 1-31 之间")
+        end_after = v.get("endAfter")
+        if end_after is not None:
+            if not isinstance(end_after, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", end_after):
+                raise ValueError("结束日期格式须为 YYYY-MM-DD")
+            try:
+                datetime.strptime(end_after, "%Y-%m-%d")
+            except ValueError:
+                raise ValueError("结束日期无效")
+        out = dict(v)
+        if interval is not None:
+            out["interval"] = interval
+        if weekdays is not None:
+            out["weekdays"] = sorted(seen)
+        if month_day is not None:
+            out["monthDay"] = month_day
+        return out
 
 
 class RemindersSyncRequest(BaseModel):
@@ -224,3 +340,49 @@ class NotifyPrefsRequest(BaseModel):
     login_failed: Optional[bool] = None
     key_view: Optional[bool] = None
 
+
+# ---------- 同步协调中心 ----------
+
+# 客户端可上报的资源类型（与前端 store 一一对应）
+SYNC_RES_TYPES = ("profile", "tasks", "trash", "repeats", "stats", "today_order")
+
+
+class SyncChangeItem(BaseModel):
+    """客户端上报的一次变更事件：哪类资源、哪个项目（profile/stats 无项目）。"""
+    res_type: str
+    project_id: Optional[str] = None
+
+    @field_validator("res_type", mode="before")
+    @classmethod
+    def _res_type(cls, v):
+        v = _strip(v)
+        if v not in SYNC_RES_TYPES:
+            raise ValueError("无效的资源类型")
+        return v
+
+    @field_validator("project_id", mode="before")
+    @classmethod
+    def _project_id(cls, v):
+        if v is None:
+            return None
+        v = _strip(v)
+        if len(v) > 200:
+            raise ValueError("project_id 过长")
+        return v
+
+
+class SyncReportRequest(BaseModel):
+    events: List[SyncChangeItem] = []
+
+
+class SyncStateItem(BaseModel):
+    id: int
+    res_type: str
+    project_id: Optional[str] = None
+    ts: str
+
+
+class SyncStateResponse(BaseModel):
+    version: int
+    full_sync: bool
+    changes: List[SyncStateItem]

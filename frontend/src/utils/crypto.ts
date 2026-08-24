@@ -62,11 +62,11 @@ async function decryptBytes(key: CryptoKey, payloadB64: string): Promise<Uint8Ar
   return new Uint8Array(plain)
 }
 
-export async function encryptField(key: CryptoKey, plain: string): Promise<string> {
+async function encryptField(key: CryptoKey, plain: string): Promise<string> {
   return encryptBytes(key, encoder.encode(plain))
 }
 
-export async function decryptField(key: CryptoKey, payloadB64: string): Promise<string> {
+async function decryptField(key: CryptoKey, payloadB64: string): Promise<string> {
   return decoder.decode(await decryptBytes(key, payloadB64))
 }
 

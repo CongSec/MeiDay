@@ -18,12 +18,12 @@ export function clearToken(): void {
   localStorage.removeItem(`${TOKEN_KEY}_at`)
 }
 
-export function tokenAgeMs(): number {
+function tokenAgeMs(): number {
   const at = Number(localStorage.getItem(`${TOKEN_KEY}_at`) ?? 0)
   return at ? Date.now() - at : 0
 }
 
-export function isTokenExpiredLocal(): boolean {
+function isTokenExpiredLocal(): boolean {
   return !!getToken() && tokenAgeMs() > SESSION_TTL_MS
 }
 
@@ -110,6 +110,13 @@ export interface NotifyPrefs {
   key_view: boolean
 }
 
+export interface CaptchaResult {
+  /** 验证码 id：注册时随验证码答案一起回传 */
+  id: string
+  /** 图形验证码图片（PNG 的 data URL） */
+  image: string
+}
+
 export interface LoginResponse {
   sessionToken: string
   encrypted_creds: string | null
@@ -142,9 +149,14 @@ export interface AuditLog {
 }
 
 export const api = {
-  /** 注册只发送 SHA-256(password) 校验子（不可逆密文），明文密码不出浏览器 */
-  register(body: { username: string; passwordHash: string; encrypted_creds?: string | null; smtp_plain?: SmtpPlain | null }) {
+  /** 注册只发送 SHA-256(password) 校验子（不可逆密文），明文密码不出浏览器；
+   *  需附带图形验证码（captchaId + captchaCode）防批量注册 */
+  register(body: { username: string; passwordHash: string; encrypted_creds?: string | null; smtp_plain?: SmtpPlain | null; captchaId: string; captchaCode: string }) {
     return request<{ ok: true }>('POST', '/api/register', body)
+  },
+  /** 获取注册用的图形验证码图片 */
+  getCaptcha() {
+    return request<CaptchaResult>('GET', '/api/captcha')
   },
   /** 登录只发送 SHA-256(password) 校验子（不可逆密文），明文密码不出浏览器 */
   login(body: { username: string; passwordHash: string }) {
@@ -176,10 +188,11 @@ export const api = {
   checkOss(body: { oss_ak: string; oss_sk: string; bucket: string; region: string }) {
     return request<OssCheckResult>('POST', '/api/credentials/oss-check', body)
   },
-  getLogs(params: { action?: string; ip?: string; limit?: number; offset?: number } = {}) {
+  getLogs(params: { action?: string; ip?: string; highRisk?: '' | '0' | '1'; limit?: number; offset?: number } = {}) {
     const qs = new URLSearchParams()
     if (params.action) qs.set('action', params.action)
     if (params.ip) qs.set('ip', params.ip)
+    if (params.highRisk) qs.set('high_risk', params.highRisk)
     qs.set('limit', String(params.limit ?? 100))
     qs.set('offset', String(params.offset ?? 0))
     return request<{ total: number; offset: number; limit: number; items: AuditLog[] }>(
@@ -189,6 +202,10 @@ export const api = {
   },
   getLogActions() {
     return request<{ items: { action: string; count: number }[] }>('GET', '/api/logs/actions')
+  },
+  /** IP 分类：当前用户日志中出现过的 IP 及次数（用于筛选下拉） */
+  getLogIps() {
+    return request<{ items: { ip: string; count: number }[] }>('GET', '/api/logs/ips')
   },
   /** 上报前端行为（任务/项目增删改、打开回收站/设置、显示密钥等） */
   logClient(action: string, detail = '') {
@@ -214,4 +231,31 @@ export const api = {
   setLogRetention(days: number) {
     return request<{ ok: true; days: number }>('PUT', '/api/settings/log-retention', { days })
   },
+  /** 同步协调中心：OSS 写入成功后上报变更事件（报告给中心服务器，由它通知其它设备） */
+  reportSyncChanges(events: SyncChangeItem[]) {
+    return request<{ ok: true; version: number }>('POST', '/api/sync/report', { events })
+  },
+  /** 同步协调中心：轮询获取总版本号与 since 之后的变更列表，判断是否有数据需要拉取 */
+  getSyncState(since = 0) {
+    return request<SyncState>('GET', `/api/sync/state?since=${since}`)
+  },
+}
+
+/** 同步协调中心：客户端可上报的资源类型（与各 store 一一对应） */
+export type SyncResType = 'profile' | 'tasks' | 'trash' | 'repeats' | 'stats' | 'today_order'
+export interface SyncChangeItem {
+  res_type: SyncResType
+  project_id?: string | null
+}
+export interface SyncStateItem {
+  id: number
+  res_type: string
+  project_id: string | null
+  ts: string
+}
+export interface SyncState {
+  version: number
+  /** true 表示本地版本落后过多（服务端事件已被清理），应全量同步 */
+  full_sync: boolean
+  changes: SyncStateItem[]
 }

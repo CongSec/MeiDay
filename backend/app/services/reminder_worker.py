@@ -154,4 +154,8 @@ async def reminder_worker(interval: float = 60.0) -> None:
             await _run_cycle()
         except Exception:
             logger.exception("提醒 worker 循环执行异常")
-        await asyncio.sleep(interval)
+        # 对齐到每个周期的墙钟起点（默认每分钟的第 1 秒）后再 sleep：
+        # 若用固定间隔从启动时刻累计，轮询点会随时间漂移，HH:MM:00 的提醒可能
+        # 拖到下一分钟才被发现；按墙钟对齐后，55 分到点的提醒会在 55:00 第 1 秒
+        # 被轮询到并立即发信，误差只剩当轮处理耗时本身。
+        await asyncio.sleep(max(0.0, interval - datetime.now().second % interval))

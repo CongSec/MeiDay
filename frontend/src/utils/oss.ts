@@ -1,16 +1,32 @@
-import OSS from 'ali-oss'
+import type OSS from 'ali-oss'
 import type { CredFields } from '@/types'
 
+/**
+ * ali-oss SDK 体积较大（浏览器版约 690KB / gzip 约 188KB），静态 import 会拖慢首屏。
+ * 这里改为【按需动态加载】：首次真正需要创建 OSS 客户端时才 import，之后缓存 Promise，
+ * 避免每次调用都重新加载。登录页 / 首屏渲染因此完全不依赖该大 chunk。
+ */
+type AliOssNamespace = { default: typeof OSS }
+let ossModulePromise: Promise<AliOssNamespace> | undefined
+
+function loadOssModule(): Promise<AliOssNamespace> {
+  if (!ossModulePromise) ossModulePromise = import('ali-oss')
+  return ossModulePromise
+}
+
 /** 兼容用户误填完整 OSS 域名：自动去掉协议与 .aliyuncs.com 后缀，ali-oss SDK 只接受区域 ID */
-export function normalizeRegion(region: string): string {
+function normalizeRegion(region: string): string {
   return (region || '')
     .trim()
     .replace(/^https?:\/\//i, '')
     .replace(/\.aliyuncs\.com$/, '')
 }
 
-export function createOssClient(creds: CredFields): OSS {
-  return new OSS({
+/** 创建 OSS 客户端（异步：首次调用会动态加载 ali-oss SDK） */
+export async function createOssClient(creds: CredFields): Promise<OSS> {
+  const OSSModule = await loadOssModule()
+  const OSSClass = OSSModule.default
+  return new OSSClass({
     region: normalizeRegion(creds.region),
     accessKeyId: creds.ossAk,
     accessKeySecret: creds.ossSk,
@@ -83,6 +99,8 @@ export const paths = {
   today: (username: string) => `users/${username}/today.json`,
   todayTrash: (username: string) => `users/${username}/today_trash.json`,
   todayRepeats: (username: string) => `users/${username}/today_repeats.json`,
+  /** 今日任务跨项目拖拽顺序（独立于任务 JSON 的全局顺序表） */
+  todayOrder: (username: string) => `users/${username}/today_order.json`,
   meta: (username: string, projectId: string) => `users/${username}/projects/${projectId}/meta.json`,
   tasks: (username: string, projectId: string) => `users/${username}/projects/${projectId}/tasks.json`,
   trash: (username: string, projectId: string) => `users/${username}/projects/${projectId}/trash.json`,

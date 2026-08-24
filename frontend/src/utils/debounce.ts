@@ -1,6 +1,8 @@
 export type Debounced<A extends unknown[]> = ((...args: A) => void) & {
   cancel: () => void
   flush: () => void
+  /** 是否有尚未触发的防抖定时器（即还有未落盘的变更在等待） */
+  isPending: () => boolean
 }
 
 export function debounce<A extends unknown[]>(fn: (...args: A) => void, ms: number): Debounced<A> {
@@ -31,6 +33,8 @@ export function debounce<A extends unknown[]>(fn: (...args: A) => void, ms: numb
     lastArgs = undefined
     fn(...args)
   }
+
+  wrapped.isPending = () => timer !== undefined
 
   return wrapped
 }

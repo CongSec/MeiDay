@@ -1,4 +1,4 @@
-﻿import { defineStore } from 'pinia'
+import { defineStore } from 'pinia'
 import { api } from '@/api/client'
 import { useAuthStore } from './auth'
 import { useUiStore } from './ui'
@@ -8,9 +8,10 @@ import { createOssClient, describeOssError, paths } from '@/utils/oss'
 import { applyDeletedProjectTombstones, compareAndSwapPut, mergeProfile, versionToken } from '@/utils/sync'
 import { enrichOssError } from '@/utils/ossDiag'
 import { idbGet, idbPut, idbDel } from '@/utils/idb'
+import { queueSyncChange } from '@/utils/syncReport'
 import { nowIso } from '@/utils/time'
 import { logAudit, safeDetail } from '@/utils/audit'
-import type { DeletedProject, Profile, Project } from '@/types'
+import type { DeletedProject, Profile, Project, RepeatMaster, Task } from '@/types'
 
 const COLORS = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899']
 
@@ -21,6 +22,9 @@ function isServerEmptyError(e: unknown): boolean {
 }
 
 let profileSaveTimer: number | undefined
+/** profile 加载的 in-flight Promise：LayoutView 引导加载与 TodayView onMounted 可能同时
+ *  调用 load()，复用同一个请求避免重复拉取 profile.json（重复 OSS 请求/内存写入）。 */
+let profileLoadPromise: Promise<void> | undefined
 
 export const useProjectsStore = defineStore('projects', {
   state: () => ({
@@ -42,6 +46,18 @@ export const useProjectsStore = defineStore('projects', {
     async load() {
       const auth = useAuthStore()
       if (!auth.username) return
+      // 并发去重：LayoutView 引导加载与 TodayView onMounted 可能同时调用 load()，
+      // 复用同一个 in-flight 请求，避免重复拉取 profile.json（重复 OSS 请求/内存写入）。
+      if (profileLoadPromise) return profileLoadPromise
+      profileLoadPromise = this._loadProfile().finally(() => {
+        profileLoadPromise = undefined
+      })
+      return profileLoadPromise
+    },
+    /** load() 的实际实现（由 load 去重后调用，避免并发重复拉取）。 */
+    async _loadProfile() {
+      const auth = useAuthStore()
+      if (!auth.username) return
       const cached = await idbGet<Profile>('profile', auth.username)
       // R2-BUG-3: 本地已有待写盘的 profile 变更（如刚删除项目、防抖 save 尚未执行）时，
       // 不要用可能过期的 idb/OSS 缓存覆盖内存，避免删除后项目在本地/后续保存中“复活”。
@@ -52,7 +68,7 @@ export const useProjectsStore = defineStore('projects', {
       }
       if (auth.creds && !hasPendingProfileSave) {
         try {
-          const client = createOssClient(auth.creds)
+          const client = await createOssClient(auth.creds)
           const etag = await idbGet<string>('kv', `etag:${auth.username}:profile`)
           const res = await client.get(
             paths.profile(auth.username),
@@ -92,6 +108,8 @@ export const useProjectsStore = defineStore('projects', {
       // 已有项目的存量用户首次加载：一次性记录“首次创建项目时间”（此后永不修改）。
       // 纯新用户（无项目）不记录，等真正创建第一个项目时再由 addProject 记录。
       if (this.projects.length > 0) useStatsStore().ensureFirstProjectAt()
+      // R2-REGRESSION: 拆 load()/_loadProfile() 时丢失了 loaded 标记，导致 ensureLoaded()
+      // 每次都被判定为未加载、反复从 OSS 拉取 profile.json（重复请求/重复写入内存）。
       this.loaded = true
     },
     _persist() {
@@ -112,10 +130,10 @@ export const useProjectsStore = defineStore('projects', {
         void this.save(snapshot)
       }, 500)
     },
-    async save(snapshot?: Profile) {
+    async save(snapshot?: Profile): Promise<boolean> {
       const auth = useAuthStore()
-      if (!auth.creds || !auth.username) return
-      const client = createOssClient(auth.creds)
+      if (!auth.creds || !auth.username) return false
+      const client = await createOssClient(auth.creds)
       // 使用快照，避免登出/重置竞态下读到被清空的 store
       let profile: Profile = snapshot ?? {
         projects: applyDeletedProjectTombstones([...this.projects], this.deletedProjects ?? []),
@@ -134,7 +152,7 @@ export const useProjectsStore = defineStore('projects', {
           if (result.etag) await idbPut('kv', etagKey, result.etag)
           await idbPut('profile', auth.username, profile)
           if (attempt > 0) useUiStore().toast('检测到其他设备同时修改，已合并项目列表', 'ok')
-          return
+          return true
         }
         if (result.remote) {
           profile = mergeProfile(profile, result.remote as Profile)
@@ -142,17 +160,28 @@ export const useProjectsStore = defineStore('projects', {
           if (!snapshot) {
             this.projects = profile.projects
             this.deletedProjects = profile.deletedProjects ?? []
-            await idbPut('profile', auth.username, profile)
+
+            queueSyncChange(auth.username, 'profile')
           }
         } else {
           knownEtag = undefined
         }
       }
       useUiStore().toast('保存项目列表失败：检测到其他设备持续修改，请稍后重试', 'error')
+      return false
       } catch (e) {
         console.error('保存项目列表到 OSS 失败', e)
         useUiStore().toast(`保存项目列表失败：${describeOssError(e)}`, 'error')
+        return false
       }
+    },
+    /** 立即保存 profile（取消防抖，供“确认式保存”使用）；成功返回 true，失败返回 false（已弹错误提示） */
+    async saveNow(): Promise<boolean> {
+      if (profileSaveTimer !== undefined) {
+        window.clearTimeout(profileSaveTimer)
+        profileSaveTimer = undefined
+      }
+      return this.save()
     },
     /** 立即落盘 profile（如果有未保存的项目变更），用于页面隐藏/登出前调用 */
     async flushProfile() {
@@ -191,6 +220,47 @@ export const useProjectsStore = defineStore('projects', {
       logAudit('新建项目', safeDetail(`项目ID：${p.id}`))
       return p
     },
+
+    /** 确认式新建项目：先入内存并立即写盘 profile，成功返回新项目；失败回滚并返回 null（调用方据此弹提示） */
+    async addProjectConfirmed(name: string): Promise<Project | null> {
+      const auth = useAuthStore()
+      const projectsSnap = [...this.projects]
+      const deletedSnap = [...(this.deletedProjects ?? [])]
+      const p = this.addProject(name)
+      const ok = await this.saveNow()
+      if (ok) return p
+      // 失败回滚：恢复内存与 IDB，避免“提示失败但界面出现新项目”
+      this.projects = projectsSnap
+      this.deletedProjects = deletedSnap
+      if (auth.username) {
+        await idbPut('profile', auth.username, {
+          projects: applyDeletedProjectTombstones([...projectsSnap], deletedSnap),
+          deletedProjects: [...deletedSnap],
+          updated_at: nowIso(),
+        })
+      }
+      return null
+    },
+    /** 确认式重命名项目：先入内存并立即写盘 profile，成功返回 true；失败回滚并返回 false */
+    async renameProjectConfirmed(id: string, name: string): Promise<boolean> {
+      const p = this.byId(id)
+      if (!p) return false
+      const auth = useAuthStore()
+      const oldName = p.name
+      this.renameProject(id, name)
+      const ok = await this.saveNow()
+      if (ok) return true
+      // 失败回滚
+      p.name = oldName
+      if (auth.username) {
+        await idbPut('profile', auth.username, {
+          projects: applyDeletedProjectTombstones([...this.projects], this.deletedProjects ?? []),
+          deletedProjects: [...(this.deletedProjects ?? [])],
+          updated_at: nowIso(),
+        })
+      }
+      return false
+    },
     renameProject(id: string, name: string) {
       const p = this.byId(id)
       if (!p) return
@@ -207,37 +277,66 @@ export const useProjectsStore = defineStore('projects', {
     /**
      * 删除项目 = 移入回收站：项目从活跃列表移除（元数据保留到 deletedProjects 以便整项目恢复），
      * 其下全部任务移入回收站文件。不删除回收站 OSS 文件（可恢复整个项目）。
+     * 确认式保存：profile + 任务 + 回收站 + 重复模板全部落盘成功才返回 true；失败回滚并返回 false。
      */
-    async deleteProject(id: string) {
+    async deleteProject(id: string): Promise<boolean> {
       const p = this.byId(id)
-      if (!p) return
+      if (!p) return false
+      const auth = useAuthStore()
+      const tasks = useTasksStore()
+      // 快照：profile + 该项目任务/回收站/重复模板
+      const projectsSnap = [...this.projects]
+      const deletedSnap = [...(this.deletedProjects ?? [])]
+      const tasksSnap = (tasks.tasks[id] ?? []).slice()
+      const trashSnap = (tasks.trash[id] ?? []).slice()
+      const repeatsSnap = (tasks.repeats[id] ?? []).slice()
+      // 变更内存
       this.projects = this.projects.filter((x) => x.id !== id)
       // 保留项目元数据（id/名称/颜色/图标 + 删除时间），供回收站「恢复整个项目」使用
       this.deletedProjects = [
         ...(this.deletedProjects ?? []).filter((x) => x.id !== id),
         { id: p.id, name: p.name, color: p.color, icon: p.icon, deletedAt: nowIso() },
       ]
-      const tasks = useTasksStore()
       tasks.markAllDeleted(id)
-      void this._persist()
-      logAudit('删除项目', safeDetail(`项目ID：${id}，其下任务已移入回收站`))
-      const auth = useAuthStore()
-      // 显式清空该项目在服务端的提醒行，避免残留提醒继续发信（BUG-12）
-      if (auth.token && id) {
-        try {
-          await api.syncReminders([], [id])
-        } catch {
-          /* 网络失败不阻塞删除 */
+      // 立即写盘：profile + 任务 + 回收站 + 重复模板
+      const [okProfile, okTasks, okTrash, okRepeats] = await Promise.all([
+        this.saveNow(),
+        tasks.saveProjectNow(id),
+        tasks.saveTrashNow(id),
+        tasks.saveRepeatsNow(id),
+      ])
+      if (okProfile && okTasks && okTrash && okRepeats) {
+        logAudit('删除项目', safeDetail(`项目ID：${id}，其下任务已移入回收站`))
+        // 显式清空该项目在服务端的提醒行，避免残留提醒继续发信（BUG-12）
+        if (auth.token && id) {
+          try {
+            await api.syncReminders([], [id])
+          } catch {
+            /* 网络失败不阻塞删除 */
+          }
         }
+        return true
+      }
+      // 失败回滚：恢复内存与缓存到保存前状态，避免“提示失败但界面已删除”
+      this.projects = projectsSnap
+      this.deletedProjects = deletedSnap
+      await tasks.rollbackProject(id, { tasks: tasksSnap, trash: trashSnap, repeats: repeatsSnap })
+      if (auth.username) {
+        await idbPut('profile', auth.username, {
+          projects: applyDeletedProjectTombstones([...projectsSnap], deletedSnap),
+          deletedProjects: [...deletedSnap],
+          updated_at: nowIso(),
+        })
       }
       // 注意：不删除 projects/{id}/trash.json，回收站文件保留以便「恢复整个项目」。
+      return false
     },
-    /** 恢复已删除项目：无重名时整项目恢复（任务从回收站还原为活跃）；重名时合并进同名现有项目 */
+    /** 恢复已删除项目：无重名时整项目恢复（任务从回收站还原为活跃）；重名时合并进同名现有项目。
+     *  确认式保存：profile + 涉及项目的任务/回收站/重复模板全部落盘成功才返回目标项目 id；失败回滚并返回 undefined。 */
     async restoreProject(id: string): Promise<string | undefined> {
       const dp = (this.deletedProjects ?? []).find((x) => x.id === id)
       if (!dp) return undefined
       const tasks = useTasksStore()
-      const existing = this.projects.find((x) => x.name === dp.name)
       const auth = useAuthStore()
       // 恢复前先把该项目的回收站文件从 OSS/本地缓存加载到内存，避免刷新后整项目恢复丢任务
       try {
@@ -245,12 +344,43 @@ export const useProjectsStore = defineStore('projects', {
       } catch {
         /* 网络失败时降级为本地缓存，不阻塞恢复 */
       }
+      const existing = this.projects.find((x) => x.name === dp.name)
+      const targetId = existing ? existing.id : dp.id
+      const pids = [...new Set([id, targetId])]
+      // 快照：profile + 涉及项目的任务/回收站/重复模板
+      const projectsSnap = [...this.projects]
+      const deletedSnap = [...(this.deletedProjects ?? [])]
+      const tasksSnap = new Map<string, Task[]>()
+      const trashSnap = new Map<string, Task[]>()
+      const repeatsSnap = new Map<string, RepeatMaster[]>()
+      for (const pid of pids) {
+        tasksSnap.set(pid, (tasks.tasks[pid] ?? []).slice())
+        trashSnap.set(pid, (tasks.trash[pid] ?? []).slice())
+        repeatsSnap.set(pid, (tasks.repeats[pid] ?? []).slice())
+      }
       if (existing) {
         // 重名：不新建项目，把该项目的任务（含回收站）合并进同名现有项目，避免出现重名项目
         tasks.mergeProjectInto(id, existing.id)
         this.deletedProjects = (this.deletedProjects ?? []).filter((x) => x.id !== id)
-        void this._persist()
-        logAudit('恢复项目（重名合并）', safeDetail(`项目ID：${id}，已合并入 ${existing.id}`))
+      } else {
+        // 正常恢复：原 id 原样放回活跃列表，任务从回收站还原为活跃
+        this.projects.push({ id: dp.id, name: dp.name, color: dp.color, icon: dp.icon })
+        this.deletedProjects = (this.deletedProjects ?? []).filter((x) => x.id !== id)
+        tasks.restoreProjectTasks(id)
+      }
+
+      const saves: Promise<boolean>[] = [
+        this.saveNow(),
+        ...pids.map((pid) => tasks.saveProjectNow(pid)),
+        ...pids.map((pid) => tasks.saveTrashNow(pid)),
+        ...pids.map((pid) => tasks.saveRepeatsNow(pid)),
+      ]
+      const results = await Promise.all(saves)
+      if (results.every(Boolean)) {
+        logAudit(
+          existing ? '恢复项目（重名合并）' : '恢复项目',
+          safeDetail(`项目ID：${id}${existing ? `，已合并入 ${existing.id}` : ''}`),
+        )
         if (auth.token) {
           try {
             await tasks.syncReminders()
@@ -258,22 +388,26 @@ export const useProjectsStore = defineStore('projects', {
             /* 网络失败不阻塞恢复 */
           }
         }
-        return existing.id
+        return targetId
       }
-      // 正常恢复：原 id 原样放回活跃列表，任务从回收站还原为活跃
-      this.projects.push({ id: dp.id, name: dp.name, color: dp.color, icon: dp.icon })
-      this.deletedProjects = (this.deletedProjects ?? []).filter((x) => x.id !== id)
-      tasks.restoreProjectTasks(id)
-      void this._persist()
-      logAudit('恢复项目', safeDetail(`项目ID：${id}`))
-      if (auth.token) {
-        try {
-          await tasks.syncReminders()
-        } catch {
-          /* 网络失败不阻塞恢复 */
-        }
+      // 失败回滚：恢复内存与缓存到保存前状态，避免“提示失败但界面已恢复”
+      this.projects = projectsSnap
+      this.deletedProjects = deletedSnap
+      for (const pid of pids) {
+        await tasks.rollbackProject(pid, {
+          tasks: tasksSnap.get(pid) ?? [],
+          trash: trashSnap.get(pid) ?? [],
+          repeats: repeatsSnap.get(pid) ?? [],
+        })
       }
-      return dp.id
+      if (auth.username) {
+        await idbPut('profile', auth.username, {
+          projects: applyDeletedProjectTombstones([...projectsSnap], deletedSnap),
+          deletedProjects: [...deletedSnap],
+          updated_at: nowIso(),
+        })
+      }
+      return undefined
     },
   },
 })

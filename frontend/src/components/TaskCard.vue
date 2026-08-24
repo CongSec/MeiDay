@@ -29,7 +29,6 @@ const overdue = computed(
     new Date(props.task.reminderTime).getTime() <= now.value,
 )
 
-const color = computed(() => props.project?.color ?? '#94a3b8')
 
 const hasSubtasks = computed(() => (props.task.subtasks?.length ?? 0) > 0)
 
@@ -69,18 +68,11 @@ function onAddSubtask() {
 
 <template>
   <div
-    class="group bg-white rounded-xl shadow-sm border border-slate-100 p-4 transition hover:shadow-md"
+    class="task-card group bg-white rounded-xl shadow-sm border border-slate-100 p-4 transition hover:shadow-md"
     :class="[overdue ? 'border-l-4 border-l-red-500' : '', task.status === 'completed' ? 'opacity-70' : '']"
     @click="emit('edit', task)"
   >
     <div class="flex items-start gap-3">
-      <span
-        class="task-drag-handle text-slate-300 opacity-0 group-hover:opacity-100 cursor-grab shrink-0 select-none pt-0.5"
-        title="拖拽排序"
-        @click.stop
-      >
-        ⠿
-      </span>
       <label class="pt-0.5 shrink-0" @click.stop>
         <input
           type="checkbox"
@@ -99,7 +91,6 @@ function onAddSubtask() {
           >
             {{ expanded ? '▾' : '▸' }}
           </button>
-          <span class="w-2 h-2 rounded-full shrink-0" :style="{ backgroundColor: color }" />
           <span
             class="font-medium text-sm"
             :class="task.status === 'completed' ? 'line-through text-slate-400' : 'text-slate-800'"

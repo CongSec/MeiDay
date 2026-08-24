@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
@@ -169,6 +170,31 @@ def _norm_oss_region(region: str) -> str:
     return (region or "").strip().replace("https://", "").replace("http://", "").replace(".aliyuncs.com", "")
 
 
+def _oss_endpoint_is_safe(region: str) -> tuple[bool, str]:
+    """V-002 纵深防御：解析最终 host（<region>.aliyuncs.com），拒绝解析到非公网地址。
+
+    region 白名单校验（schemas.py + 本路由）已保证 host 一定是 aliyuncs.com 子域，
+    这里再兜底拦截 DNS 被解析到私网/回环/链路本地/保留/多播地址（如 -internal
+    端点、恶意或分域 DNS 指向内网），防止后端向内网地址发起出站探测。
+    """
+    import ipaddress
+    import socket
+
+    host = "%s.aliyuncs.com" % region
+    try:
+        infos = socket.getaddrinfo(host, 443, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except (socket.gaierror, OSError):
+        return False, "无法解析 OSS 域名"
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if not ip.is_global:
+            return False, "OSS 域名解析到非公网地址，已拒绝连接"
+    return True, ""
+
+
 @router.post("/credentials/oss-check")
 def oss_check(body: OssCheckRequest, username: str = Depends(get_username)):
     """后端直连 OSS 诊断，绕过浏览器 CORS，返回真实错误码（如 NoSuchBucket）。
@@ -179,9 +205,34 @@ def oss_check(body: OssCheckRequest, username: str = Depends(get_username)):
     """
     import oss2
 
+    # V-002：服务端二次校验（schema 已拦第一道，此处兜底防绕过）。
+    # 规范化后的 region 只允许字母/数字/连字符，最终 host 固定为 <region>.aliyuncs.com，
+    # 杜绝把任意 host:port / IP 字形拼进 endpoint 造成 SSRF / 内网探测。
+    region = _norm_oss_region(body.region)
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,63}", region):
+        return {
+            "ok": False,
+            "cors_configured": None,
+            "code": None,
+            "status": None,
+            "message": "OSS region 配置无效",
+            "request_id": None,
+        }
+    ok, why = _oss_endpoint_is_safe(region)
+    if not ok:
+        return {
+            "ok": False,
+            "cors_configured": None,
+            "code": None,
+            "status": None,
+            "message": "OSS 连接被拒绝：" + why,
+            "request_id": None,
+        }
+
     try:
         auth = oss2.Auth(body.oss_ak, body.oss_sk)
-        bucket = oss2.Bucket(auth, "https://%s.aliyuncs.com" % _norm_oss_region(body.region), body.bucket)
+        # connect_timeout=10：限制单次出站连接/请求时长，避免连到不可达地址时长时间挂起
+        bucket = oss2.Bucket(auth, "https://%s.aliyuncs.com" % region, body.bucket, connect_timeout=10)
         bucket.list_objects("", max_keys=1)
     except oss2.exceptions.OssError as exc:
         return {
@@ -192,13 +243,14 @@ def oss_check(body: OssCheckRequest, username: str = Depends(get_username)):
             "message": getattr(exc, "message", str(exc)),
             "request_id": getattr(exc, "request_id", None),
         }
-    except Exception as exc:  # DNS/网络不可达等非 OSS 标准错误
+    except Exception:  # DNS/网络不可达等非 OSS 标准错误
+        # V-002：不回显底层连接/解析细节，避免把探测结果反馈给调用方
         return {
             "ok": False,
             "cors_configured": None,
             "code": None,
             "status": None,
-            "message": "无法连接 OSS 服务，请检查本地网络或 DNS：%s" % exc,
+            "message": "无法连接 OSS 服务，请检查网络或配置",
             "request_id": None,
         }
 

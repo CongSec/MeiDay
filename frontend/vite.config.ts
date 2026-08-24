@@ -30,6 +30,26 @@ export default defineConfig(({ mode }) => {
     build: {
       // 生产构建不生成 .map，避免源码映射泄露
       sourcemap: false,
+      // 1MB+ 大单包对弱网/低端机首屏不友好；开启手动分包，把体积大、更新频率低
+      // 的第三方库拆成独立 chunk，走浏览器 HTTP 缓存，业务代码更新时不再整包失效。
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (!id.includes('node_modules')) return undefined
+            // ali-oss（SDK 体积大、只在同步/诊断时用到）单独分包，配合按需 import 可延迟加载
+            if (id.includes('ali-oss')) return 'vendor-oss'
+            if (id.includes('vue-draggable-plus')) return 'vendor-drag'
+            if (id.includes('vue-virtual-scroller')) return 'vendor-scroll'
+            // 框架核心：vue / pinia / vue-router 放一起，缓存命中率高
+            if (
+              /[\\/]node_modules[\\/](vue|@vue|pinia|vue-router|vue-demi|@vueuse)[\\/]/.test(id)
+            ) {
+              return 'vendor-core'
+            }
+            return 'vendor-other'
+          },
+        },
+      },
     },
     resolve: {
       alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
@@ -39,7 +59,12 @@ export default defineConfig(({ mode }) => {
       port: 5173,
       https,
       proxy: {
-        '/api': { target: 'http://127.0.0.1:8000', changeOrigin: true },
+        '/api': {
+          target: 'http://127.0.0.1:8000',
+          changeOrigin: true,
+          // 透传真实客户端 IP（X-Forwarded-For / X-Real-IP），否则后端只会看到本机 127.0.0.1
+          xfwd: true,
+        },
       },
     },
   }

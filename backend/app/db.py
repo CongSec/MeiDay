@@ -117,6 +117,17 @@ CREATE TABLE IF NOT EXISTS audit_logs_backup (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_backup_username ON audit_logs_backup(username);
 CREATE INDEX IF NOT EXISTS idx_audit_backup_archived ON audit_logs_backup(archived_at);
+-- 同步协调中心：每个用户最近发生的资源变更事件（res_type + project_id）。
+-- 客户端在 OSS 写入成功后上报；其它设备轮询 /api/sync/state 按版本号增量拉取。
+-- 只记录"谁的数据变了"，不存任何业务数据本身。
+CREATE TABLE IF NOT EXISTS sync_changes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+    res_type TEXT NOT NULL,
+    project_id TEXT,
+    ts TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sync_changes_user ON sync_changes(username, id);
 """
 
 
@@ -261,3 +272,34 @@ def init_db() -> None:
             """,
             (now,),
         )
+
+# ---------- 同步协调中心（/api/sync） ----------
+
+def get_sync_version(conn: sqlite3.Connection, username: str) -> int:
+    """该用户当前的总版本号 = 最近一条 sync_changes 的 id；无记录返回 0。"""
+    row = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) AS v FROM sync_changes WHERE username=?", (username,)
+    ).fetchone()
+    return int(row["v"])
+
+
+def add_sync_changes(username: str, events) -> int:
+    """写入一批变更事件并返回该用户最新的总版本号。events: [(res_type, project_id), ...]"""
+    if not events:
+        with get_conn() as conn:
+            return get_sync_version(conn, username)
+    with get_conn() as conn:
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        conn.executemany(
+            "INSERT INTO sync_changes (username, res_type, project_id, ts) VALUES (?,?,?,?)",
+            [(username, res_type, project_id, ts) for (res_type, project_id) in events],
+        )
+        return get_sync_version(conn, username)
+
+
+def delete_sync_changes_older_than(hours: int) -> int:
+    """删除超过保留时长的同步变更事件，返回删除条数（离线设备靠 full_sync 全量补拉）。"""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM sync_changes WHERE ts < ?", (cutoff,))
+        return cur.rowcount
