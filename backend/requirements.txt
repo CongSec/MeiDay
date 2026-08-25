@@ -4,3 +4,4 @@ aiosmtplib
 argon2-cffi
 pydantic
 oss2
+Pillow

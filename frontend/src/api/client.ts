@@ -111,9 +111,11 @@ export interface NotifyPrefs {
 }
 
 export interface CaptchaResult {
-  /** 验证码 id：注册时随验证码答案一起回传 */
+  /** 验证码 id：注册时随点击答案一起回传 */
   id: string
-  /** 图形验证码图片（PNG 的 data URL） */
+  /** 需要点击的目标符号（如 ★） */
+  target: string
+  /** 3×3 网格图片（PNG 的 data URL） */
   image: string
 }
 
@@ -150,8 +152,8 @@ export interface AuditLog {
 
 export const api = {
   /** 注册只发送 SHA-256(password) 校验子（不可逆密文），明文密码不出浏览器；
-   *  需附带图形验证码（captchaId + captchaCode）防批量注册 */
-  register(body: { username: string; passwordHash: string; encrypted_creds?: string | null; smtp_plain?: SmtpPlain | null; captchaId: string; captchaCode: string }) {
+   *  需附带点击式验证码（captchaId + captchaAnswer）防批量注册 */
+  register(body: { username: string; passwordHash: string; encrypted_creds?: string | null; smtp_plain?: SmtpPlain | null; captchaId: string; captchaAnswer: number[] }) {
     return request<{ ok: true }>('POST', '/api/register', body)
   },
   /** 获取注册用的图形验证码图片 */

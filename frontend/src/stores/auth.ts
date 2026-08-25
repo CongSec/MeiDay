@@ -57,7 +57,7 @@ export const useAuthStore = defineStore('auth', {
       else clearSavedPassword()
       if (this.credError) useUiStore().toast(this.credError, 'error')
     },
-    async register(body: { username: string; password: string; encrypted_creds?: string | null; smtp_plain?: SmtpPlain | null; captchaId: string; captchaCode: string }, remember = true) {
+    async register(body: { username: string; password: string; encrypted_creds?: string | null; smtp_plain?: SmtpPlain | null; captchaId: string; captchaAnswer: number[] }, remember = true) {
       const passwordHash = await passwordVerifier(body.password)
       await api.register({
         username: body.username,
@@ -65,7 +65,7 @@ export const useAuthStore = defineStore('auth', {
         encrypted_creds: body.encrypted_creds,
         smtp_plain: body.smtp_plain,
         captchaId: body.captchaId,
-        captchaCode: body.captchaCode,
+        captchaAnswer: body.captchaAnswer,
       })
       await this.login(body.username, body.password, remember)
     },

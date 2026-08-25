@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, type CaptchaResult } from '@/api/client'
+import ClickCaptcha from '@/components/ClickCaptcha.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
@@ -15,29 +15,16 @@ const remember = ref(true)
 const err = ref('')
 const busy = ref(false)
 
-// 图形验证码（仅注册时需要）：图片来自后端，验证码单次使用、绑定 IP
-const captcha = ref<CaptchaResult | null>(null)
-const captchaCode = ref('')
-const captchaLoading = ref(false)
-
-async function loadCaptcha() {
-  if (captchaLoading.value) return
-  captchaLoading.value = true
-  try {
-    captcha.value = await api.getCaptcha()
-    captchaCode.value = ''
-  } catch (e) {
-    err.value = (e as Error).message || '验证码获取失败，请稍后重试'
-  } finally {
-    captchaLoading.value = false
-  }
-}
+// 点击式验证码（仅注册时需要）：组件内部拉图并管理点击；提交时读取 captchaValue。
+// 通过 key 强制重新挂载来“换新图”（验证码单次使用，失败/换模式后需要新图）。
+const captchaKey = ref(0)
+const captchaValue = ref<{ id: string | null; answer: number[] } | null>(null)
 
 function switchMode(m: 'login' | 'register') {
   mode.value = m
   err.value = ''
-  // 每次进入注册都刷新一张新验证码（旧的可能已被校验作废）
-  if (m === 'register') void loadCaptcha()
+  // 每次进入注册都重新挂载验证码组件（拉一张新图，旧的可能已被校验作废）
+  if (m === 'register') captchaKey.value++
 }
 
 async function submit() {
@@ -55,22 +42,23 @@ async function submit() {
       err.value = '密码至少 8 位'
       return
     }
-    if (!captcha.value || !captchaCode.value.trim()) {
-      err.value = '请输入图形验证码'
-      return
-    }
   }
   busy.value = true
   try {
     if (mode.value === 'login') {
       await auth.login(username.value.trim(), password.value, remember.value)
     } else {
+      const captcha = captchaValue.value
+      if (!captcha || !captcha.id || captcha.answer.length === 0) {
+        err.value = '请点击验证码中所有目标符号'
+        return
+      }
       await auth.register(
         {
           username: username.value.trim(),
           password: password.value,
-          captchaId: captcha.value!.id,
-          captchaCode: captchaCode.value.trim(),
+          captchaId: captcha.id,
+          captchaAnswer: captcha.answer,
         },
         remember.value,
       )
@@ -78,8 +66,8 @@ async function submit() {
     router.push('/today')
   } catch (e) {
     err.value = (e as Error).message || '操作失败'
-    // 验证码单次使用：注册失败（验证码错/已过期/重名等）后刷新一张新图
-    if (mode.value === 'register') void loadCaptcha()
+    // 验证码单次使用：注册失败（验证码错/已过期/重名等）后重新挂载换一张新图
+    if (mode.value === 'register') captchaKey.value++
   } finally {
     busy.value = false
   }
@@ -139,31 +127,12 @@ async function submit() {
           autocomplete="new-password"
           class="w-full border rounded-lg px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-brand/50"
         />
-        <div v-if="mode === 'register'" class="flex items-center gap-2">
-          <input
-            v-model="captchaCode"
-            name="captcha_code"
-            placeholder="验证码"
-            autocomplete="off"
-            maxlength="4"
-            class="w-full border rounded-lg px-3 py-2.5 text-sm uppercase tracking-widest outline-none focus:ring-2 focus:ring-brand/50"
-          />
-          <button
-            type="button"
-            class="shrink-0 h-11 w-24 rounded-lg border border-slate-200 overflow-hidden bg-white flex items-center justify-center"
-            :disabled="captchaLoading"
-            :title="captchaLoading ? '加载中…' : '点击刷新验证码'"
-            @click="loadCaptcha"
-          >
-            <img
-              v-if="captcha"
-              :src="captcha.image"
-              alt="验证码"
-              class="h-full w-full object-cover"
-            />
-            <span v-else class="text-[10px] text-slate-400">{{ captchaLoading ? '加载中…' : '点击获取' }}</span>
-          </button>
-        </div>
+        <ClickCaptcha
+          v-if="mode === 'register'"
+          :key="captchaKey"
+          :disabled="busy"
+          @change="captchaValue = $event"
+        />
         <div v-if="err" class="text-sm text-red-500">{{ err }}</div>
         <label class="flex items-center gap-2 text-xs text-slate-500 select-none">
           <input type="checkbox" v-model="remember" class="accent-brand" />

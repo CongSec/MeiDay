@@ -80,9 +80,9 @@ def register(body: RegisterRequest, request: Request = None):
     username = body.username.strip()
     if not username or not body.passwordHash:
         raise HTTPException(status_code=400, detail="用户名/密码校验值不能为空")
-    # 图形验证码：单次使用、绑定 IP、5 分钟过期。校验失败即 400 并提示重新输入
+    # 点击式验证码：单次使用、绑定 IP、5 分钟过期。校验失败即 400 并提示重新输入
     # （验证码已作废，前端会刷新新图）。放在频率限制之前，把批量注册挡在第一道关卡。
-    if not verify_captcha(body.captchaId, body.captchaCode, _ip(request)):
+    if not verify_captcha(body.captchaId, body.captchaAnswer, _ip(request)):
         raise HTTPException(status_code=400, detail="验证码错误或已过期")
     _check_register_rate_limit(_ip(request))
     with get_conn() as conn:

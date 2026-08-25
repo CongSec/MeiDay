@@ -31,19 +31,28 @@ class RegisterRequest(BaseModel):
     """注册：客户端只发送 SHA-256(password) 的 base64 校验子（不可逆密文），
     服务端对校验子再做 argon2 慢哈希存储，避免明文密码出现在网络中。
 
-    同时要求图形验证码（captchaId + captchaCode，单次使用、绑定 IP），
+    同时要求点击式验证码（captchaId + captchaAnswer，单次使用、绑定 IP），
     对抗换 IP 批量注册。"""
     username: str
     passwordHash: str
     encrypted_creds: Optional[str] = None
     smtp_plain: Optional["SmtpPlain"] = None
     captchaId: str = ""
-    captchaCode: str = ""
+    captchaAnswer: List[int] = []
 
-    @field_validator("captchaId", "captchaCode", mode="before")
+    @field_validator("captchaId", mode="before")
     @classmethod
-    def _captcha(cls, v):
+    def _captcha_id(cls, v):
         return _strip(v)[:128]
+
+    @field_validator("captchaAnswer", mode="before")
+    @classmethod
+    def _captcha_answer(cls, v):
+        if not isinstance(v, list):
+            raise ValueError("验证码答案格式错误")
+        if len(v) > 9:
+            raise ValueError("验证码答案格式错误")
+        return v
 
     @field_validator("username", mode="before")
     @classmethod
