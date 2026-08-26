@@ -170,6 +170,9 @@ export const useAuthStore = defineStore('auth', {
       ])
       // 尽力把待发变更上报发给中心服务器（队列按用户隔离，登出时保留、下次登录补报）
       await flushPendingSyncReports(username)
+      // 登出同样销毁隐私日记内存密钥/解密态与空闲锁（每个账号日记独立，换账号不得残留）
+      const { useDiaryStore } = await import('./diary')
+      useDiaryStore().lock()
       this.reset()
       useTasksStore().resetAll()
       useProjectsStore().resetAll()

@@ -116,6 +116,39 @@ export interface UserStats {
   updated_at: string
 }
 
+
+/** 隐私日记：附件密文的元信息（二进制密文存于 users/{username}/diary/files/{fileId}） */
+export interface DiaryFileRef {
+  fileId: string
+  name: string
+  size: number
+  mime: string
+  /** 音频时长（秒），仅 audio 消息 */
+  duration?: number
+}
+
+export type DiaryMessageType = 'text' | 'file' | 'audio'
+
+/** 隐私日记：单条消息（整日文件整体加密，消息内容均为解密后内存态） */
+export interface DiaryMessage {
+  id: string
+  type: DiaryMessageType
+  /** 文本消息正文 */
+  text?: string
+  /** 文件/音频消息的附件引用 */
+  file?: DiaryFileRef
+  createdAt: string
+  /** 追加到历史某天时为 true（聊天框显示「追加」标签） */
+  appended?: boolean
+}
+
+/** 隐私日记：某天的日记内容（整体加密后存于 users/{username}/diary/YYYY/MM/DD.json） */
+export interface DiaryDay {
+  v: 1
+  messages: DiaryMessage[]
+  updatedAt: string
+}
+
 export interface CredFields {
   ossAk: string
   ossSk: string

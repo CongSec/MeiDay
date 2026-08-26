@@ -105,6 +105,15 @@ export const paths = {
   tasks: (username: string, projectId: string) => `users/${username}/projects/${projectId}/tasks.json`,
   trash: (username: string, projectId: string) => `users/${username}/projects/${projectId}/trash.json`,
   repeats: (username: string, projectId: string) => `users/${username}/projects/${projectId}/repeats.json`,
+  /** 隐私日记命名空间（独立于任务数据）：所有对象均为密文 */
+  diary: (username: string) => `users/${username}/diary/`,
+  diaryMeta: (username: string) => `users/${username}/diary/_meta.json`,
+  /** 某天日记密文：YYYY/MM/DD.json */
+  diaryDay: (username: string, y: string, m: string, d: string) =>
+    `users/${username}/diary/${y}/${m}/${d}.json`,
+  /** 附件密文：diary/files/{fileId} */
+  diaryFile: (username: string, fileId: string) =>
+    `users/${username}/diary/files/${fileId}`,
   /** 附件二进制（明文直传）存放路径：taskId 为主任务 id，fileId 为附件 id */
   attachment: (username: string, taskId: string, fileId: string) =>
     `users/${username}/attachments/${taskId}/${fileId}`,

@@ -1,7 +1,7 @@
 import type { CredFields } from '@/types'
 
-const encoder = new TextEncoder()
-const decoder = new TextDecoder()
+export const encoder = new TextEncoder()
+export const decoder = new TextDecoder()
 
 export async function deriveUserKey(password: string, username: string): Promise<CryptoKey> {
   const material = await crypto.subtle.importKey(
@@ -20,7 +20,7 @@ export async function deriveUserKey(password: string, username: string): Promise
   )
 }
 
-function bytesToB64(bytes: Uint8Array): string {
+export function bytesToB64(bytes: Uint8Array): string {
   let bin = ''
   const chunk = 0x8000
   for (let i = 0; i < bytes.length; i += chunk) {
@@ -29,7 +29,7 @@ function bytesToB64(bytes: Uint8Array): string {
   return btoa(bin)
 }
 
-function b64ToBytes(b64: string): Uint8Array {
+export function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64)
   const bytes = new Uint8Array(bin.length)
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
@@ -44,7 +44,7 @@ export async function passwordVerifier(password: string): Promise<string> {
 }
 
 /** AES-GCM 加密任意字节（IV 前置），返回 base64(iv + ciphertext) */
-async function encryptBytes(key: CryptoKey, data: Uint8Array): Promise<string> {
+export async function encryptBytes(key: CryptoKey, data: Uint8Array): Promise<string> {
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const cipher = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, data)
   const payload = new Uint8Array(iv.length + cipher.byteLength)
@@ -54,7 +54,7 @@ async function encryptBytes(key: CryptoKey, data: Uint8Array): Promise<string> {
 }
 
 /** AES-GCM 解密字节（与 encryptBytes 配对） */
-async function decryptBytes(key: CryptoKey, payloadB64: string): Promise<Uint8Array> {
+export async function decryptBytes(key: CryptoKey, payloadB64: string): Promise<Uint8Array> {
   const raw = b64ToBytes(payloadB64)
   const iv = raw.slice(0, 12)
   const data = raw.slice(12)

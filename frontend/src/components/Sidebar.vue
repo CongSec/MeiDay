@@ -7,6 +7,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useProjectsStore } from '@/stores/projects'
 import { useTasksStore } from '@/stores/tasks'
 import { useUiStore } from '@/stores/ui'
+import { setDiaryEntryIntent } from '@/utils/diarySession'
 import type { Project } from '@/types'
 
 const emit = defineEmits<{ 'new-project': []; 'open-project': [id: string]; 'open-import': [] }>()
@@ -27,6 +28,18 @@ async function onLogout() {
   await auth.logout()
   ui.closeDrawer()
   router.push('/login')
+}
+
+/** 隐私日记模式入口：未配置 OSS 凭证时提示并停留；否则置进入意图后进入独立路由 */
+function goDiary() {
+  if (!auth.creds) {
+    ui.toast('请先在设置中配置 OSS 存储', 'error')
+    ui.closeDrawer()
+    return
+  }
+  setDiaryEntryIntent(true)
+  ui.closeDrawer()
+  router.push('/diary')
 }
 
 const canEditProjects = computed(() => !!auth.username)
@@ -116,6 +129,13 @@ function onActiveDragEnd() {
     </div>
 
     <div class="border-t border-slate-100 px-3 py-2 space-y-0.5">
+      <button
+        class="flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-slate-600 hover:bg-slate-200 w-full"
+        title="隐私日记模式"
+        @click="goDiary"
+      >
+        <span>🔒</span> 隐私日记模式
+      </button>
       <button
         class="flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-slate-600 hover:bg-slate-200 w-full"
         title="批量导入"

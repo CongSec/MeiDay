@@ -412,18 +412,7 @@ async function onImported(list: Task[]) {
         </div>
       </div>
     </div>
-    <div class="fixed top-4 right-4 z-50 space-y-2">
-      <div
-        v-for="t in ui.toasts"
-        :key="t.id"
-        class="px-4 py-2 rounded-lg shadow-lg text-sm text-white cursor-pointer"
-        :class="t.type === 'ok' ? 'bg-slate-800' : 'bg-red-500'"
-        title="点击关闭"
-        @click="ui.dismiss(t.id)"
-      >
-        {{ t.text }}
-      </div>
-    </div>
+    <!-- Toast 已移至 App.vue 全局渲染 -->
     <UploadIndicator />
   </div>
 </template>
