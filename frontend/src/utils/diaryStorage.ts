@@ -110,7 +110,11 @@ export async function saveDiaryDay(
 ): Promise<void> {
   const [y, m, d] = dateKey.split('-')
   const cipher = await encryptDay(dek, JSON.stringify(day))
-  await client.put(diaryDayKey(username, y, m, d), cipher, { mime: 'application/json' })
+  // ali-oss 浏览器版 put 只接受 Buffer/Blob/File，不能传纯字符串
+  await client.put(
+    diaryDayKey(username, y, m, d),
+    new Blob([cipher], { type: 'application/json' }),
+  )
 }
 
 /** 删除某天日记文件（空日记清理用） */

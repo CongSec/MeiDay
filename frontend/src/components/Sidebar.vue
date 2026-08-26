@@ -30,8 +30,19 @@ async function onLogout() {
   router.push('/login')
 }
 
-/** 隐私日记模式入口：未配置 OSS 凭证时提示并停留；否则置进入意图后进入独立路由 */
-function goDiary() {
+/** 隐私日记模式入口：未配置 OSS 凭证时提示并停留；否则置进入意图后进入独立路由。
+ *  刷新后自动解锁是异步的，若用户立即点击本按钮而凭证尚未恢复，先等自动解锁完成，
+ *  避免误报“请先在设置中配置 OSS 存储”。 */
+async function goDiary() {
+  // 有 token 但会话密钥未派生（自动解锁尚未完成）：尝试补齐解锁，失败则按未配置凭证处理
+  if (auth.token && !auth.userKey) {
+    try {
+      if (!auth.username) await auth.fetchMe()
+      await auth.tryAutoUnlock()
+    } catch {
+      /* 解锁失败不阻塞：下面统一按凭证缺失提示 */
+    }
+  }
   if (!auth.creds) {
     ui.toast('请先在设置中配置 OSS 存储', 'error')
     ui.closeDrawer()

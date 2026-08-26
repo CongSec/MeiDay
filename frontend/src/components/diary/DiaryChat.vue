@@ -1,7 +1,7 @@
 <template>
   <div class="flex flex-col h-full min-h-0">
     <!-- 顶部：日期切换条 -->
-    <div class="flex items-center justify-between px-3 py-2 border-b border-slate-200 bg-white/80">
+    <div class="flex items-center justify-between px-3 py-2 border-b border-slate-200 bg-white/80 shrink-0">
       <button
         class="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-40"
         :disabled="navBusy"
@@ -10,9 +10,7 @@
       >
         ‹ 上一天
       </button>
-      <div class="text-sm font-semibold text-slate-700">
-        {{ selectedTitle }}
-      </div>
+      <div class="text-sm font-semibold text-slate-700">{{ selectedTitle }}</div>
       <button
         class="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-40"
         :disabled="navBusy"
@@ -23,47 +21,41 @@
       </button>
     </div>
 
-    <!-- 聊天时间线 -->
+    <!-- 单日聊天区：进入保持空白，点击日历 / 上下一天才懒加载该天 -->
     <div
       ref="scrollEl"
       class="flex-1 overflow-y-auto overflow-x-hidden bg-[#f0f2f5] px-2 py-3"
-      @scroll="onScroll"
       @touchstart.passive="onTouchStart"
       @touchend.passive="onTouchEnd"
     >
-      <div class="space-y-3">
-        <template v-for="d in diary.dateKeys" :key="d">
-          <div :id="`day-${d}`" class="scroll-mt-3">
-            <div class="flex items-center gap-3 my-3">
-              <div class="flex-1 h-px bg-slate-300" />
-              <div class="text-[11px] text-slate-500 bg-white rounded-full px-2.5 py-0.5 shadow-sm select-none">
-                {{ formatDayLabel(d) }}
-              </div>
-              <div class="flex-1 h-px bg-slate-300" />
-            </div>
-
-            <div v-if="!diary.days[d] || !diary.days[d].length" class="text-center text-xs text-slate-400 py-3">
-              该天暂无记录
-            </div>
-            <DiaryMessageBubble
-              v-for="m in diary.days[d] ?? []"
-              :key="m.id"
-              :message="m"
-              @delete="(id: string) => onDelete(d, id)"
-            />
-          </div>
-        </template>
-
-        <div v-if="!diary.dateKeys.length" class="text-center text-slate-400 text-sm py-10 leading-relaxed">
-          <div class="text-3xl mb-2">🕊️</div>
-          请点击左侧日历选择某天查看，<br />或直接输入开始记录今天。
+      <!-- 日期分隔线 -->
+      <div class="flex items-center gap-3 my-3">
+        <div class="flex-1 h-px bg-slate-300" />
+        <div class="text-[11px] text-slate-500 bg-white rounded-full px-2.5 py-0.5 shadow-sm select-none">
+          {{ dayLabel }}
         </div>
-        <div v-if="loadingMore" class="text-center text-xs text-slate-400 py-2">正在加载…</div>
+        <div class="flex-1 h-px bg-slate-300" />
       </div>
+
+      <!-- 未加载：空白提示（不自动读取任何历史） -->
+      <div v-if="!loaded && !loading" class="text-center text-slate-400 text-sm py-14 leading-relaxed">
+        <div class="text-3xl mb-2">🕊️</div>
+        请点击左侧日历选择某天查看，<br />或直接输入开始记录今天。
+      </div>
+      <div v-else-if="loading" class="text-center text-xs text-slate-400 py-8">正在加载…</div>
+      <div v-else-if="!messages.length" class="text-center text-xs text-slate-400 py-8">该天暂无记录</div>
+      <template v-else>
+        <DiaryMessageBubble
+          v-for="m in messages"
+          :key="m.id"
+          :message="m"
+          @delete="(id: string) => onDelete(id)"
+        />
+      </template>
     </div>
 
     <!-- 输入区 -->
-    <div class="border-t border-slate-200 bg-white px-2 py-2 space-y-1.5" @dragover.prevent @drop.prevent="onDrop">
+    <div class="border-t border-slate-200 bg-white px-2 py-2 space-y-1.5 shrink-0" @dragover.prevent @drop.prevent="onDrop">
       <div
         v-if="dragging"
         class="rounded-lg border-2 border-dashed border-brand/60 bg-brand/5 text-center text-sm text-brand py-2"
@@ -116,7 +108,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import DiaryMessageBubble from './DiaryMessageBubble.vue'
 import { useDiaryStore } from '@/stores/diary'
 import { useUiStore } from '@/stores/ui'
-import { addDaysKey, todayKey } from '@/utils/time'
+import { todayKey } from '@/utils/time'
 
 const diary = useDiaryStore()
 const ui = useUiStore()
@@ -126,14 +118,11 @@ const scrollEl = ref<HTMLElement | null>(null)
 const textInput = ref<HTMLTextAreaElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
 const navBusy = ref(false)
-const loadingMore = ref(false)
 const dragging = ref(false)
 
-/** 同一方向连续触发的防抖 */
-let loadGuard = { up: false, down: false }
-
-/** 时间线里最多保留的天数（超出则卸载最远的天，释放内存/Blob URL） */
-const MAX_DAYS = 20
+const loaded = computed(() => diary.days[diary.selectedDate] !== undefined)
+const loading = computed(() => !!diary.loadingDates[diary.selectedDate])
+const messages = computed(() => diary.days[diary.selectedDate] ?? [])
 
 const selectedTitle = computed(() => {
   const d = diary.selectedDate
@@ -142,11 +131,15 @@ const selectedTitle = computed(() => {
   return `${y}年${Number(m)}月${Number(day)}日`
 })
 
-function formatDayLabel(d: string): string {
+const dayLabel = computed(() => {
+  const d = diary.selectedDate
+  if (!d) return ''
   const [y, m, day] = d.split('-')
-  if (d === todayKey()) return `今天 · ${m}/${day}`
-  return `${y}/${Number(m)}/${Number(day)}`
-}
+  const week = ['日', '一', '二', '三', '四', '五', '六'][new Date(`${d}T00:00:00+08:00`).getDay()]
+  const today = todayKey()
+  const prefix = d === today ? '今天 · ' : ''
+  return `${prefix}${y}/${Number(m)}/${Number(day)} 周${week}`
+})
 
 function insertNewline(): void {
   const el = textInput.value
@@ -164,7 +157,7 @@ async function onSendText(): Promise<void> {
   draft.value = ''
   try {
     await diary.sendText(text)
-    ui.toast('发送成功')
+    ui.toast('发送成功 · 已加密保存到云端')
   } catch (e) {
     ui.toast(e instanceof Error ? e.message : '发送失败', 'error')
   }
@@ -178,7 +171,7 @@ async function sendFiles(files: FileList | File[]): Promise<void> {
       const isAudio = f.type.startsWith('audio/')
       await diary.sendFile(f, isAudio ? 'audio' : 'file')
     }
-    ui.toast(`发送成功${arr.length > 1 ? `（${arr.length} 项）` : ''}`)
+    ui.toast(`发送成功${arr.length > 1 ? `（${arr.length} 项）` : ''} · 已加密保存到云端`)
   } catch (e) {
     ui.toast(e instanceof Error ? e.message : '发送失败', 'error')
   }
@@ -214,86 +207,18 @@ async function goToDay(dateKey: string | null): Promise<void> {
   navBusy.value = true
   try {
     await diary.selectDate(dateKey)
-    await scrollToDay(dateKey)
   } finally {
     navBusy.value = false
   }
 }
 
 async function goPrev(): Promise<void> {
-  const target = await diary.findRecordedDate(diary.dateKeys[0] ?? diary.selectedDate, -1)
+  const target = await diary.findRecordedDate(diary.selectedDate, -1)
   await goToDay(target)
 }
 async function goNext(): Promise<void> {
-  const target = await diary.findRecordedDate(diary.dateKeys[diary.dateKeys.length - 1] ?? diary.selectedDate, 1)
+  const target = await diary.findRecordedDate(diary.selectedDate, 1)
   await goToDay(target)
-}
-
-/* ---------- 滚动：接近首尾时懒加载相邻天 ---------- */
-async function onScroll(): Promise<void> {
-  const el = scrollEl.value
-  if (!el) return
-  const nearTop = el.scrollTop < 60
-  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60
-  if (nearTop && !loadGuard.up) {
-    loadGuard.up = true
-    await loadPrevAuto()
-    loadGuard.up = false
-  }
-  if (nearBottom && !loadGuard.down) {
-    loadGuard.down = true
-    await loadNextAuto()
-    loadGuard.down = false
-  }
-}
-
-async function loadPrevAuto(): Promise<void> {
-  const earliest = diary.dateKeys[0]
-  if (!earliest) return
-  const target = await diary.findRecordedDate(earliest, -1)
-  if (!target || diary.days[target] !== undefined) return
-  // 记录原滚动位置与首条内容锚点，插入后保持视口不跳动
-  const el = scrollEl.value
-  const anchor = el?.querySelector('[id^="day-"]') as HTMLElement | null
-  const prevTop = el?.scrollTop ?? 0
-  const anchorTop = anchor?.offsetTop ?? 0
-  await diary.selectDate(target)
-  await nextTick()
-  await scrollToDay(target, false)
-  if (el && anchor) {
-    const delta = anchorTop - anchor.offsetTop
-    el.scrollTop = prevTop + delta
-  }
-  await trimDays()
-}
-
-async function loadNextAuto(): Promise<void> {
-  const latest = diary.dateKeys[diary.dateKeys.length - 1]
-  if (!latest) return
-  const target = await diary.findRecordedDate(latest, 1)
-  if (!target || diary.days[target] !== undefined) return
-  await diary.selectDate(target)
-  await nextTick()
-  await scrollToDay(target)
-  await trimDays()
-}
-
-/** 时间线限制：只保留围绕 selectedDate 的窗口，卸载最远的天 */
-async function trimDays(): Promise<void> {
-  const keys = diary.dateKeys
-  if (keys.length <= MAX_DAYS) return
-  const sel = diary.selectedDate
-  const t = (d: string) => new Date(`${d}T00:00:00+08:00`).getTime()
-  const s = t(sel)
-  const far = [...keys].sort((a, b) => Math.abs(t(a) - s) - Math.abs(t(b) - s))
-  const toRemove = far.slice(MAX_DAYS)
-  for (const d of toRemove) await diary.unloadDay(d)
-}
-
-async function scrollToDay(dateKey: string, smooth = true): Promise<void> {
-  await nextTick()
-  const el = document.getElementById(`day-${dateKey}`)
-  el?.scrollIntoView({ block: 'start', behavior: smooth ? 'smooth' : 'auto' })
 }
 
 /* ---------- 横向滑动切换上/下一天 ---------- */
@@ -341,7 +266,7 @@ async function toggleRecord(): Promise<void> {
     mediaRecorder.ondataavailable = (e) => {
       if (e.data.size > 0) recChunks.push(e.data)
     }
-        mediaRecorder.onstop = async () => {
+    mediaRecorder.onstop = async () => {
       stream.getTracks().forEach((t) => t.stop())
       if (recTimer !== undefined) window.clearInterval(recTimer)
       recording.value = false
@@ -352,7 +277,7 @@ async function toggleRecord(): Promise<void> {
         const file = new File([blob], `语音_${Date.now()}.${ext}`, { type: mediaRecorder?.mimeType || 'audio/webm' })
         try {
           await diary.sendFile(file, 'audio', { duration })
-          ui.toast('发送成功')
+          ui.toast('发送成功 · 已加密保存到云端')
         } catch (err) {
           ui.toast(err instanceof Error ? err.message : '发送失败', 'error')
         }
@@ -376,9 +301,9 @@ function stopRecord(): void {
 }
 
 /* ---------- 删除单条消息 ---------- */
-async function onDelete(dateKey: string, msgId: string): Promise<void> {
+async function onDelete(msgId: string): Promise<void> {
   try {
-    await diary.deleteMessage(dateKey, msgId)
+    await diary.deleteMessage(diary.selectedDate, msgId)
     ui.toast('已删除')
   } catch (e) {
     ui.toast(e instanceof Error ? e.message : '删除失败', 'error')
@@ -408,11 +333,13 @@ function onDragLeave(): void {
   if (dragDepth === 0) dragging.value = false
 }
 
-/* 选中的日期变化时，如果该天已在时间线内则滚动定位 */
+/* 切换日期：回到聊天顶部（单日视图） */
 watch(
   () => diary.selectedDate,
-  (d) => {
-    if (diary.days[d]) void scrollToDay(d)
+  () => {
+    void nextTick(() => {
+      if (scrollEl.value) scrollEl.value.scrollTop = 0
+    })
   },
 )
 </script>

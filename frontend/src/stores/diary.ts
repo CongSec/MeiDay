@@ -53,6 +53,8 @@ export const useDiaryStore = defineStore('diary', {
       const auth = useAuthStore()
       if (!auth.username || !auth.creds) throw new Error('请先在设置中配置 OSS 存储')
       if (isDiaryUnlocked() && ossClient) {
+        // 每次进入都重置为空白时间线：不自动加载当天或任何历史日记
+        this.resetTimeline()
         this.unlocked = true
         this.username = auth.username
         return 'unlocked'
@@ -114,6 +116,14 @@ export const useDiaryStore = defineStore('diary', {
       })
     },
 
+    /** 每次进入日记前重置时间线：清空已解密天与导航状态，保证入口为空白页 */
+    resetTimeline(): void {
+      this.days = {}
+      this.knownDates = []
+      this.listedMonths = []
+      this.loadingDates = {}
+      this.selectedDate = todayKey()
+    },
     /** 退出 / 空闲锁定 / 刷新后清空：立即销毁密钥与解密态 */
     lock(): void {
       clearDiarySession()
