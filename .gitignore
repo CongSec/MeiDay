@@ -80,3 +80,32 @@ $RECYCLE.BIN/
 *.swp
 *.swo
 *~
+
+# ===== 前端本地环境文件（README 强调不要提交；.env.* 已覆盖，这里显式声明防误操作）=====
+frontend/.env.production
+frontend/.env.web
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+!frontend/.env.example
+
+# ===== Node / 前端工具日志与缓存 =====
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.eslintcache
+.stylelintcache
+.turbo/
+.parcel-cache/
+
+# ===== Android 原生构建缓存 =====
+.cxx/
+.kotlin/
+*.apk.idsig
+frontend/android/app/build/
+frontend/android/build/
+
+# ===== 其他本地产物 =====
+*.rej
+*.orig

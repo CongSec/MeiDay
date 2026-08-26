@@ -3,13 +3,14 @@ import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useProjectsStore } from '@/stores/projects'
 import { useAuthStore } from '@/stores/auth'
 import { useTasksStore } from '@/stores/tasks'
+import { fromLocalInput, nowIso, toLocalInput, todayKey } from '@/utils/time'
 import { useUiStore } from '@/stores/ui'
-import { fromLocalInput, nowIso, toLocalInput } from '@/utils/time'
 import { deleteAttachments, downloadAttachment, formatSize, isPreviewable } from '@/utils/attachments'
 import { cancelSessionUploads, cancelUploadByMetaId, commitUploads, enqueueUploads, getActiveUploadCount, subscribeUploads, type BackgroundUploadState } from '@/utils/backgroundUpload'
 import AttachmentPreviewModal from './AttachmentPreviewModal.vue'
-import { REPEAT_TYPES } from '@/types'
 import { ensureLegalCalendar } from '@/utils/legalWorkday'
+import { currentOrNextOccurrence, firstOccurrenceDate, isNewStyleRepeat } from '@/utils/repeat'
+import { REPEAT_TYPES } from '@/types'
 import type { AttachmentMeta, RepeatRule, RepeatType, Subtask, Task } from '@/types'
 
 const props = defineProps<{
@@ -66,6 +67,40 @@ void ensureLegalCalendar(new Date().getFullYear() + 1)
 const monthDayTouched = ref(false)
 const WEEKDAY_SHORT = ['日', '一', '二', '三', '四', '五', '六']
 
+/** 是否为「新模型」重复任务：编辑时看任务规则是否带 start（老重复数据走旧逻辑）；
+ *  新建时勾选重复即按新模型（提醒时间只选时分）。 */
+const isNewStyleRepeatTask = computed(() => {
+  if (props.subtaskMode) return false
+  if (props.task?.repeat) return isNewStyleRepeat(props.task.repeat)
+  return repeatEnabled.value
+})
+
+/** 重复规则的「形状」是否一致（不含 endAfter：改结束日期不重置相位） */
+function sameRepeatShape(a: RepeatRule, b: RepeatRule): boolean {
+  return (
+    a.type === b.type &&
+    a.interval === b.interval &&
+    JSON.stringify(a.weekdays ?? []) === JSON.stringify(b.weekdays ?? []) &&
+    (a.monthDay ?? 0) === (b.monthDay ?? 0)
+  )
+}
+
+/** 勾选/取消重复任务：提醒时间在「仅时分」与「完整日期时间」输入间切换 */
+watch(repeatEnabled, (v) => {
+  if (props.subtaskMode) return
+  if (v) {
+    // 切换为重复（新模型）：把完整 datetime 退化为时分，匹配 time 输入框
+    if (isNewStyleRepeatTask.value && reminder.value.length > 5) {
+      reminder.value = reminder.value.slice(11, 16)
+    }
+  } else if (isNewStyleRepeatTask.value || isNewStyleRepeat(props.task?.repeat)) {
+    // 取消重复：恢复为完整 datetime（基于任务原有提醒时间，避免遗留纯时分值）
+    const orig = props.task?.reminderTime
+    if (orig) reminder.value = toLocalInput(orig)
+  }
+})
+
+
 /** 新建任务时提前生成 id，供附件 OSS 路径与最终任务共用 */
 const localTaskId = ref('')
 /** 附件 OSS 目录归属：子任务归父任务，主任务归任务自身 */
@@ -119,7 +154,8 @@ watch(
       ? toLocalInput(s?.startTime)
       : toLocalInput(t?.startTime) || (t ? '' : props.initialStart ?? '')
     end.value = toLocalInput(isSub ? s?.endTime : t?.endTime)
-    reminder.value = toLocalInput(isSub ? s?.reminderTime : t?.reminderTime)
+    const _rt = toLocalInput(isSub ? s?.reminderTime : t?.reminderTime)
+    reminder.value = !isSub && t?.repeat && isNewStyleRepeat(t.repeat) ? (_rt ? _rt.slice(11, 16) : '') : _rt
     projectId.value =
       t?.projectId ??
       props.projectId ??
@@ -300,11 +336,13 @@ function toggleWeekday(wd: number) {
 }
 
 /** BUG-30: 校验开始/截止/提醒时间的先后关系，返回错误文案或 null */
-function validateTimes(start: string, end: string, reminder: string): string | null {
+function validateTimes(start: string, end: string, reminder: string, skipReminderDates = false): string | null {
   const s = start ? new Date(start).getTime() : 0
   const e = end ? new Date(end).getTime() : 0
-  const r = reminder ? new Date(reminder).getTime() : 0
   if (s && e && s > e) return '开始时间不能晚于截止时间'
+  // 新模型重复任务：提醒时间只是当天时分，不与开始/截止做日期先后比较
+  if (skipReminderDates) return null
+  const r = reminder ? new Date(reminder).getTime() : 0
   if (r && e && r > e) return '提醒时间不能晚于截止时间'
   if (s && r && r < s) return '提醒时间不能早于开始时间'
   return null
@@ -368,28 +406,14 @@ async function submit() {
     err.value = '请选择所属项目'
     return
   }
-  const timeErr = validateTimes(start.value, end.value, reminder.value)
+  const oldRepeat = props.task?.repeat ?? null
+  const wasNewStyle = !!oldRepeat && isNewStyleRepeat(oldRepeat)
+  // 新模型：新建的重复任务 / 原本就是新模型的重复任务（老重复数据保持旧逻辑，不迁移）
+  const isNewModel = repeatEnabled.value && (!oldRepeat || wasNewStyle)
+  const timeErr = validateTimes(start.value, end.value, reminder.value, isNewModel)
   if (timeErr) {
     err.value = timeErr
     return
-  }
-  const now = nowIso()
-  const task: Task = {
-    id: props.task?.id ?? localTaskId.value,
-    name: name.value.trim(),
-    description: description.value,
-    // 直接采用输入框当前值，清空即清空（不再回退到旧值）
-    startTime: fromLocalInput(start.value),
-    endTime: fromLocalInput(end.value),
-    reminderTime: reminder.value ? fromLocalInput(reminder.value) : null,
-    projectId: projectId.value,
-    status: props.task ? (status.value === 'completed' ? 'completed' : props.task.status === 'deleted' ? 'deleted' : 'pending') : status.value,
-    isReminded: props.task?.isReminded ?? false,
-    createdAt: props.task?.createdAt ?? now,
-    updatedAt: now,
-    // 编辑主任务时原样保留已有子任务，避免保存时丢失
-    subtasks: props.task?.subtasks ?? [],
-    attachments: attachments.value,
   }
   // 重复任务：生成规则写入任务（仅主任务模式；子任务不支持重复）
   let repeat: RepeatRule | undefined
@@ -405,6 +429,42 @@ async function submit() {
       repeat.monthDay = Math.min(31, Math.max(1, Math.floor(repeatMonthDay.value || 1)))
     }
     if (repeatEndAfter.value) repeat.endAfter = repeatEndAfter.value
+    if (isNewModel) {
+      const today = todayKey()
+      // 编辑时重复规则形状未变则保留原 start（相位锚点），避免每次保存重置周期相位
+      const keepStart = wasNewStyle && !!oldRepeat?.start && sameRepeatShape(oldRepeat, repeat)
+      repeat.start = keepStart ? oldRepeat!.start : firstOccurrenceDate(repeat, today)
+    }
+  }
+  // 提醒时间：新模型只保留时分，日期取“当前/下一次重复日”（相位以 rule.start 为准）
+  let reminderTime: string | null = null
+  if (reminder.value) {
+    if (isNewModel && repeat) {
+      const occDate = currentOrNextOccurrence(repeat, repeat.start ?? todayKey(), todayKey())
+      reminderTime = fromLocalInput(`${occDate}T${reminder.value}`)
+    } else {
+      // 兼容从重复模式切回遗留的纯时分值：补当天日期，避免存非法 ISO
+      const raw = reminder.value
+      reminderTime = raw.includes('T') ? fromLocalInput(raw) : fromLocalInput(`${todayKey()}T${raw}`)
+    }
+  }
+  const now = nowIso()
+  const task: Task = {
+    id: props.task?.id ?? localTaskId.value,
+    name: name.value.trim(),
+    description: description.value,
+    // 直接采用输入框当前值，清空即清空（不再回退到旧值）
+    startTime: fromLocalInput(start.value),
+    endTime: fromLocalInput(end.value),
+    reminderTime,
+    projectId: projectId.value,
+    status: props.task ? (status.value === 'completed' ? 'completed' : props.task.status === 'deleted' ? 'deleted' : 'pending') : status.value,
+    isReminded: props.task?.isReminded ?? false,
+    createdAt: props.task?.createdAt ?? now,
+    updatedAt: now,
+    // 编辑主任务时原样保留已有子任务，避免保存时丢失
+    subtasks: props.task?.subtasks ?? [],
+    attachments: attachments.value,
   }
   task.repeat = repeat
   // 记住新建任务时选择的项目：下次在今日视图新建任务时默认用它
@@ -485,7 +545,7 @@ onUnmounted(() => {
           </div>
           <div>
             <label class="text-xs text-slate-500 block mb-0.5">提醒时间</label>
-            <input v-model="reminder" type="datetime-local" class="w-full min-w-0 border rounded-lg px-2 py-1.5 text-sm" />
+            <input v-model="reminder" :type="isNewStyleRepeatTask ? 'time' : 'datetime-local'" class="w-full min-w-0 border rounded-lg px-2 py-1.5 text-sm" />
           </div>
           <div v-if="!subtaskMode">
             <label class="text-xs text-slate-500 block mb-0.5">所属项目</label>

@@ -1,6 +1,6 @@
 import type { RepeatRule, Task } from '@/types'
 import { addDays, addDaysKey, dateKeyOf, diffDaysKey, nowIso } from './time'
-import { nextLegalWorkday } from './legalWorkday'
+import { isLegalWorkday, nextLegalWorkday } from './legalWorkday'
 
 const WEEKDAY_NAMES = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
 
@@ -93,6 +93,71 @@ export function nextRepeatDate(rule: RepeatRule, anchor: string): string | null 
 /** 构造发给服务器的重复提醒规则：服务器只存这一条规则（JSON），
  *  发完邮件后由 worker 按周期自行推进 reminder_time，不预注册未来 N 条提醒。
  *  名称/描述/起止/提醒时间会上传服务器（邮件展示需要）；附件等敏感内容仍只在用户 OSS。 */
+
+/** 判断某天（YYYY-MM-DD）是否为该重复规则的「重复日」，语义与 nextRepeatDate 完全一致。
+ *  start 为相位锚点（新模型的 rule.start 首次出现日）；today < start 恒为 false。
+ *  覆盖：每天/每周（多星期相位）/每月（月末收敛）/法定工作日/旧「工作日」、interval>1。 */
+export function isRepeatDay(rule: RepeatRule, start: string, today: string): boolean {
+  if (!start || today < start) return false
+  const n = Math.max(1, rule.interval || 1)
+  switch (rule.type) {
+    case 'daily':
+      return diffDaysKey(start, today) % n === 0
+    case 'weekly': {
+      const wds = rule.weekdays?.length ? [...rule.weekdays] : null
+      const anchorWeek = Math.floor(diffDaysKey('1970-01-01', start) / 7)
+      const todayWeek = Math.floor(diffDaysKey('1970-01-01', today) / 7)
+      // 与 nextRepeatDate 一致：重复周 = 与锚点周序号差为 interval 整数倍的周
+      if ((todayWeek - anchorWeek) % n !== 0) return false
+      if (!wds) return weekdayOf(today) === weekdayOf(start)
+      return wds.includes(weekdayOf(today))
+    }
+    case 'workday': {
+      // 旧「每个工作日」仅兼容旧数据：忽略 interval
+      const wd = weekdayOf(today)
+      return wd >= 1 && wd <= 5
+    }
+    case 'monthly': {
+      const day = rule.monthDay ?? Number(start.slice(8, 10))
+      const [y, m] = today.split('-').map(Number)
+      const daysInMonth = new Date(Date.UTC(y, m, 0)).getUTCDate()
+      // 相位：与锚点月的月份序号差为 interval 的整数倍
+      const startMonths = Number(start.slice(0, 4)) * 12 + Number(start.slice(5, 7))
+      const todayMonths = Number(today.slice(0, 4)) * 12 + Number(today.slice(5, 7))
+      if ((todayMonths - startMonths) % n !== 0) return false
+      // 月末收敛：如每月 31 日，2 月落在最后一天（28/29）
+      return Number(today.slice(8, 10)) === Math.min(day, daysInMonth)
+    }
+    case 'legalWorkday':
+      return isLegalWorkday(today)
+  }
+}
+
+/** 新模型重复任务标记：规则带 start（首次出现日）。老重复数据无此字段，自动走旧逻辑。 */
+export function isNewStyleRepeat(rule?: RepeatRule | null): boolean {
+  return !!rule?.start
+}
+
+/** 以 anchor 为相位锚点，求 >= today 的最近一个重复日（today 匹配则返回 today；today 早于锚点则返回锚点）。
+ *  与 nextRepeatDate 相比，本函数相位固定于 anchor（不随 today 漂移），用于编辑已有任务时计算下一次提醒/出现。 */
+export function currentOrNextOccurrence(rule: RepeatRule, anchor: string, today: string): string {
+  if (!anchor || today < anchor) return anchor || today
+  if (isRepeatDay(rule, anchor, today)) return today
+  let d = today
+  // 最大间隔：daily n 天 / weekly ≤7n+6 / monthly ≤~31n 天（n<=365 时约 1.1 万）/ 法定工作日 ≤2 天；
+  // 2 万天上限覆盖全部合法规则，纯日期运算，开销可忽略。
+  for (let i = 0; i < 20000; i++) {
+    d = addDaysKey(d, 1)
+    if (isRepeatDay(rule, anchor, d)) return d
+  }
+  return today
+}
+
+/** 首次出现日：今天匹配规则则今天，否则下一个重复日（新模型创建时写 rule.start / 提醒时间锚点）。 */
+export function firstOccurrenceDate(rule: RepeatRule, today: string): string {
+  return currentOrNextOccurrence(rule, today, today)
+}
+
 export function buildReminderPayload(task: Task): RepeatRule | undefined {
   const rule = task.repeat
   if (!rule) return undefined
@@ -129,17 +194,30 @@ export function shiftTaskTimes(task: Task, days: number): Task {
 export function buildRepeatOccurrence(task: Task, today: string): { template: Task; dueDate: string } | null {
   const rule = task.repeat
   if (!rule) return null
-  const anchor = task.reminderTime || task.endTime || task.startTime
-  const anchorKey = anchor ? dateKeyOf(anchor) : today
-  let date = nextRepeatDate(rule, anchorKey)
-  if (!date) return null
-  let guard = 0
-  while (date < today && guard < 400) {
-    const nd = nextRepeatDate(rule, date)
-    if (!nd || nd <= date) break
-    date = nd
-    guard++
+  let anchorKey: string
+  let date: string | null
+  if (rule.start) {
+    // 新模型：以 rule.start 为相位锚点，下一次出现 = 严格晚于 today 的重复日，
+    // 避免提醒时间陈旧（未完成跨过多个重复日）导致在重复日完成时生成 dueDate==today 的重复任务。
+    const physical = task.reminderTime || task.endTime || task.startTime
+    anchorKey = physical ? dateKeyOf(physical) : rule.start
+    date = currentOrNextOccurrence(rule, rule.start, addDaysKey(today, 1))
+  } else {
+    // 老模型（无 rule.start）：沿用原逻辑，以任务提醒/起止时间为锚点逐周期推进
+    const anchor = task.reminderTime || task.endTime || task.startTime
+    anchorKey = anchor ? dateKeyOf(anchor) : today
+    date = nextRepeatDate(rule, anchorKey)
+    if (date) {
+      let guard = 0
+      while (date < today && guard < 400) {
+        const nd = nextRepeatDate(rule, date)
+        if (!nd || nd <= date) break
+        date = nd
+        guard++
+      }
+    }
   }
+  if (!date) return null
   if (rule.endAfter && date > rule.endAfter) return null
   const offset = diffDaysKey(anchorKey, date)
   const now = nowIso()

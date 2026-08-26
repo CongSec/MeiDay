@@ -102,7 +102,7 @@ export async function ensureLegalCalendar(year: number): Promise<void> {
 }
 
 /** 判断某天（YYYY-MM-DD）是否为中国法定工作日（含周末调休上班日，排除节假日） */
-function isLegalWorkday(dateKey: string): boolean {
+export function isLegalWorkday(dateKey: string): boolean {
   const year = Number(dateKey.slice(0, 4))
   const extra = extraCalendar.get(year)
   if (extra) {

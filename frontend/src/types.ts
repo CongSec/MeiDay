@@ -39,6 +39,8 @@ export interface RepeatRule {
   monthDay?: number
   /** 可选：重复到此日期（含）为止，之后不再生成 */
   endAfter?: string
+  /** 新模型标记：首次出现日（YYYY-MM-DD），作为每周/每月重复的相位锚点；老重复数据无此字段，自动走旧逻辑 */
+  start?: string
 }
 
 export interface Task {

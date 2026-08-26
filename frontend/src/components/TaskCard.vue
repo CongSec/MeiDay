@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
-import { formatTodayTitle } from '@/utils/time'
-import { formatRepeat } from '@/utils/repeat'
+import { formatTodayTitle, todayKey } from '@/utils/time'
+import { formatRepeat, isNewStyleRepeat, isRepeatDay } from '@/utils/repeat'
 import type { Project, Subtask, Task } from '@/types'
 
 const props = defineProps<{ task: Task; project?: Project }>()
@@ -22,12 +22,18 @@ const now = ref(Date.now())
 const timer = window.setInterval(() => (now.value = Date.now()), 30000)
 onUnmounted(() => window.clearInterval(timer))
 
-const overdue = computed(
-  () =>
-    props.task.status === 'pending' &&
-    !!props.task.reminderTime &&
-    new Date(props.task.reminderTime).getTime() <= now.value,
-)
+const overdue = computed(() => {
+  if (props.task.status !== 'pending' || !props.task.reminderTime) return false
+  const rule = props.task.repeat
+  // 新模型重复任务：仅在「重复日」当天且已过提醒时刻才提示“已过提醒时间”；
+  // 非重复日不提示，避免与“任务只在重复日当天出现/提醒”的语义冲突。
+  if (rule && isNewStyleRepeat(rule) && rule.start) {
+    const today = todayKey()
+    if (rule.endAfter && today > rule.endAfter) return false
+    if (!(today >= rule.start && isRepeatDay(rule, rule.start, today))) return false
+  }
+  return new Date(props.task.reminderTime).getTime() <= now.value
+})
 
 
 const hasSubtasks = computed(() => (props.task.subtasks?.length ?? 0) > 0)
