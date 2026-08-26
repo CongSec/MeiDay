@@ -1,4 +1,4 @@
-package com.easytask.app;
+package com.meiday.app;
 
 import com.getcapacitor.BridgeActivity;
 

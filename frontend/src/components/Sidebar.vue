@@ -79,8 +79,8 @@ function onActiveDragEnd() {
   >
     <div class="px-5 py-4 flex items-center justify-between border-b border-slate-100">
       <div class="flex items-center gap-2">
-        <img src="/logo.png" alt="EasyTask" class="h-7 w-7 rounded-lg object-cover" />
-        <span class="text-lg font-bold text-slate-800">EasyTask</span>
+        <img src="/logo.png" alt="MeiDay" class="h-7 w-7 rounded-lg object-cover" />
+        <span class="text-lg font-bold text-slate-800">MeiDay</span>
       </div>
       <button class="lg:hidden text-slate-400 hover:text-slate-600" @click="ui.closeDrawer()">✕</button>
     </div>

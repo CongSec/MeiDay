@@ -33,7 +33,7 @@ const importModalOpen = ref(false)
 /** 手机端头部「新建任务/导入」动作：由当前子视图（今日/项目）注册；设置/回收站等页不显示 */
 const mobileActions = reactive({
   newTask: null as (() => void) | null,
-  /** 手机端头部标题：当前视图/项目名称（替代固定的 EasyTask 图标与名称） */
+  /** 手机端头部标题：当前视图/项目名称（替代固定的 MeiDay 图标与名称） */
   title: '',
 })
 provide('mobile-actions', mobileActions)
@@ -295,7 +295,7 @@ async function onImported(list: Task[]) {
     <div class="lg:ml-64 h-full flex flex-col">
       <header class="h-12 px-2 sm:px-4 flex items-center gap-1 sm:gap-2 bg-white border-b border-slate-100 lg:hidden">
         <button class="w-8 h-8 sm:w-9 sm:h-9 flex items-center justify-center text-lg" @click="ui.openDrawer()">☰</button>
-        <span class="font-semibold text-sm sm:text-base min-w-0 truncate">{{ mobileActions.title || 'EasyTask' }}</span>
+        <span class="font-semibold text-sm sm:text-base min-w-0 truncate">{{ mobileActions.title || 'MeiDay' }}</span>
         <div class="ml-auto flex items-center gap-1 sm:gap-1.5">
           <button
             v-if="mobileActions.newTask"

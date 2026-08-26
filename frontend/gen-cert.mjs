@@ -37,7 +37,7 @@ export async function ensureCert({ force = false } = {}) {
 
   mkdirSync(CERT_DIR, { recursive: true })
   const pems = await selfsigned.generate(
-    [{ name: 'commonName', value: 'EasyTask Dev (self-signed)' }],
+    [{ name: 'commonName', value: 'MeiDay Dev (self-signed)' }],
     {
       days: 365,
       keySize: 2048,
@@ -59,7 +59,7 @@ export async function ensureCert({ force = false } = {}) {
   writeFileSync(KEY, pems.private)
   writeFileSync(CERT, pems.cert)
   writeFileSync(META, JSON.stringify({ ips }, null, 2))
-  console.log('[easytask-cert] 开发证书已生成/更新，覆盖地址: ' + ips.join(', '))
+  console.log('[meiday-cert] 开发证书已生成/更新，覆盖地址: ' + ips.join(', '))
   return { key: KEY, cert: CERT }
 }
 

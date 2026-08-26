@@ -33,7 +33,7 @@ export function setDragging(v: boolean) {
   dragging = v
   if (typeof document !== 'undefined') {
     // 拖拽期间给 <body> 加标记：全局禁用文字选择（含跟随手指的克隆、跨卡拖动）
-    document.body.classList.toggle('easytask-dragging', v)
+    document.body.classList.toggle('meiday-dragging', v)
   }
 }
 export function isDragging() {

@@ -1,4 +1,4 @@
-# EasyTask
+# MeiDay
 
 一个支持任务管理、提醒、审计日志与本地部署的轻量应用。后端使用 FastAPI，前端使用 Vue 3 + Vite，Android 端通过 Capacitor 打包。
 

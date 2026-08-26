@@ -14,7 +14,7 @@ const ui = useUiStore()
 const router = useRouter()
 const statsStore = useStatsStore()
 
-/** 使用 EasyTask 天数：从首次创建项目时间算起（今天算第 1 天）；未记录时显示 — */
+/** 使用 MeiDay 天数：从首次创建项目时间算起（今天算第 1 天）；未记录时显示 — */
 const statsDays = computed(() => {
   const at = statsStore.firstProjectAt
   if (!at) return '—'
@@ -205,7 +205,7 @@ async function save() {
       <div class="text-[11px] text-slate-400 mt-0.5">数据仅存于你的 OSS 存储桶，服务器不可修改</div>
       <div class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div class="rounded-lg bg-slate-50 border border-slate-100 p-3">
-          <div class="text-xs text-slate-400">使用 EasyTask 天数</div>
+          <div class="text-xs text-slate-400">使用 MeiDay 天数</div>
           <div class="text-2xl font-bold text-slate-800 mt-1">
             {{ statsReady ? statsDays : '—' }}
           </div>

@@ -13,10 +13,10 @@ try {
   const certFiles = await ensureCert()
   https = { key: readFileSync(certFiles.key), cert: readFileSync(certFiles.cert) }
   plugins = [vue()]
-  console.log(`[easytask] 开发服务器使用自签名证书: ${certFiles.cert}`)
+  console.log(`[meiday] 开发服务器使用自签名证书: ${certFiles.cert}`)
 } catch (e) {
   // 证书生成失败时回退 basicSsl 的 localhost 证书，保证本地开发可用
-  console.warn('[easytask] 自签名证书生成失败，回退 basicSsl:', e)
+  console.warn('[meiday] 自签名证书生成失败，回退 basicSsl:', e)
 }
 
 export default defineConfig(({ mode }) => {

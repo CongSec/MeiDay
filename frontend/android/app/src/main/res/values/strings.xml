@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">EasyTask</string>
-    <string name="title_activity_main">EasyTask</string>
-    <string name="package_name">com.easytask.app</string>
-    <string name="custom_url_scheme">com.easytask.app</string>
+    <string name="app_name">MeiDay</string>
+    <string name="title_activity_main">MeiDay</string>
+    <string name="package_name">com.meiday.app</string>
+    <string name="custom_url_scheme">com.meiday.app</string>
 </resources>

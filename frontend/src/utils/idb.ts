@@ -1,4 +1,4 @@
-const DB_NAME = 'easytask'
+const DB_NAME = 'meiday'
 const DB_VERSION = 5
 
 function openDb(): Promise<IDBDatabase> {

@@ -83,8 +83,8 @@ main {
 }
 
 /* 拖拽进行中（长按进入拖拽 / 跟随手指的克隆）：全局禁止文字选择，避免选中页面其他文字 */
-body.easytask-dragging,
-body.easytask-dragging * {
+body.meiday-dragging,
+body.meiday-dragging * {
   -webkit-user-select: none !important;
   -moz-user-select: none !important;
   -ms-user-select: none !important;
