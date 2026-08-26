@@ -1,5 +1,8 @@
 <template>
-  <div class="diary-del-root absolute top-1.5 right-1.5 z-10">
+  <div
+    class="diary-del-root absolute top-1.5 z-10"
+    :class="position === 'left' ? 'left-1.5' : 'right-1.5'"
+  >
     <button
       v-if="!open"
       class="w-[22px] h-[22px] rounded-full bg-white border border-slate-200 shadow-md text-slate-400 hover:text-red-500 hover:border-red-200 hover:bg-red-50 flex items-center justify-center text-[13px] leading-none opacity-0 group-hover:opacity-100 transition"
@@ -23,6 +26,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 
+const props = defineProps<{ position?: 'left' | 'right' }>()
 const emit = defineEmits<{ confirm: [] }>()
 const open = ref(false)
 

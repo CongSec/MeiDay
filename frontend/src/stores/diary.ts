@@ -36,6 +36,8 @@ export const useDiaryStore = defineStore('diary', {
     loadingDates: {} as Record<string, boolean>,
     /** 已列出过的月份（YYYY-M），避免重复 OSS list */
     listedMonths: [] as string[],
+    /** 时间线版本：selectDate/resetTimeline 自增，通知聊天区重置滚动与跨天守卫 */
+    timelineVersion: 0,
     sending: false,
     exporting: false,
     importing: false,
@@ -123,6 +125,7 @@ export const useDiaryStore = defineStore('diary', {
       this.listedMonths = []
       this.loadingDates = {}
       this.selectedDate = todayKey()
+      this.timelineVersion++
     },
     /** 退出 / 空闲锁定 / 刷新后清空：立即销毁密钥与解密态 */
     lock(): void {
@@ -135,13 +138,38 @@ export const useDiaryStore = defineStore('diary', {
       this.loadingDates = {}
       this.listedMonths = []
       this.sending = false
+      this.timelineVersion++
       releaseAllDiaryFileUrls()
     },
 
-    /** 点击日历某天：仅懒加载并解密该天；加载完成后再切 selectedDate，保证聊天时间线能滚动定位 */
+    /** 点击日历某天 / 上一天 / 下一天：重置时间线只保留该天并懒加载，释放其余天的附件 Blob URL */
     async selectDate(dateKey: string): Promise<void> {
-      await this.loadDay(dateKey)
+      const others = this.dateKeys.filter((k) => k !== dateKey)
       this.selectedDate = dateKey
+      this.timelineVersion++
+      await Promise.all(others.map((k) => this.unloadDay(k)))
+      await this.loadDay(dateKey)
+    },
+
+    /** 仅更新当前选中天（滚动定位用），不触发加载 */
+    setSelected(dateKey: string): void {
+      if (this.days[dateKey] !== undefined) this.selectedDate = dateKey
+    },
+
+    /** 加载早于 dateKey 的最近一个有记录日期（向上跨天）；无则返回 null */
+    async loadPrevRecorded(dateKey: string): Promise<string | null> {
+      const target = await this.findRecordedDate(dateKey, -1)
+      if (!target) return null
+      await this.loadDay(target)
+      return target
+    },
+
+    /** 加载晚于 dateKey 的最近一个有记录日期（向下跨天）；无则返回 null */
+    async loadNextRecorded(dateKey: string): Promise<string | null> {
+      const target = await this.findRecordedDate(dateKey, 1)
+      if (!target) return null
+      await this.loadDay(target)
+      return target
     },
 
     async loadDay(dateKey: string): Promise<void> {
