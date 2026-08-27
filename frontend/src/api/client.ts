@@ -11,6 +11,8 @@ export function getToken(): string {
 export function setToken(token: string): void {
   localStorage.setItem(TOKEN_KEY, token)
   localStorage.setItem(`${TOKEN_KEY}_at`, String(Date.now()))
+  // 新登录成功后重新武装 401 通知（保证后续会话再次失效时仍能触发一次跳登录）
+  unauthorizedFired = false
 }
 
 export function clearToken(): void {
@@ -59,13 +61,21 @@ export class ApiError extends Error {
   }
 }
 
+/** 401 跳登录事件去重：同一页面生命周期内只触发一次，避免并发 401 反复重置/清缓存/跳转 */
+let unauthorizedFired = false
+function fireUnauthorized(): void {
+  if (unauthorizedFired) return
+  unauthorizedFired = true
+  window.dispatchEvent(new CustomEvent('st:unauthorized'))
+}
+
 async function request<T>(method: string, path: string, body?: unknown, tokenOverride?: string): Promise<T> {
   // 本地会话过期（7 天未活动）：直接视为未认证，清理本地态并跳登录。
   // 让 isTokenExpiredLocal/tokenAgeMs 真正生效，避免“本地已过期仍发请求”（BUG-36）
   if (isTokenExpiredLocal()) {
     clearToken()
     clearSavedPassword()
-    window.dispatchEvent(new CustomEvent('st:unauthorized'))
+    fireUnauthorized()
     throw new ApiError(401, '登录已过期，请重新登录')
   }
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -86,7 +96,7 @@ async function request<T>(method: string, path: string, body?: unknown, tokenOve
     }
     if (res.status === 401) {
       clearToken()
-      window.dispatchEvent(new CustomEvent('st:unauthorized'))
+      fireUnauthorized()
     }
     throw new ApiError(res.status, msg)
   }

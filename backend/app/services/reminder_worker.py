@@ -86,7 +86,7 @@ async def _run_cycle() -> None:
             fail_counts[key] = fail_counts.get(key, 0) + 1
             log_action(
                 "email_fail", username=row["username"],
-                detail=f"收件 {cred.get('notify_email')}；任务ID：{row['task_id']}；子任务ID：{row['subtask_id'] or '-'}；提醒时间 {row['reminder_time']}；第 {fail_counts[key]} 次失败：{exc}",
+                detail=f"收件 {cred['notify_email']}；任务ID：{row['task_id']}；子任务ID：{row['subtask_id'] or '-'}；提醒时间 {row['reminder_time']}；第 {fail_counts[key]} 次失败：{exc}",
             )
             if fail_counts[key] >= FAIL_LIMIT:
                 suppressed.add(key)
