@@ -10,8 +10,8 @@ import { useUiStore } from '@/stores/ui'
 import TaskCard from '@/components/TaskCard.vue'
 import TaskModal from '@/components/TaskModal.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
-import { nowIso, toLocalInput, todayKey } from '@/utils/time'
-import { isTaskVisibleToday } from '@/utils/todayFilter'
+import { dateKeyOf, nowIso, toLocalInput, todayKey } from '@/utils/time'
+import { isFutureTask, isTaskVisibleToday } from '@/utils/todayFilter'
 import { UNCATEGORIZED, type Subtask, type Task } from '@/types'
 import { useSync } from '@/composables/useSync'
 
@@ -28,6 +28,8 @@ const editingSubtask = ref<Subtask | null>(null)
 const subtaskParent = ref<Task | null>(null)
 const deleteTarget = ref<Task | null>(null)
 const defaultStart = ref('')
+/** 正在编辑的重复模板对应的 master id（非模板编辑为 null） */
+const templateMasterId = ref<string | null>(null)
 
 /** 手机端头部「新建任务」由本页注册（随路由切换） */
 const mobileActions = inject<
@@ -94,6 +96,32 @@ const todayDone = computed(() => filtered.value.filter((t) => t.status === 'comp
 const todayPct = computed(() =>
   filtered.value.length ? Math.round((todayDone.value / filtered.value.length) * 100) : 0,
 )
+
+/** 未来任务分组是否展开（默认收起） */
+const futureOpen = ref(false)
+
+/** 未来任务：开始时间在未来的待办 + 重复任务的下一次出现（不限多远都展示）。
+ *  截止日期（endTime）在未来但尚未到期的任务不算未来任务。 */
+const futureTasks = computed(() => {
+  const out: { task: Task; date: string }[] = []
+  for (const t of tasks.all) {
+    if (isFutureTask(t, today)) out.push({ task: t, date: t.startTime ? dateKeyOf(t.startTime) : '' })
+  }
+  for (const pid of Object.keys(tasks.repeats)) {
+    for (const m of tasks.repeats[pid] ?? []) {
+      if (m.dueDate > today) out.push({ task: m.template, date: m.dueDate })
+    }
+  }
+  // 同一任务只展示一次；按出现日期升序
+  const seen = new Set<string>()
+  return out
+    .filter((x) => {
+      if (seen.has(x.task.id)) return false
+      seen.add(x.task.id)
+      return true
+    })
+    .sort((a, b) => (a.date || '').localeCompare(b.date || ''))
+})
 
 /** 拖拽用可变列表：初始按时间排序，拖拽后保留手动顺序，仅在任务增删时重排 */
 const dragList = ref<Task[]>([])
@@ -164,6 +192,7 @@ const projectOf = (id: string) => (id ? projects.byId(id) : undefined)
 
 async function openNew() {
   editing.value = null
+  templateMasterId.value = null
   subtaskParent.value = null
   editingSubtask.value = null
   defaultStart.value = toLocalInput(nowIso())
@@ -175,7 +204,17 @@ async function openNew() {
   }
 }
 
+/** 查找某 id 对应的重复模板 master（repeats 中 template.id 匹配）；非模板返回 undefined */
+function findMasterByTemplateId(taskId: string) {
+  for (const pid of Object.keys(tasks.repeats)) {
+    const m = (tasks.repeats[pid] ?? []).find((x) => x.template.id === taskId)
+    if (m) return m
+  }
+  return undefined
+}
+
 function openEdit(task: Task) {
+  templateMasterId.value = findMasterByTemplateId(task.id)?.id ?? null
   editing.value = task
   modalOpen.value = true
 }
@@ -224,12 +263,18 @@ function onDelete(id: string) {
   if (t) deleteTarget.value = t
 }
 
+/** 未来任务删除：普通未来任务或重复模板未来出现，统一解析后移入回收站。
+ *  未来卡片可能来自重复模板（不在 tasks.all），仅记录 id，删除逻辑由 store 内部解析。 */
+function onFutureDelete(id: string) {
+  deleteTarget.value = (tasks.all.find((x) => x.id === id) ?? { id }) as Task
+}
+
 async function confirmDelete() {
   if (!deleteTarget.value) return
   const t = deleteTarget.value
   // 确认按钮前端立即生效：关弹窗；保存结果由回显后的 toast 提示
   deleteTarget.value = null
-  const ok = await tasks.softDeleteConfirmed(t.id)
+  const ok = await tasks.deleteFutureTaskConfirmed(t.id)
   if (ok) ui.toast('已移入回收站')
 }
 </script>
@@ -304,6 +349,28 @@ async function confirmDelete() {
           今天没有任务，点右上角「＋ 新建任务」
         </div>
       </div>
+
+      <!-- 未来任务：可折叠分组（默认收起），放在已完成下方，不限时间范围 -->
+      <div v-if="futureTasks.length" class="mt-5 border-t border-slate-100 pt-3">
+        <button
+          class="w-full flex items-center justify-between py-1.5 text-sm font-medium text-slate-500 hover:text-slate-700"
+          @click="futureOpen = !futureOpen"
+        >
+          <span>🗓 未来任务（{{ futureTasks.length }}）</span>
+          <span class="text-xs text-slate-400">{{ futureOpen ? '收起 ▴' : '展开 ▾' }}</span>
+        </button>
+        <div v-if="futureOpen" class="mt-1.5 space-y-2">
+          <TaskCard
+            v-for="ft in futureTasks"
+            :key="ft.task.id"
+            :task="ft.task"
+            :project="projectOf(ft.task.projectId)"
+            future
+            @edit="openEdit"
+            @delete="onFutureDelete"
+          />
+        </div>
+      </div>
     </template>
 
     <TaskModal
@@ -313,6 +380,7 @@ async function confirmDelete() {
       :subtask-mode="!!subtaskParent"
       :subtask="editingSubtask"
       :parent-task="subtaskParent"
+      :template-master-id="templateMasterId"
       @saved="onSaved"
       @saved-subtask="onSavedSubtask"
       @delete="onDelete"

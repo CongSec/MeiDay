@@ -74,7 +74,7 @@ const FIELD_ORDER: (keyof CredFields)[] = [
   'ossAk',
   'ossSk',
   'bucket',
-  'region',
+  'endpoint',
   'smtpUser',
   'smtpPass',
   'notifyEmail',

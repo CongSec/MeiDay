@@ -1,4 +1,4 @@
-﻿import type OSS from 'ali-oss'
+﻿import type { OssClient } from '@/utils/oss'
 import type { DeletedProject, Profile, Project, StatsDailyEntry, StatsTaskDelta, Task, UserStats } from '@/types'
 
 /**
@@ -139,7 +139,7 @@ export function versionToken(
 }
 
 /** 读取远端对象内容 + ETag；文件不存在时返回 null（不抛错） */
-async function fetchRemote<T>(client: OSS, key: string): Promise<{ content: T | null; etag: string | null }> {
+async function fetchRemote<T>(client: OssClient, key: string): Promise<{ content: T | null; etag: string | null }> {
   try {
     const res = await client.get(key)
     if (res.res.status === 404) return { content: null, etag: null }
@@ -160,7 +160,7 @@ async function fetchRemote<T>(client: OSS, key: string): Promise<{ content: T | 
  * - 没传 knownEtag（首次新建）：远端已存在则返回 conflict 供调用方合并；不存在则直接创建。
  */
 export async function compareAndSwapPut<T>(
-  client: OSS,
+  client: OssClient,
   key: string,
   local: T,
   knownEtag?: string,

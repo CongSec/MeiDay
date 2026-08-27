@@ -22,3 +22,15 @@ export function isTaskVisibleToday(t: Task, today: string): boolean {
   const inRange = (startDay === null || today >= startDay) && (endDay === null || today <= endDay)
   return inRange || remindToday
 }
+
+
+/** 是否属于「未来任务」：开始时间在未来、尚未开始的待办任务。
+ *  截止日期（endTime）在未来且未到期的任务不算未来任务（它们仍算今日待办）；
+ *  新模型重复任务的未来出现由重复模板（repeats）承载，不在此判断。 */
+export function isFutureTask(t: Task, today: string): boolean {
+  if (t.status !== 'pending') return false
+  const rule = t.repeat
+  if (rule && isNewStyleRepeat(rule) && rule.start) return false
+  if (!t.startTime) return false
+  return dateKeyOf(t.startTime) > today
+}

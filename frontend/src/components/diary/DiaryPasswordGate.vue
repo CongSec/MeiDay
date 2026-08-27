@@ -1,12 +1,12 @@
 <template>
-  <div class="min-h-full flex items-center justify-center bg-gradient-to-b from-slate-900 via-slate-800 to-slate-900 px-4">
-    <div class="w-full max-w-sm rounded-2xl bg-white/95 shadow-2xl p-6">
+  <div class="min-h-full flex items-center justify-center px-4 bg-gradient-to-br from-indigo-50 to-slate-100">
+    <div class="w-full max-w-sm bg-white rounded-2xl shadow-xl p-6">
       <div class="flex flex-col items-center mb-5">
         <div class="w-12 h-12 rounded-full bg-brand/10 flex items-center justify-center text-2xl">🔒</div>
         <h1 class="mt-3 text-lg font-bold text-slate-800">隐私日记</h1>
         <p class="mt-1 text-xs text-slate-500 text-center leading-relaxed">
           {{ mode === 'setup' ? '首次使用，请设置一个专属日记密码。' : '请输入日记密码以进入。' }}<br />
-          密码仅保存在内存中，关闭页面即销毁，无法找回。
+          密码以密文形式保存在内存中，不上传后端。
         </p>
       </div>
 
@@ -44,6 +44,13 @@
           class="mt-4 w-full bg-brand text-white rounded-lg py-2.5 text-sm font-medium disabled:opacity-60 hover:bg-brand-dark"
         >
           {{ busy ? (mode === 'setup' ? '正在创建…' : '正在解锁…') : (mode === 'setup' ? '创建并进入' : '进入') }}
+        </button>
+        <button
+          type="button"
+          class="mt-2 w-full text-slate-500 text-sm py-1 hover:text-slate-700"
+          @click="router.push('/today')"
+        >
+          ← 返回任务管理系统
         </button>
       </form>
 
@@ -92,6 +99,7 @@
 
 <script setup lang="ts">
 import { ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { useDiaryStore } from '@/stores/diary'
 import { useUiStore } from '@/stores/ui'
 
@@ -100,6 +108,7 @@ const emit = defineEmits<{ unlocked: []; changed: []; cancel: [] }>()
 
 const diary = useDiaryStore()
 const ui = useUiStore()
+const router = useRouter()
 
 const password = ref('')
 const password2 = ref('')

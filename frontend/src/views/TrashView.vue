@@ -5,9 +5,12 @@ import { useProjectsStore } from '@/stores/projects'
 import { useTasksStore } from '@/stores/tasks'
 import { useUiStore } from '@/stores/ui'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
-import { formatTodayTitle } from '@/utils/time'
+import JSZip from 'jszip'
+import { deleteAttachments, downloadAttachment } from '@/utils/attachments'
+import { createOssClient } from '@/utils/oss'
+import { formatTodayTitle, nowIso, todayKey } from '@/utils/time'
 import { logAudit } from '@/utils/audit'
-import { UNCATEGORIZED, type DeletedProject, type Task } from '@/types'
+import { UNCATEGORIZED, type AttachmentMeta, type DeletedProject, type Task } from '@/types'
 
 const auth = useAuthStore()
 const projects = useProjectsStore()
@@ -260,6 +263,231 @@ watch(page, (v) => {
   jumpPage.value = v
 })
 
+/** 导出/清空回收站操作进行中：禁用对应按钮，防重复提交 */
+const exportBusy = ref(false)
+const clearBusy = ref(false)
+const clearOpen = ref(false)
+const fileInput = ref<HTMLInputElement | null>(null)
+
+/** 收集全部回收站数据（含项目名）：加载所有项目的回收站文件，返回便于导出/清空的结构 */
+async function collectAllTrash(): Promise<{ projectId: string; name: string; tasks: Task[] }[]> {
+  if (!projects.loaded) await projects.load()
+  const res = await tasks.listTrashProjects()
+  const pids = new Set<string>(res.ids)
+  // 本地已加载但扫描未覆盖的项目也纳入（如无 list 权限的降级场景）
+  for (const pid of Object.keys(tasks.trash)) if ((tasks.trash[pid]?.length ?? 0) > 0) pids.add(pid)
+  if (!res.listed) for (const p of projects.projects) pids.add(p.id)
+  pids.add(UNCATEGORIZED)
+  const out: { projectId: string; name: string; tasks: Task[] }[] = []
+  for (const pid of pids) {
+    if (!tasks.trashLoaded.includes(pid)) {
+      try {
+        await tasks.loadTrash(pid)
+      } catch {
+        continue
+      }
+    }
+    const arr = tasks.trash[pid] ?? []
+    if (!arr.length) continue
+    out.push({
+      projectId: pid,
+      name: pid === UNCATEGORIZED ? '无分类' : projects.byId(pid)?.name || `未知项目（${pid.slice(0, 8)}…）`,
+      tasks: arr,
+    })
+  }
+  return out
+}
+
+/** 收集任务及其子任务的附件元数据（按 OSS key 去重） */
+function collectAttachments(list: Task[]): AttachmentMeta[] {
+  const out: AttachmentMeta[] = []
+  const seen = new Set<string>()
+  const push = (arr?: AttachmentMeta[]) => {
+    for (const a of arr ?? []) {
+      if (!a?.key || seen.has(a.key)) continue
+      seen.add(a.key)
+      out.push(a)
+    }
+  }
+  for (const t of list) {
+    push(t.attachments)
+    for (const sb of t.subtasks ?? []) push(sb.attachments)
+  }
+  return out
+}
+
+/** 一次性导出全部回收站为 ZIP 备份（任务 JSON + 附件二进制），可用来导入恢复 */
+async function exportTrash() {
+  if (exportBusy.value) return
+  exportBusy.value = true
+  try {
+    const projectsData = await collectAllTrash()
+    if (!projectsData.length) {
+      ui.toast('回收站为空，无需导出', 'error')
+      return
+    }
+    const payload = { exportedAt: nowIso(), version: 1, projects: projectsData }
+    const zip = new JSZip()
+    zip.file('data.json', JSON.stringify(payload, null, 2))
+    // 附件：逐个下载原始字节写入 zip（attachments/{key}）；单附件失败不中断
+    const allAtts = collectAttachments(projectsData.flatMap((p) => p.tasks))
+    const attFolder = zip.folder('attachments')
+    let failedAtts = 0
+    if (attFolder) {
+      for (const meta of allAtts) {
+        try {
+          if (!auth.creds) continue
+          const blob = await downloadAttachment(auth.creds, meta)
+          attFolder.file(meta.key, blob)
+        } catch {
+          failedAtts += 1
+        }
+      }
+    }
+    const blob = await zip.generateAsync({ type: 'blob' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `回收站备份-${todayKey()}.zip`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+    const count = projectsData.reduce((n, p) => n + p.tasks.length, 0)
+    ui.toast(
+      failedAtts
+        ? `已导出 ${count} 条回收站记录（${failedAtts} 个附件下载失败）`
+        : `已导出 ${count} 条回收站记录及 ${allAtts.length} 个附件`,
+    )
+    logAudit('导出回收站备份', `项目 ${projectsData.length} 个，任务 ${count} 条，附件 ${allAtts.length} 个（失败 ${failedAtts}）`)
+  } catch (e) {
+    ui.toast((e as Error).message || '导出失败，请检查网络或 OSS 配置', 'error')
+  } finally {
+    exportBusy.value = false
+  }
+}
+
+function onPickImport() {
+  fileInput.value?.click()
+}
+
+/** 从备份 ZIP（含附件）或旧版 JSON（无附件）导入回收站：
+ *  按项目合并去重（以任务 id 为键，导入记录优先），附件按原 key 上传回 OSS，立即写盘 */
+async function onImportFile(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  try {
+    let data: { projects?: unknown } = {}
+    const attBlobs = new Map<string, Blob>()
+    let zip: JSZip | null = null
+    try {
+      zip = await JSZip.loadAsync(file)
+    } catch {
+      zip = null
+    }
+    if (zip) {
+      const dataFile = zip.file('data.json')
+      if (!dataFile) throw new Error('备份 ZIP 缺少 data.json')
+      data = JSON.parse(await dataFile.async('string'))
+      const prefix = 'attachments/'
+      for (const name of Object.keys(zip.files)) {
+        if (!name.startsWith(prefix)) continue
+        const entry = zip.files[name]
+        if (entry.dir) continue
+        attBlobs.set(name.slice(prefix.length), await entry.async('blob'))
+      }
+    } else {
+      data = JSON.parse(await file.text())
+    }
+    if (!data || !Array.isArray(data.projects)) throw new Error('备份文件格式不正确')
+    let count = 0
+    let touched = 0
+    let attOk = 0
+    let attFailed = 0
+    for (const p of data.projects) {
+      const pid = typeof p?.projectId === 'string' && p.projectId ? p.projectId : UNCATEGORIZED
+      if (!Array.isArray(p.tasks)) continue
+      const list = (p.tasks as Task[]).filter((t) => t && t.id)
+      if (!list.length) continue
+      // 附件：按原 key 把 zip 中的二进制上传回用户 OSS（保持任务 JSON 无需改写）
+      if (auth.creds) {
+        const metas = collectAttachments(list)
+        const client = await createOssClient(auth.creds)
+        for (const meta of metas) {
+          const blob = attBlobs.get(meta.key)
+          if (!blob) {
+            attFailed += 1
+            continue
+          }
+          try {
+            await client.put(meta.key, blob)
+            attOk += 1
+          } catch {
+            attFailed += 1
+          }
+        }
+      }
+      const existing = tasks.trash[pid] ?? []
+      tasks.trash[pid] = [...list, ...existing.filter((t) => !list.some((x) => x.id === t.id))]
+      const ok = await tasks.saveTrashNow(pid)
+      if (ok) {
+        touched += 1
+        count += list.length
+      }
+    }
+    if (count > 0) {
+      ui.toast(
+        attOk || attFailed
+          ? `已导入 ${count} 条回收站记录（附件 ${attOk} 个成功${attFailed ? `，${attFailed} 个缺失/失败` : ''}）`
+          : `已导入 ${count} 条回收站记录`,
+      )
+      logAudit('导入回收站备份', `${count} 条，附件 ${attOk} 成功 ${attFailed} 失败`)
+    } else {
+      ui.toast('备份文件中没有可导入的任务', 'error')
+    }
+  } catch (err) {
+    ui.toast((err as Error).message || '导入失败，请检查备份文件', 'error')
+  }
+}
+
+/** 清空回收站：把所有项目的回收站置空并落盘，同时删除对应附件二进制（二次确认） */
+async function clearTrash() {
+  if (clearBusy.value) return
+  clearBusy.value = true
+  try {
+    const all = await collectAllTrash()
+    if (!all.length) {
+      ui.toast('回收站已为空')
+      clearOpen.value = false
+      return
+    }
+    let cleared = 0
+    let deletedAtts = 0
+    for (const p of all) {
+      const atts = collectAttachments(p.tasks)
+      tasks.trash[p.projectId] = []
+      const ok = await tasks.saveTrashNow(p.projectId)
+      if (ok) {
+        cleared += p.tasks.length
+        // 落盘成功后再清理附件二进制，避免保存失败导致元数据指向已删除文件
+        if (atts.length && auth.creds) {
+          await deleteAttachments(auth.creds, atts)
+          deletedAtts += atts.length
+        }
+      }
+    }
+    ui.toast(`已清空回收站（${cleared} 条，清理附件 ${deletedAtts} 个）`)
+    logAudit('清空回收站', `${cleared} 条，附件 ${deletedAtts} 个`)
+  } catch (e) {
+    ui.toast((e as Error).message || '清空失败，请检查网络或 OSS 配置', 'error')
+  } finally {
+    clearBusy.value = false
+    clearOpen.value = false
+  }
+}
+
 const projectOf = (id: string) => (id ? projects.byId(id) : undefined)
 
 async function restore(t: Task) {
@@ -316,13 +544,36 @@ async function confirmDelete() {
     <h1 class="hidden lg:block text-xl font-bold text-slate-800">🗑 回收站</h1>
     <div class="mt-0.5 flex items-center justify-between gap-3">
       <div class="text-xs text-slate-400">被删除的任务与项目，永不自动清理。扫描只列出有回收站文件的项目，展开项目时才加载对应文件</div>
-      <button
-        class="shrink-0 px-3 py-1.5 rounded-lg text-xs border border-slate-200 hover:bg-slate-50 disabled:opacity-60"
-        :disabled="scanning"
-        @click="scanTrash"
-      >
-        {{ scanning ? '扫描中…' : '📥 扫描回收站文件' }}
-      </button>
+      <div class="flex items-center gap-2">
+        <button
+          class="shrink-0 px-3 py-1.5 rounded-lg text-xs border border-slate-200 hover:bg-slate-50 disabled:opacity-60"
+          :disabled="exportBusy"
+          @click="exportTrash"
+        >
+          {{ exportBusy ? '导出中…' : '📤 导出备份' }}
+        </button>
+        <button
+          class="shrink-0 px-3 py-1.5 rounded-lg text-xs border border-slate-200 hover:bg-slate-50"
+          @click="onPickImport"
+        >
+          📥 从备份导入
+        </button>
+        <button
+          class="shrink-0 px-3 py-1.5 rounded-lg text-xs border border-red-200 text-red-500 hover:bg-red-50 disabled:opacity-60"
+          :disabled="clearBusy"
+          @click="clearOpen = true"
+        >
+          {{ clearBusy ? '清空中…' : '🗑 清空回收站' }}
+        </button>
+        <button
+          class="shrink-0 px-3 py-1.5 rounded-lg text-xs border border-slate-200 hover:bg-slate-50 disabled:opacity-60"
+          :disabled="scanning"
+          @click="scanTrash"
+        >
+          {{ scanning ? '扫描中…' : '📥 扫描回收站文件' }}
+        </button>
+      </div>
+      <input ref="fileInput" type="file" accept=".zip,.json,application/json,application/zip" class="hidden" @change="onImportFile" />
     </div>
 
     <div v-if="!projectGroups.length" class="mt-4 py-16 text-center text-sm text-slate-400">
@@ -453,6 +704,16 @@ async function confirmDelete() {
       :danger="true"
       @confirm="confirmDelete"
       @cancel="deleteTarget = null"
+    />
+    <ConfirmDialog
+      :open="clearOpen"
+      title="清空回收站"
+      message="将永久删除回收站中的全部任务，且无法恢复，确定清空吗？建议先导出备份。"
+      confirm-text="确认清空"
+      :danger="true"
+      :disabled="clearBusy"
+      @confirm="clearTrash"
+      @cancel="clearOpen = false"
     />
   </div>
 </template>

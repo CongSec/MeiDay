@@ -23,9 +23,12 @@ backend/.venv/
 
 # ===== 后端运行产物 =====
 backend/logs/
+logs/
 backend/dev.db
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 *.db.bak*
 *.sqlite3
 *.pid
@@ -34,6 +37,7 @@ backend/dev.db
 # ===== 前端依赖与构建产物 =====
 node_modules/
 frontend/dist/
+*.map
 frontend/.vite/
 *.tsbuildinfo
 
@@ -57,6 +61,8 @@ frontend/android/app/google-services.json
 frontend/certs/
 *.pem
 *.key
+*.p12
+*.pfx
 
 # ===== 环境变量与密钥 =====
 .env
@@ -109,3 +115,7 @@ frontend/android/build/
 # ===== 其他本地产物 =====
 *.rej
 *.orig
+*.bak
+*.old
+*.tmp
+*.temp

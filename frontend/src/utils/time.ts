@@ -32,6 +32,23 @@ export function formatTodayTitle(iso: string): string {
   return `${iso.slice(5, 10)} ${time ? time.slice(0, 5) : ''}`
 }
 
+/**
+ * 隐私日记消息时间：气泡上方展示。
+ * 当天显示「时:分」（如 21:47）；非当天显示「月-日 时:分」（如 08-26 21:47）；
+ * 跨年度后显示「年-月-日 时:分」（如 2027-01-02 21:47）。
+ */
+export function formatDiaryMsgTime(iso: string): string {
+  const dt = new Date(iso)
+  if (Number.isNaN(dt.getTime())) return iso
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const hm = `${pad(dt.getHours())}:${pad(dt.getMinutes())}`
+  const now = new Date()
+  if (dt.toDateString() === now.toDateString()) return hm
+  const md = `${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}`
+  if (dt.getFullYear() === now.getFullYear()) return `${md} ${hm}`
+  return `${dt.getFullYear()}-${md} ${hm}`
+}
+
 export function sortByEndTime<T extends { endTime: string }>(tasks: T[]): T[] {
   return [...tasks].sort((a, b) => (a.endTime || '').localeCompare(b.endTime || ''))
 }

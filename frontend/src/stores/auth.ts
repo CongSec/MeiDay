@@ -80,10 +80,12 @@ export const useAuthStore = defineStore('auth', {
         const verifier = await passwordVerifier(pw)
         let r: LoginResponse
         try {
-          r = await api.login({ username: this.username, passwordHash: verifier })
+          // 携带当前有效 token 重登（自动解锁场景）：后端据此判定为同一会话的
+          // 静默恢复，不再触发 login_success 邮件，避免每次刷新都轰炸邮箱。
+          r = await api.login({ username: this.username, passwordHash: verifier }, this.token || undefined)
         } catch (e) {
           if (e instanceof ApiError && e.status === 428) {
-            r = await api.legacyLogin({ username: this.username, password: pw })
+            r = await api.legacyLogin({ username: this.username, password: pw }, this.token || undefined)
           } else {
             throw e
           }

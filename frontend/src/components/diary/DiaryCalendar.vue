@@ -51,6 +51,7 @@ import { addDaysKey, todayKey } from '@/utils/time'
 const WEEK_LABELS = ['一', '二', '三', '四', '五', '六', '日']
 
 const diary = useDiaryStore()
+const emit = defineEmits<{ pick: [] }>()
 
 const today = todayKey()
 const [ty, tm] = today.split('-').map(Number)
@@ -108,6 +109,7 @@ function shiftYear(delta: number): void {
 async function onPick(d: number): Promise<void> {
   if (isFuture(d)) return
   await diary.selectDate(keyOf(d))
+  emit('pick')
 }
 
 watch(month, loadMonth, { immediate: true })

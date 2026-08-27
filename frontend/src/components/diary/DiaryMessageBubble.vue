@@ -1,90 +1,101 @@
 <template>
-  <div ref="elRef" class="group flex items-start justify-end gap-2 px-2 py-1">
-    <div class="relative max-w-[85%] min-w-0">
-      <!-- 文本：微信「我」风格，品牌色气泡 + 顶部左侧删按钮 -->
-      <div v-if="message.type === 'text'" class="relative">
-        <div
-          class="rounded-2xl rounded-tr-sm bg-brand text-white shadow px-3.5 py-2.5 pl-7 text-[15px] leading-relaxed whitespace-pre-wrap break-words"
-        >
-          <span
-            v-if="message.appended"
-            class="mr-1.5 inline-block align-middle text-[10px] font-medium text-brand bg-white/90 border border-white/40 rounded px-1 py-px"
-          >追加</span>
-          {{ message.text }}
-        </div>
-        <DiaryDeleteButton position="left" @confirm="$emit('delete', message.id)" />
-      </div>
+  <div ref="elRef" class="group flex flex-col items-end gap-0.5 px-2 py-1">
+    <!-- 消息时间：气泡上方（当天仅时:分；非当天带日期） -->
+    <div class="text-[11px] text-slate-400 select-none">{{ timeLabel }}</div>
 
-      <!-- 图片：右对齐缩略图，双击放大 -->
-      <div v-else-if="message.type === 'file' && isImage">
-        <div v-if="message.appended" class="mb-1 text-right">
-          <span class="inline-block text-[10px] font-medium text-amber-600 border border-amber-300 bg-amber-50 rounded px-1 py-px">追加</span>
-        </div>
-        <div class="relative">
-          <img
-            :src="url || undefined"
-            class="rounded-xl rounded-tr-sm shadow max-w-full max-h-72 object-contain bg-black/5 cursor-zoom-in"
-            loading="lazy"
-            title="双击放大"
-            @dblclick.prevent="openPreview"
-          />
-          <DiaryDeleteButton position="left" @confirm="$emit('delete', message.id)" />
-        </div>
-      </div>
+    <div class="flex items-start justify-end gap-2 w-full min-w-0">
+      <div class="relative max-w-[85%] min-w-0">
+        <!-- 单条删除：默认隐藏，悬停显示在消息框左侧（不占用消息框宽度）；回顾只读时不显示 -->
+        <DiaryDeleteButton v-if="!readonly" floating @confirm="$emit('delete', message.id)" />
 
-      <!-- 视频 -->
-      <div v-else-if="message.type === 'file' && isVideo">
-        <div v-if="message.appended" class="mb-1 text-right">
-          <span class="inline-block text-[10px] font-medium text-amber-600 border border-amber-300 bg-amber-50 rounded px-1 py-px">追加</span>
-        </div>
-        <div class="relative">
-          <video
-            :src="url || undefined"
-            controls
-            class="rounded-xl rounded-tr-sm shadow w-full max-h-72 bg-black"
-            preload="metadata"
-          />
-          <DiaryDeleteButton position="left" @confirm="$emit('delete', message.id)" />
-        </div>
-      </div>
-
-      <!-- 音频 -->
-      <div v-else-if="message.type === 'audio'">
-        <div v-if="message.appended" class="mb-1 text-right">
-          <span class="inline-block text-[10px] font-medium text-amber-600 border border-amber-300 bg-amber-50 rounded px-1 py-px">追加</span>
-        </div>
-        <div class="relative">
-          <div class="rounded-2xl rounded-tr-sm bg-white shadow px-3 py-2.5 flex items-center gap-2">
-            <span class="text-lg">🎙️</span>
-            <audio :src="url || undefined" controls preload="metadata" class="h-9 w-52 max-w-[180px]" />
-            <span v-if="message.file?.duration" class="text-[11px] text-slate-400 shrink-0">{{ fmtDuration(message.file.duration) }}</span>
-          </div>
-          <DiaryDeleteButton position="left" @confirm="$emit('delete', message.id)" />
-        </div>
-      </div>
-
-      <!-- 其它文件（文档卡片） -->
-      <div v-else-if="message.type === 'file'">
-        <div v-if="message.appended" class="mb-1 text-right">
-          <span class="inline-block text-[10px] font-medium text-amber-600 border border-amber-300 bg-amber-50 rounded px-1 py-px">追加</span>
-        </div>
-        <div class="relative">
-          <a
-            :href="url || undefined"
-            :download="message.file?.name"
-            target="_blank"
-            rel="noopener"
-            class="flex items-center gap-3 rounded-2xl rounded-tr-sm bg-white shadow px-3.5 py-3 hover:bg-slate-50"
+        <!-- 文本：微信「我」风格，品牌色气泡 -->
+        <div v-if="message.type === 'text'" class="relative">
+          <div
+            class="rounded-2xl rounded-tr-sm bg-[#95ec69] text-slate-800 shadow px-3.5 py-2.5 text-[15px] leading-relaxed break-words"
           >
-            <span class="w-9 h-9 rounded-lg bg-brand/10 flex items-center justify-center text-lg shrink-0">📄</span>
-            <span class="min-w-0">
-              <span class="block text-sm text-slate-800 truncate">{{ message.file?.name }}</span>
-              <span class="block text-[11px] text-slate-400">{{ fmtSize(message.file?.size) }}</span>
-            </span>
-          </a>
-          <DiaryDeleteButton position="left" @confirm="$emit('delete', message.id)" />
+            <span
+              v-if="message.appended"
+              class="mr-1.5 inline-block align-middle leading-none text-[10px] font-medium text-[#2f9e44] bg-white/80 border border-white/60 rounded px-1 py-px"
+            >追加</span>
+            <span class="whitespace-pre-wrap break-words">{{ (message.text ?? '').trim() }}</span>
+          </div>
+        </div>
+
+        <!-- 图片：右对齐缩略图，双击放大 -->
+        <div v-else-if="message.type === 'file' && isImage">
+          <div v-if="message.appended" class="mb-1 text-right">
+            <span class="inline-block text-[10px] font-medium text-amber-600 border border-amber-300 bg-amber-50 rounded px-1 py-px">追加</span>
+          </div>
+          <div class="relative">
+            <img
+              :src="url || undefined"
+              class="rounded-xl rounded-tr-sm shadow max-w-full max-h-72 object-contain bg-black/5 cursor-zoom-in"
+              loading="lazy"
+              title="双击放大"
+              @dblclick.prevent="openPreview"
+            />
+          </div>
+        </div>
+
+        <!-- 视频 -->
+        <div v-else-if="message.type === 'file' && isVideo">
+          <div v-if="message.appended" class="mb-1 text-right">
+            <span class="inline-block text-[10px] font-medium text-amber-600 border border-amber-300 bg-amber-50 rounded px-1 py-px">追加</span>
+          </div>
+          <div class="relative">
+            <video
+              :src="url || undefined"
+              controls
+              class="rounded-xl rounded-tr-sm shadow w-full max-h-72 bg-black"
+              preload="metadata"
+            />
+          </div>
+        </div>
+
+        <!-- 音频 -->
+        <div v-else-if="message.type === 'audio'">
+          <div v-if="message.appended" class="mb-1 text-right">
+            <span class="inline-block text-[10px] font-medium text-amber-600 border border-amber-300 bg-amber-50 rounded px-1 py-px">追加</span>
+          </div>
+          <div class="relative">
+            <div class="rounded-2xl rounded-tr-sm bg-white shadow px-3 py-2.5 flex items-center gap-2">
+              <span class="text-lg">🎙️</span>
+              <audio :src="url || undefined" controls preload="metadata" class="h-9 w-52 max-w-[180px]" />
+              <span v-if="message.file?.duration" class="text-[11px] text-slate-400 shrink-0">{{ fmtDuration(message.file.duration) }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 其它文件（文档卡片） -->
+        <div v-else-if="message.type === 'file'">
+          <div v-if="message.appended" class="mb-1 text-right">
+            <span class="inline-block text-[10px] font-medium text-amber-600 border border-amber-300 bg-amber-50 rounded px-1 py-px">追加</span>
+          </div>
+          <div class="relative">
+            <a
+              :href="url || undefined"
+              :download="message.file?.name"
+              target="_blank"
+              rel="noopener"
+              class="flex items-center gap-3 rounded-2xl rounded-tr-sm bg-white shadow px-3.5 py-3 hover:bg-slate-50"
+            >
+              <span class="w-9 h-9 rounded-lg bg-brand/10 flex items-center justify-center text-lg shrink-0">📄</span>
+              <span class="min-w-0">
+                <span class="block text-sm text-slate-800 truncate">{{ message.file?.name }}</span>
+                <span class="block text-[11px] text-slate-400">{{ fmtSize(message.file?.size) }}</span>
+              </span>
+            </a>
+          </div>
         </div>
       </div>
+
+      <!-- 默认头像：站点 logo（仅展示，不支持修改） -->
+      <img
+        src="/logo.png"
+        alt="默认头像"
+        class="w-8 h-8 rounded-full object-cover shrink-0 select-none mt-0.5"
+        draggable="false"
+      />
     </div>
 
     <!-- 双击图片放大预览 -->
@@ -108,12 +119,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import DiaryDeleteButton from './DiaryDeleteButton.vue'
 import { useDiaryStore } from '@/stores/diary'
+import { formatDiaryMsgTime } from '@/utils/time'
 import type { DiaryMessage } from '@/types'
 
-const props = defineProps<{ message: DiaryMessage }>()
+const props = defineProps<{ message: DiaryMessage; readonly?: boolean }>()
 const emit = defineEmits<{ delete: [id: string] }>()
 
 const diary = useDiaryStore()
@@ -121,6 +133,7 @@ const elRef = ref<HTMLElement | null>(null)
 const url = ref('')
 let observer: IntersectionObserver | null = null
 
+const timeLabel = computed(() => formatDiaryMsgTime(props.message.createdAt))
 const isImage = computed(() => !!props.message.file?.mime.startsWith('image/'))
 const isVideo = computed(() => !!props.message.file?.mime.startsWith('video/'))
 

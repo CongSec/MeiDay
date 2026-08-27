@@ -23,6 +23,8 @@ const props = defineProps<{
   subtaskMode?: boolean
   subtask?: Subtask | null
   parentTask?: Task | null
+  /** 非空时表示正在编辑“未来任务”里的重复出现模板：保存走 saveFutureOccurrenceConfirmed（masterId = 重复任务源任务 id） */
+  templateMasterId?: string | null
 }>()
 const emit = defineEmits<{
   'update:open': [boolean]
@@ -473,7 +475,9 @@ async function submit() {
   saving.value = true
   emit('update:open', false)
   try {
-    const ok = await tasks.saveTaskConfirmed(task)
+    const ok = props.templateMasterId
+      ? await tasks.saveFutureOccurrenceConfirmed(task, props.templateMasterId)
+      : await tasks.saveTaskConfirmed(task)
     if (!ok) {
       // 保存失败：store 已弹错误提示，这里清理本次新上传的孤文件并停止后台上传
       cleanupNewUploads()

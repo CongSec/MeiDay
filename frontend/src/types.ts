@@ -142,10 +142,15 @@ export interface DiaryMessage {
   appended?: boolean
 }
 
-/** 隐私日记：某天的日记内容（整体加密后存于 users/{username}/diary/YYYY/MM/DD.json） */
-export interface DiaryDay {
+/** 隐私日记：一次会话（一个批次）的消息内容。
+ *  独立加密后存于 users/{username}/diary/YYYY/MM/DD/{batchId}.json，
+ *  同一天的多个批次 = 多次进入系统的多份独立文件，互不覆盖。 */
+export interface DiaryBatch {
   v: 1
+  /** 批次（一次页面会话）的唯一 id；同一次会话跨天的消息在不同日文件夹下共用该 id */
+  batchId: string
   messages: DiaryMessage[]
+  createdAt: string
   updatedAt: string
 }
 
@@ -153,7 +158,8 @@ export interface CredFields {
   ossAk: string
   ossSk: string
   bucket: string
-  region: string
+  /** S3 兼容存储服务地址（完整域名或 URL，如 https://oss-cn-beijing.aliyuncs.com / cos.ap-shanghai.myqcloud.com / obs.cn-north-4.myhuaweicloud.com） */
+  endpoint: string
   smtpUser: string
   smtpPass: string
   notifyEmail: string

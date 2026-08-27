@@ -42,7 +42,7 @@
             </button>
             <div
               v-if="settingsOpen"
-              class="absolute right-0 top-full mt-1 w-44 rounded-xl bg-white shadow-xl ring-1 ring-black/10 py-1 z-50 overflow-hidden"
+              class="absolute right-0 top-full mt-1 w-60 rounded-xl bg-white shadow-xl ring-1 ring-black/10 py-1 z-50 overflow-hidden"
             >
               <button
                 class="w-full flex items-center gap-2 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-100 whitespace-nowrap"
@@ -76,6 +76,39 @@
                 <span class="text-base shrink-0">🗑️</span>
                 <span>{{ diary.deleting ? '删除中…' : '删除日记' }}</span>
               </button>
+              <div class="h-px bg-slate-100 my-1" />
+              <div class="px-3 pt-1 pb-2">
+                <div class="text-[11px] text-slate-400 font-medium mb-1.5">🔔 日记邮件通知</div>
+                <label class="flex items-center justify-between gap-2">
+                  <span class="text-xs text-slate-600">进入成功</span>
+                  <button
+                    type="button"
+                    role="switch"
+                    :aria-checked="diaryNotifyPrefs.diary_unlock_success"
+                    :disabled="diaryNotifySaving"
+                    class="relative w-9 h-5 rounded-full transition-colors shrink-0 disabled:opacity-50"
+                    :class="diaryNotifyPrefs.diary_unlock_success ? 'bg-brand' : 'bg-slate-300'"
+                    @click="setDiaryNotify('diary_unlock_success', !diaryNotifyPrefs.diary_unlock_success)"
+                  >
+                    <span class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform" :class="diaryNotifyPrefs.diary_unlock_success ? 'translate-x-4' : ''" />
+                  </button>
+                </label>
+                <label class="flex items-center justify-between gap-2 mt-1.5">
+                  <span class="text-xs text-slate-600">进入失败</span>
+                  <button
+                    type="button"
+                    role="switch"
+                    :aria-checked="diaryNotifyPrefs.diary_unlock_failed"
+                    :disabled="diaryNotifySaving"
+                    class="relative w-9 h-5 rounded-full transition-colors shrink-0 disabled:opacity-50"
+                    :class="diaryNotifyPrefs.diary_unlock_failed ? 'bg-brand' : 'bg-slate-300'"
+                    @click="setDiaryNotify('diary_unlock_failed', !diaryNotifyPrefs.diary_unlock_failed)"
+                  >
+                    <span class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform" :class="diaryNotifyPrefs.diary_unlock_failed ? 'translate-x-4' : ''" />
+                  </button>
+                </label>
+                <p class="text-[10px] text-slate-400 mt-1.5 leading-snug">修改密码 / 导出 / 导入 / 删除通知始终开启，不可关闭</p>
+              </div>
             </div>
           </div>
           <button class="px-2 md:px-3 py-1.5 rounded-lg text-xs md:text-sm text-red-500 hover:bg-red-50 font-medium whitespace-nowrap" @click="onExit">
@@ -223,6 +256,8 @@ import { useUiStore } from '@/stores/ui'
 import { setIdleLockExpireHandler } from '@/composables/useIdleLock'
 import { todayKey } from '@/utils/time'
 import { describeDiaryError, peekDiaryZipHasDek } from '@/utils/diaryStorage'
+import { api } from '@/api/client'
+import { logAudit, safeDetail } from '@/utils/audit'
 
 const diary = useDiaryStore()
 const ui = useUiStore()
@@ -250,6 +285,10 @@ const importPw = ref('')
 const importError = ref('')
 const importFile = ref<File | null>(null)
 
+/** 隐私日记邮件通知开关（仅进入日记后在此设置；改密/导出/导入/删除通知恒开启不可关闭） */
+const diaryNotifyPrefs = ref({ diary_unlock_success: true, diary_unlock_failed: true })
+const diaryNotifySaving = ref(false)
+
 const yearOptions: number[] = []
 for (let y = Number(todayKey().slice(0, 4)); y >= 2020; y--) yearOptions.push(y)
 
@@ -274,8 +313,38 @@ function onDocPointerdown(e: PointerEvent): void {
   }
 }
 
+async function loadDiaryNotify(): Promise<void> {
+  try {
+    const prefs = await api.getNotifyPrefs()
+    diaryNotifyPrefs.value = {
+      diary_unlock_success: prefs.diary_unlock_success,
+      diary_unlock_failed: prefs.diary_unlock_failed,
+    }
+  } catch {
+    // 加载失败保持默认开启，不阻塞日记界面
+  }
+}
+
+async function setDiaryNotify(key: 'diary_unlock_success' | 'diary_unlock_failed', val: boolean): Promise<void> {
+  diaryNotifySaving.value = true
+  try {
+    const prefs = await api.setNotifyPrefs({ [key]: val })
+    diaryNotifyPrefs.value = {
+      diary_unlock_success: prefs.diary_unlock_success,
+      diary_unlock_failed: prefs.diary_unlock_failed,
+    }
+    ui.toast('日记邮件通知设置已保存')
+    logAudit('修改设置', safeDetail('更新隐私日记通知开关：' + key))
+  } catch (e) {
+    ui.toast(e instanceof Error ? e.message : '保存失败', 'error')
+  } finally {
+    diaryNotifySaving.value = false
+  }
+}
+
 function onUnlocked(): void {
-  // 解锁成功后进入主界面；给聊天一个空状态即可
+  // 解锁成功后进入主界面；加载日记通知开关（进入成功/失败）
+  void loadDiaryNotify()
 }
 
 /** 退出回顾：关闭视图并释放回顾期间下载的附件 URL */
@@ -384,6 +453,10 @@ onMounted(async () => {
     if (mode === 'setup') gateMode.value = 'setup'
     else if (mode === 'enter') gateMode.value = 'enter'
     // unlocked：直接进入主界面（diary.unlocked 已为 true）
+    if (mode === 'unlocked') {
+      // 内存中已解锁直达主界面，也需要加载日记通知开关
+      void loadDiaryNotify()
+    }
   } catch (e) {
     ui.toast(e instanceof Error ? e.message : '进入日记失败', 'error')
     router.push('/today')

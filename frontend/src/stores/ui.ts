@@ -10,7 +10,7 @@ export interface OssErrorInfo {
   request_id: string | null
   cors_configured: boolean | null
   bucket: string
-  region: string
+  endpoint: string
 }
 
 export interface Toast {

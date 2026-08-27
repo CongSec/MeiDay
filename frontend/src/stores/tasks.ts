@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import type OSS from 'ali-oss'
+import type { OssClient } from '@/utils/oss'
 import { useAuthStore } from './auth'
 import { useUiStore } from './ui'
 import { useStatsStore } from './stats'
@@ -132,7 +132,7 @@ function splitDeleted(list: Task[]): { active: Task[]; deleted: Task[] } {
 /** 拉取远端回收站文件；文件不存在时视为空，网络/权限错误向上抛。
  *  带 ETag 条件 GET：远端未变化返回 304 时直接复用本地缓存，避免每次同步都全量
  *  下载 trash.json（回收站随任务归档不断变大，登录/轮询时全量拉取非常浪费）。 */
-async function fetchRemoteTrash(client: OSS, username: string, projectId: string): Promise<Task[]> {
+async function fetchRemoteTrash(client: OssClient, username: string, projectId: string): Promise<Task[]> {
   const etagKey = `etag:${username}:${projectId}:trash`
   const cacheKey = trashCacheKey(username, projectId)
   const etag = await idbGet<string>('kv', etagKey)
@@ -1523,16 +1523,32 @@ export const useTasksStore = defineStore('tasks', {
     ): Promise<boolean> {
       if (!this.loadedProjects.includes(projectId)) await this.loadProject(projectId)
       const task = (this.tasks[projectId] ?? []).find((t) => t.id === targetTaskId)
-      if (!task) return false
+      if (task) {
+        if (subtaskId) {
+          const sub = task.subtasks.find((s) => s.id === subtaskId)
+          if (!sub) return false
+          if (!sub.attachments.some((a) => a.id === meta.id)) sub.attachments.push(meta)
+        } else if (!task.attachments.some((a) => a.id === meta.id)) {
+          task.attachments.push(meta)
+        }
+        task.updatedAt = nowIso()
+        return this.saveProjectNow(projectId)
+      }
+      // 未来任务的重复出现（repeats 中的模板）不在主任务列表：
+      // 把后台上传完成的附件写回模板并持久化 repeats，保证“像普通任务一样编辑未来任务”时附件不丢
+      const masters = this.repeats[projectId] ?? []
+      const master = masters.find((m) => m.template.id === targetTaskId)
+      if (!master) return false
+      const template = master.template
       if (subtaskId) {
-        const sub = task.subtasks.find((s) => s.id === subtaskId)
+        const sub = template.subtasks.find((s) => s.id === subtaskId)
         if (!sub) return false
         if (!sub.attachments.some((a) => a.id === meta.id)) sub.attachments.push(meta)
-      } else if (!task.attachments.some((a) => a.id === meta.id)) {
-        task.attachments.push(meta)
+      } else if (!template.attachments.some((a) => a.id === meta.id)) {
+        template.attachments.push(meta)
       }
-      task.updatedAt = nowIso()
-      return this.saveProjectNow(projectId)
+      template.updatedAt = nowIso()
+      return this.saveRepeatsNow(projectId)
     },
     /** 确认式移入回收站：立即写盘任务+回收站，成功才返回 true；失败回滚并返回 false */
     async softDeleteConfirmed(id: string): Promise<boolean> {
@@ -1551,6 +1567,83 @@ export const useTasksStore = defineStore('tasks', {
       await idbPut('trash', trashCacheKey(auth.username, pid), trashSnap)
       return false
     },
+
+    /**
+     * 确认式保存“未来任务”中的重复出现（模板编辑）：
+     * - 保留重复规则：只更新 repeats 中的模板内容并重算下一次出现日期，不落入主任务列表；
+     * - 移除重复规则：删除模板，把本次出现转为普通一次性任务（upsert 到主列表）；
+     * 立即写盘，全部成功才返回 true，失败回滚内存与 IDB 并返回 false。
+     */
+    async saveFutureOccurrenceConfirmed(task: Task, masterId: string): Promise<boolean> {
+      const auth = useAuthStore()
+      // 模板始终留在其原项目下（跨项目移动重复未来出现属于低频场景，忽略项目切换以避免数据不一致）
+      let pid: string | undefined
+      for (const k of Object.keys(this.repeats)) {
+        if ((this.repeats[k] ?? []).some((m) => m.id === masterId)) {
+          pid = k
+          break
+        }
+      }
+      if (!pid) return false
+      task.projectId = pid
+      const tasksSnap = (this.tasks[pid] ?? []).slice()
+      const repeatsSnap = (this.repeats[pid] ?? []).slice()
+      const masters = this.repeats[pid] ?? []
+      const idx = masters.findIndex((m) => m.id === masterId)
+      if (idx < 0) return false
+      normalizeTask(task)
+      task.updatedAt = nowIso()
+      const master = masters[idx]
+      if (!task.repeat) {
+        // 移除重复：删除模板，本次出现转为普通一次性任务
+        this.repeats[pid] = masters.filter((m) => m.id !== masterId)
+        this._persistRepeats(pid)
+        this.upsert(task)
+      } else {
+        const dueDate = task.reminderTime || task.startTime || task.endTime
+          ? dateKeyOf(task.reminderTime || task.startTime || task.endTime)
+          : master.dueDate
+        const next = [...masters]
+        next[idx] = { ...master, template: task, dueDate, updatedAt: nowIso() }
+        this.repeats[pid] = next
+        this._persistRepeats(pid)
+      }
+      const okTasks = !task.repeat ? await this.saveProjectNow(pid) : true
+      const okRepeats = await this.saveRepeatsNow(pid)
+      if (okTasks && okRepeats) return true
+      this.tasks[pid] = tasksSnap
+      this.repeats[pid] = repeatsSnap
+      await idbPut('tasks', taskCacheKey(auth.username, pid), tasksSnap)
+      await idbPut('repeats', repeatsCacheKey(auth.username, pid), repeatsSnap)
+      return false
+    },
+    /**
+     * 删除“未来任务”：
+     * - 若 id 是重复模板（repeats 中 master.template.id），软删其源任务（入回收站），
+     *   重复模板与周期提醒随之停止；源任务异常缺失时仅删除该未来出现模板；
+     * - 普通未来/今日任务走软删（入回收站）。
+     */
+    async deleteFutureTaskConfirmed(taskId: string): Promise<boolean> {
+      for (const pid of Object.keys(this.repeats)) {
+        const masters = this.repeats[pid] ?? []
+        const m = masters.find((x) => x.template.id === taskId)
+        if (!m) continue
+        const src = this.all.find((x) => x.id === m.id)
+        if (src) return this.softDeleteConfirmed(src.id)
+        // 源任务不在主列表（异常兜底）：仅删除该未来出现模板
+        const auth = useAuthStore()
+        const repeatsSnap = (this.repeats[pid] ?? []).slice()
+        this.repeats[pid] = masters.filter((x) => x.id !== m.id)
+        this._persistRepeats(pid)
+        const ok = await this.saveRepeatsNow(pid)
+        if (ok) return true
+        this.repeats[pid] = repeatsSnap
+        await idbPut('repeats', repeatsCacheKey(auth.username, pid), repeatsSnap)
+        return false
+      }
+      return this.softDeleteConfirmed(taskId)
+    },
+
     /** 确认式恢复任务：跨项目时同时保存新旧项目，成功才返回 true；失败回滚并返回 false */
     async restoreConfirmed(id: string, toProjectId?: string): Promise<boolean> {
       const auth = useAuthStore()

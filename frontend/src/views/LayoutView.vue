@@ -396,7 +396,7 @@ async function onImported(list: Task[]) {
         </div>
 
         <div class="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-slate-700">
-          <div v-if="ui.ossError.bucket" class="pb-1">Bucket：<span class="font-mono text-amber-800">{{ ui.ossError.bucket }}</span>（Region：{{ ui.ossError.region }}）</div>
+          <div v-if="ui.ossError.bucket" class="pb-1">Bucket：<span class="font-mono text-amber-800">{{ ui.ossError.bucket }}</span>（Endpoint：{{ ui.ossError.endpoint }}）</div>
           <div v-if="ui.ossError.code" class="py-0.5">OSS 错误码：<span class="font-mono text-amber-800">{{ ui.ossError.code }}</span></div>
           <div v-if="ui.ossError.status" class="py-0.5">HTTP 状态：<span class="font-mono text-amber-800">{{ ui.ossError.status }}</span></div>
           <div v-if="ui.ossError.message" class="py-0.5 break-words">服务端说明：<span class="font-mono text-amber-800">{{ ui.ossError.message }}</span></div>

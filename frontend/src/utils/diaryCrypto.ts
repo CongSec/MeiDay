@@ -105,16 +105,68 @@ export async function rewrapDiaryMeta(
   }
 }
 
+/** 导出 zip 内的密钥文件 dek.json 内容：salt/iv/wrapped 均为 base64。
+ *  用「导出密码」独立包装源 DEK，与账号密码/登录无关；跨账号导入时用它解锁源 DEK。 */
+export interface DiaryExportKey {
+  v: 1
+  salt: string
+  iv: string
+  wrapped: string
+  createdAt: string
+}
+
+/** 用导出密码包装源 DEK，生成可写入导出 zip 的 dek.json 内容 */
+export async function wrapDiaryDekForExport(password: string, dek: Uint8Array): Promise<DiaryExportKey> {
+  const salt = crypto.getRandomValues(new Uint8Array(16))
+  const kek = await deriveDiaryKek(password, salt)
+  const wrapIv = crypto.getRandomValues(new Uint8Array(12))
+  const wrapped = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: wrapIv }, kek, dek as BufferSource)
+  return {
+    v: 1,
+    salt: bytesToB64(salt),
+    iv: bytesToB64(wrapIv),
+    wrapped: bytesToB64(new Uint8Array(wrapped)),
+    createdAt: nowIso(),
+  }
+}
+
+/** 用导出密码解开导出 zip 中的源 DEK；密码错误返回 null */
+export async function unwrapDiaryDekForExport(
+  payload: DiaryExportKey,
+  password: string,
+): Promise<Uint8Array | null> {
+  try {
+    const salt = b64ToBytes(payload.salt)
+    const kek = await deriveDiaryKek(password, salt)
+    const iv = b64ToBytes(payload.iv)
+    const wrapped = b64ToBytes(payload.wrapped)
+    const dekBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv as BufferSource }, kek, wrapped as BufferSource)
+    if (dekBuf.byteLength !== 32) return null
+    return new Uint8Array(dekBuf)
+  } catch {
+    return null
+  }
+}
+
+/** 把 WebCrypto 的原始解密错误（英文/无信息）翻译成用户能看懂的中文提示 */
+export function friendlyDecryptError(): Error {
+  return new Error('解密失败：日记密码不匹配或数据已损坏')
+}
+
 /** 加密某天日记（文本）→ base64(iv + ciphertext) */
 export async function encryptDay(dek: Uint8Array, plain: string): Promise<string> {
   const key = await importAesKey(dek, ['encrypt'])
   return encryptBytes(key, encoder.encode(plain))
 }
 
-/** 解密某天日记密文（base64）→ 明文文本；失败抛错 */
+/** 解密某天日记密文（base64）→ 明文文本；密码不匹配或数据损坏时抛出可读中文错误 */
 export async function decryptDay(dek: Uint8Array, cipherB64: string): Promise<string> {
-  const key = await importAesKey(dek, ['decrypt'])
-  return decoder.decode(await decryptBytes(key, cipherB64.trim()))
+  try {
+    const key = await importAesKey(dek, ['decrypt'])
+    return decoder.decode(await decryptBytes(key, cipherB64.trim()))
+  } catch {
+    throw friendlyDecryptError()
+  }
 }
 
 /** 加密附件/音频字节 → 原始密文字节（iv 前置） */
@@ -128,11 +180,15 @@ export async function encryptFileBytes(dek: Uint8Array, data: Uint8Array): Promi
   return out
 }
 
-/** 解密附件/音频密文字节（iv 前置）→ 原始字节；失败抛错 */
+/** 解密附件/音频密文字节（iv 前置）→ 原始字节；密码不匹配或数据损坏时抛出可读中文错误 */
 export async function decryptFileBytes(dek: Uint8Array, data: Uint8Array): Promise<Uint8Array> {
-  const key = await importAesKey(dek, ['decrypt'])
-  const iv = data.slice(0, 12)
-  const cipher = data.slice(12)
-  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv as BufferSource }, key, cipher as BufferSource)
-  return new Uint8Array(plain)
+  try {
+    const key = await importAesKey(dek, ['decrypt'])
+    const iv = data.slice(0, 12)
+    const cipher = data.slice(12)
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv as BufferSource }, key, cipher as BufferSource)
+    return new Uint8Array(plain)
+  } catch {
+    throw friendlyDecryptError()
+  }
 }

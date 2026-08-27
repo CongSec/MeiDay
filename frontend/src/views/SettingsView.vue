@@ -27,8 +27,8 @@ const statsDays = computed(() => {
 const statsCompleted = computed(() => statsStore.completedCount)
 const statsReady = computed(() => statsStore.loaded && !!statsStore.stats)
 
-/** 安全邮件通知开关（登录成功 / 登录失败 / 查看密钥）。登录成功默认关闭，其余默认开启 */
-const notifyPrefs = ref<NotifyPrefs>({ login_success: false, login_failed: true, key_view: true })
+/** 安全邮件通知开关（登录成功 / 登录失败）。登录成功默认开启，其余默认开启；查看密钥通知恒开启不可关闭 */
+const notifyPrefs = ref<NotifyPrefs>({ login_success: true, login_failed: true, key_view: true, diary_unlock_success: true, diary_unlock_failed: true })
 const notifySaving = ref(false)
 
 async function loadNotifyPrefs() {
@@ -39,7 +39,7 @@ async function loadNotifyPrefs() {
   }
 }
 
-async function setNotifyPref(key: 'login_success' | 'login_failed' | 'key_view', val: boolean) {
+async function setNotifyPref(key: 'login_success' | 'login_failed', val: boolean) {
   notifySaving.value = true
   try {
     notifyPrefs.value = await api.setNotifyPrefs({ [key]: val })
@@ -59,7 +59,7 @@ const FIELDS: { key: keyof CredFields; label: string; hint?: string }[] = [
   { key: 'ossAk', label: 'OSS AccessKey', hint: 'RAM 子账号 AccessKey' },
   { key: 'ossSk', label: 'OSS SecretKey', hint: 'RAM 子账号 SecretKey' },
   { key: 'bucket', label: 'OSS Bucket 名称' },
-  { key: 'region', label: 'OSS Region', hint: '如 oss-cn-beijing' },
+  { key: 'endpoint', label: 'OSS Endpoint', hint: 'S3 兼容地址：oss-cn-beijing.aliyuncs.com / cos.ap-shanghai.myqcloud.com / obs.cn-north-4.myhuaweicloud.com / MinIO' },
   { key: 'smtpUser', label: '发件邮箱 (QQ)' },
   { key: 'smtpPass', label: 'SMTP 授权码', hint: 'QQ 邮箱设置 → 账号 → 开启 SMTP 获取' },
   { key: 'notifyEmail', label: '收件邮箱', hint: '默认同发件邮箱，可独立填写' },
@@ -69,7 +69,7 @@ const form = reactive<Record<keyof CredFields, string>>({
   ossAk: '',
   ossSk: '',
   bucket: '',
-  region: '',
+  endpoint: '',
   smtpUser: '',
   smtpPass: '',
   notifyEmail: '',
@@ -164,12 +164,13 @@ async function save() {
     err.value = `请填写：${missing.map((f) => f.label).join('、')}`
     return
   }
-  // 兼容误填完整 OSS 域名：自动去掉 .aliyuncs.com 后缀，ali-oss SDK 只接受区域 ID
-  let region = form.region.trim().replace(/\.aliyuncs\.com$/, '')
-  if (!/^[a-zA-Z0-9\-_]+$/.test(region)) {
-    err.value = 'OSS Region 格式不正确，请输入如 oss-cn-beijing 的区域 ID'
+  // S3 兼容服务地址：允许带协议或不带协议，只校验域名/URL 字形，避免把任意 host 拼进请求
+  let endpoint = form.endpoint.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '')
+  if (!/^[a-zA-Z0-9.-]+(?:\/[^\s]*)?$/.test(endpoint)) {
+    err.value = 'OSS Endpoint 格式不正确，请输入存储服务地址，如 cos.ap-shanghai.myqcloud.com'
     return
   }
+  endpoint = form.endpoint.trim()
   busy.value = true
   const oldCreds = auth.creds
   try {
@@ -177,7 +178,7 @@ async function save() {
       ossAk: form.ossAk.trim(),
       ossSk: form.ossSk.trim(),
       bucket: form.bucket.trim(),
-      region,
+      endpoint,
       smtpUser: form.smtpUser.trim(),
       smtpPass: form.smtpPass.trim(),
       notifyEmail: form.notifyEmail.trim(),
@@ -248,7 +249,7 @@ async function save() {
 
         <div v-if="err" class="text-sm text-red-500">{{ err }}</div>
         <div class="text-[11px] text-slate-400 leading-relaxed">
-          保存后 OSS AK/SK/Bucket/Region 仅以密文存于服务器，永不可被服务器解密；SMTP 授权码与收件邮箱将明文发送给后端用于后端离线提醒（服务器沦陷仅影响邮箱，不影响 OSS 数据）。
+          保存后 OSS AK/SK/Bucket/Endpoint 仅以密文存于服务器，永不可被服务器解密；SMTP 授权码与收件邮箱将明文发送给后端用于后端离线提醒（服务器沦陷仅影响邮箱，不影响 OSS 数据）。
         </div>
 
         <button
@@ -264,7 +265,7 @@ async function save() {
     <div class="mt-4 bg-white rounded-xl shadow-sm border border-slate-100 p-4">
       <div class="text-sm font-semibold text-slate-800">📧 安全邮件通知</div>
       <div class="text-[11px] text-slate-400 mt-0.5">
-        登录成功 / 登录失败 / 查看密钥时通过邮件提醒（发往上方配置的收件邮箱）。邮件发送失败不影响使用。
+        登录成功 / 登录失败时通过邮件提醒（发往上方配置的收件邮箱）；查看密钥与修改密钥配置的通知为安全保护，始终开启。邮件发送失败不影响使用。
       </div>
       <div class="mt-3 space-y-3">
         <label class="flex items-center justify-between gap-3 px-1">
@@ -309,26 +310,6 @@ async function save() {
           </button>
         </label>
 
-        <label class="flex items-center justify-between gap-3 px-1">
-          <div class="min-w-0">
-            <div class="text-sm text-slate-700">查看密钥</div>
-            <div class="text-[11px] text-slate-400">如「[IP] 尝试查看你的设置密钥」</div>
-          </div>
-          <button
-            type="button"
-            role="switch"
-            :aria-checked="notifyPrefs.key_view"
-            :disabled="notifySaving"
-            class="relative w-11 h-6 rounded-full transition-colors shrink-0 disabled:opacity-50"
-            :class="notifyPrefs.key_view ? 'bg-brand' : 'bg-slate-300'"
-            @click="setNotifyPref('key_view', !notifyPrefs.key_view)"
-          >
-            <span
-              class="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform"
-              :class="notifyPrefs.key_view ? 'translate-x-5' : ''"
-            />
-          </button>
-        </label>
       </div>
     </div>
     <div class="mt-4 bg-white rounded-xl shadow-sm border border-slate-100 p-4 space-y-2">

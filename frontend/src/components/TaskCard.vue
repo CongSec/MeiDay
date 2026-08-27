@@ -5,7 +5,7 @@ import { formatTodayTitle, todayKey } from '@/utils/time'
 import { formatRepeat, isNewStyleRepeat, isRepeatDay } from '@/utils/repeat'
 import type { Project, Subtask, Task } from '@/types'
 
-const props = defineProps<{ task: Task; project?: Project }>()
+const props = defineProps<{ task: Task; project?: Project; future?: boolean }>()
 const emit = defineEmits<{
   edit: [Task]
   toggle: [string]
@@ -79,7 +79,7 @@ function onAddSubtask() {
     @click="emit('edit', task)"
   >
     <div class="flex items-start gap-3">
-      <label class="pt-0.5 shrink-0" @click.stop>
+      <label v-if="!future" class="pt-0.5 shrink-0" @click.stop>
         <input
           type="checkbox"
           class="w-5 h-5 accent-brand cursor-pointer"
@@ -87,10 +87,11 @@ function onAddSubtask() {
           @change="emit('toggle', task.id)"
         />
       </label>
+      <span v-else class="pt-0.5 shrink-0 text-base leading-none" title="未来任务">📅</span>
       <div class="flex-1 min-w-0">
         <div class="flex items-center gap-2">
           <button
-            v-if="hasSubtasks"
+            v-if="hasSubtasks && !future"
             class="shrink-0 w-5 h-5 rounded text-slate-400 hover:bg-slate-100 flex items-center justify-center text-xs"
             :title="expanded ? '折叠子任务' : '展开子任务'"
             @click.stop="expanded = !expanded"
@@ -102,6 +103,13 @@ function onAddSubtask() {
             :class="task.status === 'completed' ? 'line-through text-slate-400' : 'text-slate-800'"
           >
             {{ task.name }}
+          </span>
+          <span
+            v-if="future"
+            class="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-600 font-medium shrink-0"
+            title="开始时间在未来"
+          >
+            未来
           </span>
           <span v-if="overdue" class="text-red-500 text-sm" title="已过提醒时间">🔔</span>
         </div>
@@ -124,11 +132,20 @@ function onAddSubtask() {
         </div>
       </div>
       <button
+        v-if="!future"
         class="shrink-0 w-7 h-7 flex items-center justify-center rounded-lg border border-brand/30 text-brand text-base leading-none hover:bg-brand/5"
         title="添加子任务"
         @click.stop="onAddSubtask"
       >
         ＋
+      </button>
+      <button
+        v-else
+        class="shrink-0 w-7 h-7 flex items-center justify-center rounded-lg border border-red-200 text-red-400 text-sm leading-none hover:bg-red-50"
+        title="删除（移入回收站）"
+        @click.stop="emit('delete', task.id)"
+      >
+        🗑
       </button>
     </div>
 
@@ -147,7 +164,7 @@ function onAddSubtask() {
     </div>
 
     <!-- 展开后显示子任务（全宽展示，新增/编辑走弹窗） -->
-    <div v-if="expanded && hasSubtasks" class="mt-3 border-t border-slate-100 pt-2" @click.stop>
+    <div v-if="expanded && hasSubtasks && !future" class="mt-3 border-t border-slate-100 pt-2" @click.stop>
       <div class="flex items-center justify-between mb-2">
         <span class="text-[11px] font-medium text-slate-400">子任务明细</span>
         <button

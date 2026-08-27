@@ -59,7 +59,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, tokenOverride?: string): Promise<T> {
   // 本地会话过期（7 天未活动）：直接视为未认证，清理本地态并跳登录。
   // 让 isTokenExpiredLocal/tokenAgeMs 真正生效，避免“本地已过期仍发请求”（BUG-36）
   if (isTokenExpiredLocal()) {
@@ -69,7 +69,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     throw new ApiError(401, '登录已过期，请重新登录')
   }
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  const token = getToken()
+  const token = tokenOverride ?? getToken()
   if (token) headers.Authorization = `Bearer ${token}`
   const res = await fetch(`${API_BASE}${path}`, {
     method,
@@ -108,6 +108,9 @@ export interface NotifyPrefs {
   login_success: boolean
   login_failed: boolean
   key_view: boolean
+  /** 隐私日记「进入成功 / 进入失败」通知开关（默认开，仅进入日记后可在日记设置里开关） */
+  diary_unlock_success: boolean
+  diary_unlock_failed: boolean
 }
 
 export interface CaptchaResult {
@@ -161,12 +164,12 @@ export const api = {
     return request<CaptchaResult>('GET', '/api/captcha')
   },
   /** 登录只发送 SHA-256(password) 校验子（不可逆密文），明文密码不出浏览器 */
-  login(body: { username: string; passwordHash: string }) {
-    return request<LoginResponse>('POST', '/api/login', body)
+  login(body: { username: string; passwordHash: string }, token?: string) {
+    return request<LoginResponse>('POST', '/api/login', body, token)
   },
   /** 旧账号一次性迁移登录：仅 auth_version=0 的历史账号首次登录时发送一次明文密码 */
-  legacyLogin(body: { username: string; password: string }) {
-    return request<LoginResponse>('POST', '/api/login/legacy', body)
+  legacyLogin(body: { username: string; password: string }, token?: string) {
+    return request<LoginResponse>('POST', '/api/login/legacy', body, token)
   },
   logout() {
     return request<{ ok: true }>('POST', '/api/logout')
@@ -187,7 +190,7 @@ export const api = {
   },
   /** 后端直连 OSS 诊断（绕过浏览器 CORS），返回真实错误码（如 NoSuchBucket）。
    *  AK/SK 仅用于本次诊断，后端不落库、不打印。 */
-  checkOss(body: { oss_ak: string; oss_sk: string; bucket: string; region: string }) {
+  checkOss(body: { oss_ak: string; oss_sk: string; bucket: string; endpoint: string }) {
     return request<OssCheckResult>('POST', '/api/credentials/oss-check', body)
   },
   getLogs(params: { action?: string; ip?: string; highRisk?: '' | '0' | '1'; limit?: number; offset?: number } = {}) {
@@ -221,7 +224,13 @@ export const api = {
   getNotifyPrefs() {
     return request<NotifyPrefs>('GET', '/api/notify-prefs')
   },
-  setNotifyPrefs(body: { login_success?: boolean; login_failed?: boolean; key_view?: boolean }) {
+  setNotifyPrefs(body: {
+    login_success?: boolean
+    login_failed?: boolean
+    key_view?: boolean
+    diary_unlock_success?: boolean
+    diary_unlock_failed?: boolean
+  }) {
     return request<NotifyPrefs>('PUT', '/api/notify-prefs', body)
   },
   getLogRetention() {

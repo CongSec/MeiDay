@@ -28,6 +28,8 @@ function hintFromDiag(diag: OssCheckResult): string {
       return `OSS 签名校验失败，通常是 SecretKey 错误或本机时间不准。${detail}`
     case 'AccessDenied':
       return `OSS 访问被拒绝，请检查 RAM 策略是否授权本账号路径。${detail}`
+    case 'SecondLevelDomainForbidden':
+      return `OSS Bucket 访问样式被拒绝：该厂商要求虚拟主机样式（bucket.endpoint），请检查 endpoint 是否为厂商 S3 兼容域名。${detail}`
     default:
       return `OSS 请求失败：${detail}`
   }
@@ -43,7 +45,7 @@ function baseInfo(creds: CredFields | null, fallback: string): OssErrorInfo {
     request_id: null,
     cors_configured: null,
     bucket: creds?.bucket ?? '',
-    region: creds?.region ?? '',
+    endpoint: creds?.endpoint ?? '',
   }
 }
 
@@ -68,7 +70,7 @@ export async function enrichOssError(e: unknown, fallback = describeOssError(e))
       oss_ak: creds.ossAk,
       oss_sk: creds.ossSk,
       bucket: creds.bucket,
-      region: creds.region,
+      endpoint: creds.endpoint,
     })
     ui.showOssError({
       title: diag.cors_configured === false ? 'Bucket 未配置 CORS' : 'OSS 加载失败',
@@ -79,7 +81,7 @@ export async function enrichOssError(e: unknown, fallback = describeOssError(e))
       request_id: diag.request_id,
       cors_configured: diag.cors_configured,
       bucket: creds.bucket,
-      region: creds.region,
+      endpoint: creds.endpoint,
     })
   } catch {
     ui.showOssError(base)
