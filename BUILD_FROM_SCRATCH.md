@@ -17,10 +17,10 @@
 最终插件的运行链路是：
 
 ```
-思源顶部图标 (addTopBar)
-   │  点击
+右侧边栏图标 (addDock，停靠在 RightTop)
+   │  点击展开
    ▼
-Dialog 弹窗 (宽 940px / 高 72vh)
+侧边栏停靠面板（宽 DOCK_WIDTH，默认 420px）
    │
    ▼
 iframe(src=blob:...)
@@ -32,7 +32,7 @@ MeiDay Vue 前端（一个自包含 HTML，JS/CSS 全内联）
 axios → https://task.congsec.cn （远端 FastAPI 后端）
 ```
 
-一句话概括：**前端用 Vite 打成“单个 HTML”，插件外壳用 iframe 把这个 HTML 装进弹窗**，两者是解耦的。
+一句话概括：**前端用 Vite 打成“单个 HTML”，插件外壳用 iframe 把这个 HTML 装进思源侧边栏**，两者是解耦的。
 
 ---
 
@@ -86,7 +86,7 @@ powershell -ExecutionPolicy Bypass -File .\build-plugin.ps1
 
 思源**只在启动时读取插件文件，不支持热加载**，所以必须：`文件 → 退出思源` 完全关掉，再重新打开。
 
-重启后，思源右上角出现一个“任务清单”图标，点击弹出 MeiDay 登录窗口 = 成功。
+重启后，思源**右侧边栏**出现一个“任务清单”图标，点击展开 MeiDay 面板 = 成功。
 
 ---
 
@@ -94,11 +94,11 @@ powershell -ExecutionPolicy Bypass -File .\build-plugin.ps1
 
 | 现象 | 原因与解决 |
 |---|---|
-| 顶栏没有图标 / 图标是空的 | `addIcons` 必须传**裸 `<symbol>`**，不能在外面包 `<svg>`（见 §6 坑 2） |
-| 弹窗里一片空白 | 多半是 `app.html` 没内联成功 / blob URL 里用了 `new URL('/logo.png')` 之类的相对资源，必须全部内联（见 §6 坑 3） |
+| 侧栏没有图标 / 图标是空的 | `addIcons` 必须传**裸 `<symbol>`**，不能在外面包 `<svg>`（见 §6 坑 2） |
+| 侧栏面板里一片空白 | 多半是 `app.html` 没内联成功 / blob URL 里用了 `new URL('/logo.png')` 之类的相对资源，必须全部内联（见 §6 坑 3） |
 | 前端能开但接口报跨域 | 后端 CORS 需允许回环任意端口：`allow_origin_regex=^https?://(127\.0\.0\.1\|localhost)(:\d+)?$`（见 `backend/app/main.py`） |
 | 改了插件代码重启也没变化 | 确认真的**完全退出**了思源，不是点关闭窗口（那是最小化到托盘） |
-| 弹窗太窄/太宽 | 见 §5“如何调整弹窗大小” |
+| 面板太窄/太宽 | 见 §5“如何调整侧边栏面板” |
 
 ---
 
@@ -131,24 +131,27 @@ npm run build
 
 ---
 
-## 5. 如何调整弹窗大小（你这次问的）
+## 5. 如何调整侧边栏面板（大小 / 位置）
 
-打开 `D:\desktop\5555\meiday-siyuan-plugin\src\index.ts`，文件**最顶部**有两个常量：
+打开 `D:\desktop\5555\meiday-siyuan-plugin\src\index.ts`，文件**最顶部**有三个常量：
 
 ```ts
-const DIALOG_WIDTH  = "940px";   // ← 想多宽改这里
-const DIALOG_HEIGHT = "72vh";    // ← 想多高改这里
+const DOCK_POSITION = "RightTop";   // 停靠位置
+const DOCK_WIDTH    = 420;          // 面板宽度(px)
+const DOCK_SHOW     = false;        // true=启动即展开，false=点图标才展开
 ```
 
-- 宽度写法：`"940px"`（固定像素）、`"80vw"`（视口宽度的 80%）都行。
-- 高度写法：`"72vh"`（视口高度的 72%）、`"600px"` 都行。
+- `DOCK_POSITION`：可选 `"RightTop"`（右上侧栏，默认）、`"RightBottom"`（右下）、`"LeftTop"`（左上）、`"LeftBottom"`（左下）、`"BottomLeft"` / `"BottomRight"`（底部）
+- `DOCK_WIDTH`：面板宽度（像素）。想更宽就调大，比如 `560`。
+- `DOCK_SHOW`：`true` = 每次启动思源自动展开面板；`false` = 需要手动点右侧栏的图标。
 
-**注意一个思源的限制**：思源会给弹窗外壳设置 `max-width: 88vw`，也就是说
-**弹窗最宽只能到屏幕宽度的 88%**。在很窄的屏幕上，即使你写 `"2000px"` 也会被自动压到 88vw 以内，
-这是思源的行为，不是 bug。
+**注意思源的限制**：右侧边栏总宽度有限，面板太宽会被自动压窄，属正常行为。
 
 改完保存，重新执行 §2 的第 2、3 步（`build-plugin.ps1` + 完全重启思源）即可生效。
 如果想改默认打开的后端地址，改 `frontend/.env.production` 里的 `VITE_API_BASE_URL` 后重新构建即可。
+
+> 想改回「顶部图标 + 弹出窗口」的老方式？`src/index.ts` 里注释保留了一份 `openDialog()`（Dialog 版），
+> 把注释解开、并把 `onLayoutReady()` 换成 `addTopBar(...)` 即可（文件内注释有完整示例）。
 
 ---
 
@@ -194,40 +197,60 @@ my-plugin/
 }
 ```
 
-**`src/index.ts`**（核心逻辑，本项目全文就这一个文件，很短）：
+**`src/index.ts`**（核心逻辑，本项目全文就一个文件，很短；下面是“侧边栏版”的精简示意）：
 
 ```ts
-import {Plugin, Dialog} from "siyuan";
+import {Plugin} from "siyuan";
 import "./index.css";
 import appHtml from "./assets/app.html";   // 单文件前端，由 webpack 以字符串内联
 
 export default class MeiDayPlugin extends Plugin {
+    private objectUrl: string | null = null;
+
+    private ensureObjectUrl(): string {   // 把内联 HTML 包成 blob URL（只建一次）
+        if (!this.objectUrl) {
+            const blob = new Blob([appHtml], {type: "text/html;charset=utf-8"});
+            this.objectUrl = URL.createObjectURL(blob);
+        }
+        return this.objectUrl;
+    }
+
     async onload() {
         // ① 注册一个自定义图标（必须是裸 <symbol>，不能包 <svg>）
         this.addIcons(`<symbol id="iconMeiDay" viewBox="0 0 24 24">…</symbol>`);
     }
     async onLayoutReady() {
-        // ② 在顶部工具栏加一个按钮
-        this.addTopBar({
-            icon: "iconMeiDay",
-            title: "MeiDay",
-            position: "right",
-            callback: () => this.openDialog(),
+        // ② 把面板注册到右侧边栏（addDock）
+        const objectUrl = this.ensureObjectUrl();
+        this.addDock({
+            config: {
+                position: "RightTop",
+                size: {width: 420, height: 0},
+                icon: "iconMeiDay",
+                title: "MeiDay",
+                show: false,
+                index: 1,
+            },
+            data: {},
+            type: "meiday",
+            init() {   // 每次面板展开都会执行，this.element 就是面板容器
+                this.element.classList.add("meiday__wrap");
+                this.element.innerHTML = `<iframe class="meiday__iframe" src="${objectUrl}"></iframe>`;
+            },
+            destroy() {},
         });
     }
-    private openDialog() {
-        // ③ 把单文件前端装进 blob URL，再用 iframe 放进 Dialog
-        const blob = new Blob([appHtml], {type: "text/html;charset=utf-8"});
-        const url = URL.createObjectURL(blob);
-        new Dialog({
-            title: "MeiDay",
-            content: `<div class="meiday__wrap"><iframe src="${url}"></iframe></div>`,
-            width: "940px",
-            height: "72vh",
-        });
+    async onunload() {
+        if (this.objectUrl) {
+            URL.revokeObjectURL(this.objectUrl);
+            this.objectUrl = null;
+        }
     }
 }
 ```
+
+`addDock` 的 `config.position` 可选：`"LeftTop" | "LeftBottom" | "RightTop" | "RightBottom" | "BottomLeft" | "BottomRight"`。
+`init` 里 `this` 是思源的 `Custom` 实例，`this.element` 即侧边栏面板容器——你想塞什么 HTML 都行。
 
 ### 6.3 打包配置（webpack）
 
@@ -255,7 +278,7 @@ export default class MeiDayPlugin extends Plugin {
 
 ## 7. 本方案踩过的 3 个坑（务必记住）
 
-1. **`addIcons` 传裸 `<symbol>`**：思源会把传入内容插进 `<svg><defs>`，如果你又包了一层 `<svg>`，符号就注册不上，顶栏图标不显示。（曾因此修过一次：`dc104dd` / `4e71218`）
+1. **`addIcons` 传裸 `<symbol>`**：思源会把传入内容插进 `<svg><defs>`，如果你又包了一层 `<svg>`，符号就注册不上，侧栏图标不显示。（曾因此修过一次：`dc104dd` / `4e71218`）
 2. **blob iframe 里不能用 `new URL("/logo.png", import.meta.url)` 加载静态资源**：blob URL 没有真实路径，相对资源全挂。解决：把 logo 等小资源**内联成 base64** 或直接写进代码。（`731e8f4`）
 3. **思源不热加载**：改了插件文件必须**完全退出**（不是关窗口）再重开。否则 100% 看到旧版本。
 
@@ -297,3 +320,6 @@ powershell -ExecutionPolicy Bypass -File .\build-plugin.ps1
 
 **Q：为什么前端不直接塞进 webpack？**
 可以，但 Vue 全家桶会让 webpack 配置和产物都变得很重，且和主项目的构建体系重复维护。单文件 + iframe 让“前端构建”和“插件构建”完全解耦：前端照常用 Vite 开发，最后只是多产出一个 HTML 而已。
+
+**Q：我想在顶部工具栏放个图标、点它弹窗，而不是侧边栏？**
+可以，`src/index.ts` 里保留了 Dialog 版 `openDialog()` 的注释示例，解开注释、把 `addDock` 换成 `addTopBar` 即可。
