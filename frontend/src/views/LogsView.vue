@@ -13,8 +13,8 @@ const ips = ref<{ ip: string; count: number }[]>([])
 
 const action = ref('')
 const ip = ref('')
-/** 高危筛选：''=全部，'1'=仅高危，'0'=仅非高危 */
-const highRisk = ref<'' | '0' | '1'>('')
+/** 安全筛选：''=全部，'1'=仅安全，'0'=仅非安全 */
+const security = ref<'' | '0' | '1'>('')
 const limit = ref(100)
 const offset = ref(0)
 const autoRefresh = ref(false)
@@ -46,7 +46,7 @@ async function load() {
     const r = await api.getLogs({
       action: action.value,
       ip: ip.value,
-      highRisk: highRisk.value,
+      security: security.value,
       limit: limit.value,
       offset: offset.value,
     })
@@ -231,15 +231,15 @@ onUnmounted(() => {
         </select>
       </div>
       <div>
-        <label class="text-[11px] text-slate-400 block mb-1">高危</label>
+        <label class="text-[11px] text-slate-400 block mb-1">安全</label>
         <select
-          v-model="highRisk"
+          v-model="security"
           class="w-28 border rounded-lg px-2.5 py-1.5 text-sm bg-white"
           @change="applyFilter"
         >
           <option value="">全部</option>
-          <option value="1">🚨 仅高危</option>
-          <option value="0">仅非高危</option>
+          <option value="1">🚨 仅安全</option>
+          <option value="0">仅非安全</option>
         </select>
       </div>
       <div>
@@ -280,11 +280,7 @@ onUnmounted(() => {
             <td class="px-3 py-2 text-xs text-slate-700">
               <div class="flex items-center gap-1.5">
                 <span
-                  v-if="log.is_high_risk === 1"
-                  class="inline-block px-1.5 py-0.5 rounded text-[11px] font-bold bg-red-600 text-white border border-red-700 shrink-0"
-                >🚨 高危</span>
-                <span
-                  v-else-if="log.is_security === 1"
+                  v-if="log.is_security === 1 || log.is_high_risk === 1"
                   class="inline-block px-1.5 py-0.5 rounded text-[11px] font-bold bg-red-50 text-red-500 border border-red-200 shrink-0"
                 >🚨 安全</span>
                 <span>{{ log.action }}</span>

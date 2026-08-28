@@ -65,6 +65,14 @@ _SKIP_PATHS = {
     "/api/sync/state",
 }
 
+# 安全敏感写操作：这些请求的审计日志自动附上"安全"标签（is_security=True），
+# 对应「修改密钥（加密保存，更新邮箱/存储凭证）」与「修改安全通知（通知开关）」
+# 两类账号安全相关操作。
+_SECURITY_PATHS = {
+    ("PUT", "/api/credentials"),
+    ("PUT", "/api/notify-prefs"),
+}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -117,6 +125,7 @@ async def audit_middleware(request: Request, call_next):
         username = username_from_token(auth_header[len("Bearer "):].strip()) or ""
     ip = client_ip(request)
     ua = request.headers.get("user-agent", "")
+    is_security = (method, path) in _SECURITY_PATHS
     try:
         response = await call_next(request)
     except Exception:
@@ -124,12 +133,14 @@ async def audit_middleware(request: Request, call_next):
             action_label(method, path), username=username or None, method=method, path=path,
             status=500, ip=ip, user_agent=ua, detail="服务端异常",
             duration_ms=int((time.perf_counter() - start) * 1000),
+            is_security=is_security,
         )
         raise
     duration_ms = int((time.perf_counter() - start) * 1000)
     log_action(
         action_label(method, path), username=username or None, method=method, path=path,
         status=response.status_code, ip=ip, user_agent=ua, duration_ms=duration_ms,
+        is_security=is_security,
     )
     return response
 

@@ -159,7 +159,7 @@ export interface AuditLog {
   duration_ms: number | null
   /** 安全相关记录（如密码登录失败）重点标注 */
   is_security: number
-  /** 高危操作（如“显示密钥”）显眼标注 */
+  /** 内部高危标志（如“显示密钥”），前端统一显示为“安全”标签，仅供兼容/审计使用 */
   is_high_risk: number
 }
 
@@ -203,11 +203,12 @@ export const api = {
   checkOss(body: { oss_ak: string; oss_sk: string; bucket: string; endpoint: string }) {
     return request<OssCheckResult>('POST', '/api/credentials/oss-check', body)
   },
-  getLogs(params: { action?: string; ip?: string; highRisk?: '' | '0' | '1'; limit?: number; offset?: number } = {}) {
+  /** 按 行为/IP/安全标签 过滤操作日志；security：''=全部，'1'=仅安全，'0'=仅非安全 */
+  getLogs(params: { action?: string; ip?: string; security?: '' | '0' | '1'; limit?: number; offset?: number } = {}) {
     const qs = new URLSearchParams()
     if (params.action) qs.set('action', params.action)
     if (params.ip) qs.set('ip', params.ip)
-    if (params.highRisk) qs.set('high_risk', params.highRisk)
+    if (params.security) qs.set('security', params.security)
     qs.set('limit', String(params.limit ?? 100))
     qs.set('offset', String(params.offset ?? 0))
     return request<{ total: number; offset: number; limit: number; items: AuditLog[] }>(

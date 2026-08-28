@@ -29,7 +29,7 @@ DIARY_EMAIL_KINDS = {
     "日记-导入": "diary_import",
     "日记-删除": "diary_delete",
 }
-# 隐私日记高危行为（日志里标 🚨 高危）：失败/改密/导出/导入/删除
+# 隐私日记高危行为（内部 is_high_risk=True，前端统一显示为"安全"）：失败/改密/导出/导入/删除
 DIARY_HIGH_RISK_PREFIXES = (
     "日记-进入失败", "日记-密码错误", "日记-修改密码",
     "日记-导出", "日记-导入", "日记-删除",
@@ -44,15 +44,15 @@ def get_logs(
     username: str = Depends(get_username),
     action: str = Query(default="", description="按行为过滤"),
     ip: str = Query(default="", description="按 IP 过滤"),
-    high_risk: str = Query(default="", description="高危过滤：空=全部，1=仅高危，0=仅非高危"),
+    security: str = Query(default="", description="安全过滤：空=全部，1=仅安全，0=仅非安全"),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
-    """按时间倒序返回【当前登录用户自己】的操作日志，支持 行为/IP/高危 过滤与分页。
+    """按时间倒序返回【当前登录用户自己】的操作日志，支持 行为/IP/安全 过滤与分页。
 
     权限隔离：强制以当前会话用户过滤，其他用户（含其注册/登录等）的日志不可见。
     """
-    rows, total = query_logs(username=username, action=action, ip=ip, high_risk=high_risk, limit=limit, offset=offset)
+    rows, total = query_logs(username=username, action=action, ip=ip, security=security, limit=limit, offset=offset)
     return {"total": total, "offset": offset, "limit": limit, "items": rows}
 
 
@@ -93,13 +93,19 @@ def log_client_action(
     """记录前端行为（任务/项目增删改、打开回收站/设置、显示密钥等）。
 
     由客户端在操作发生时调用；写入带用户/IP/UA 的审计日志，失败静默不影响业务。
-    "显示密钥"属于高危操作（is_high_risk=True），日志中带显眼安全标志，
-    并参与后续连续 3 次登录的"确认高危操作"提醒。
+    "显示密钥"仍保留内部高危标志（is_high_risk=True）并触发"查看密钥"安全邮件；
+    "显示密钥"/"隐藏密钥"及全部隐私日记行为均自动附上"安全"标签（is_security=True），
+    供日志页按"安全"筛选。
     """
     is_high_risk = body.action.startswith("显示密钥") or any(
         body.action.startswith(p) for p in DIARY_HIGH_RISK_PREFIXES
     )
-    is_security = is_high_risk or body.action.startswith(DIARY_PREFIX)
+    is_security = (
+        is_high_risk
+        or body.action.startswith("显示密钥")
+        or body.action.startswith("隐藏密钥")
+        or body.action.startswith(DIARY_PREFIX)
+    )
     log_action(
         body.action,
         username=username,

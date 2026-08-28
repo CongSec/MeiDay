@@ -179,7 +179,7 @@ def query_logs(
     username: str = "",
     action: str = "",
     ip: str = "",
-    high_risk: str = "",
+    security: str = "",
     limit: int = 100,
     offset: int = 0,
 ) -> tuple[list[dict], int]:
@@ -194,9 +194,9 @@ def query_logs(
     if ip:
         where.append("ip=?")
         params.append(ip)
-    if high_risk in ("0", "1"):
-        where.append("is_high_risk=?")
-        params.append(int(high_risk))
+    if security in ("0", "1"):
+        where.append("is_security=?")
+        params.append(int(security))
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     with get_conn() as conn:
         total = conn.execute(

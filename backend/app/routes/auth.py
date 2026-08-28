@@ -119,11 +119,13 @@ def _build_login_response(
 ) -> LoginResponse:
     """构造成功登录响应。旧账号迁移登录可传独立 action/path 以便审计区分。
 
-    安全通知（登录成功）邮件由路由在响应后异步发送，不再弹窗提示。
+    安全通知（登录成功）邮件由路由在响应后异步发送，不再弹窗提示；
+    登录成功/登录迁移的日志统一自动附上"安全"标签（is_security=True）。
     """
     log_action(
         action, username=username, method="POST", path=path,
         status=200, ip=_ip(request), user_agent=_ua(request),
+        is_security=True,
     )
     return LoginResponse(
         sessionToken=token,
