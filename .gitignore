@@ -37,6 +37,7 @@ backend/dev.db
 # ===== 前端依赖与构建产物 =====
 node_modules/
 frontend/dist/
+frontend/dist-plugin/
 *.map
 frontend/.vite/
 *.tsbuildinfo
@@ -119,3 +120,8 @@ frontend/android/build/
 *.old
 *.tmp
 *.temp
+# ===== 补充：覆盖率 / direnv / APK 存放目录 =====
+coverage/
+.envrc
+.direnv/
+frontend/apk/
