@@ -88,6 +88,8 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=FRONTEND_ORIGINS,
+    # 思源插件 iframe 的源是本机回环地址，端口可能是 6806 或随机端口（6806 被占用时）。用正则放行任意回环端口，避免重启思源后 CORS 拦截。
+    allow_origin_regex=r"https?://(127\.0\.0\.1|localhost)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -143,3 +145,4 @@ app.include_router(sync_routes.router)
 @app.get("/api/health")
 def health():
     return {"ok": True}
+
