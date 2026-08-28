@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import ClickCaptcha from '@/components/ClickCaptcha.vue'
 import { useAuthStore } from '@/stores/auth'
+import logo from '@/assets/logo.png'
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -79,7 +80,7 @@ async function submit() {
     <div class="w-full max-w-sm bg-white rounded-2xl shadow-xl p-8">
       <div class="text-center">
         <div class="flex items-center justify-center gap-2">
-          <img src="/logo.png" alt="MeiDay" class="h-10 w-10 rounded-xl object-cover" />
+          <img :src="logo" alt="MeiDay" class="h-10 w-10 rounded-xl object-cover" />
           <span class="text-2xl font-bold text-slate-800">MeiDay</span>
         </div>
         <div class="mt-1 text-xs text-slate-400">高安全的轻量任务管理</div>

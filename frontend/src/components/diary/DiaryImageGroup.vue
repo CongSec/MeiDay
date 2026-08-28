@@ -75,7 +75,7 @@
 
       <!-- 默认头像：站点 logo（仅展示，不支持修改） -->
       <img
-        src="/logo.png"
+        :src="logo"
         alt="默认头像"
         class="w-8 h-8 rounded-full object-cover shrink-0 select-none mt-0.5"
         draggable="false"
@@ -108,6 +108,7 @@ import DiaryDeleteButton from './DiaryDeleteButton.vue'
 import { useDiaryStore } from '@/stores/diary'
 import { formatDiaryMsgTime } from '@/utils/time'
 import type { DiaryMessage } from '@/types'
+import logo from '@/assets/logo.png'
 
 const props = defineProps<{ messages: DiaryMessage[]; readonly?: boolean }>()
 const emit = defineEmits<{ delete: [id: string] }>()
