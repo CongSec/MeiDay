@@ -17,10 +17,10 @@
 最终插件的运行链路是：
 
 ```
-右侧边栏图标 (addDock，停靠在 RightTop)
-   │  点击展开
+右侧边栏图标（注入到 #dockRight 图标栏）
+   │  点击
    ▼
-侧边栏停靠面板（宽 DOCK_WIDTH，默认 420px）
+弹窗 Dialog（宽 DIALOG_WIDTH / 高 DIALOG_HEIGHT）
    │
    ▼
 iframe(src=blob:...)
@@ -32,7 +32,7 @@ MeiDay Vue 前端（一个自包含 HTML，JS/CSS 全内联）
 axios → https://task.congsec.cn （远端 FastAPI 后端）
 ```
 
-一句话概括：**前端用 Vite 打成“单个 HTML”，插件外壳用 iframe 把这个 HTML 装进思源侧边栏**，两者是解耦的。
+一句话概括：**前端用 Vite 打成“单个 HTML”，插件外壳用 iframe 把这个 HTML 装进思源弹窗**，两者是解耦的。
 
 ---
 
@@ -86,7 +86,7 @@ powershell -ExecutionPolicy Bypass -File .\build-plugin.ps1
 
 思源**只在启动时读取插件文件，不支持热加载**，所以必须：`文件 → 退出思源` 完全关掉，再重新打开。
 
-重启后，思源**右侧边栏**出现一个“任务清单”图标，点击展开 MeiDay 面板 = 成功。
+重启后，思源**右侧边栏**出现一个“任务清单”图标，点击弹出 MeiDay 窗口 = 成功。
 
 ---
 
@@ -95,10 +95,10 @@ powershell -ExecutionPolicy Bypass -File .\build-plugin.ps1
 | 现象 | 原因与解决 |
 |---|---|
 | 侧栏没有图标 / 图标是空的 | `addIcons` 必须传**裸 `<symbol>`**，不能在外面包 `<svg>`（见 §6 坑 2） |
-| 侧栏面板里一片空白 | 多半是 `app.html` 没内联成功 / blob URL 里用了 `new URL('/logo.png')` 之类的相对资源，必须全部内联（见 §6 坑 3） |
+| 弹窗里一片空白 | 多半是 `app.html` 没内联成功 / blob URL 里用了 `new URL('/logo.png')` 之类的相对资源，必须全部内联（见 §6 坑 3） |
 | 前端能开但接口报跨域 | 后端 CORS 需允许回环任意端口：`allow_origin_regex=^https?://(127\.0\.0\.1\|localhost)(:\d+)?$`（见 `backend/app/main.py`） |
 | 改了插件代码重启也没变化 | 确认真的**完全退出**了思源，不是点关闭窗口（那是最小化到托盘） |
-| 面板太窄/太宽 | 见 §5“如何调整侧边栏面板” |
+| 侧栏图标被思源“重排”后消失 | 属正常：插件用 MutationObserver 监听图标栏，思源重渲染时会自动补回去 |
 
 ---
 
@@ -131,27 +131,27 @@ npm run build
 
 ---
 
-## 5. 如何调整侧边栏面板（大小 / 位置）
+## 5. 如何调整弹窗大小
 
-打开 `D:\desktop\5555\meiday-siyuan-plugin\src\index.ts`，文件**最顶部**有三个常量：
+打开 `D:\desktop\5555\meiday-siyuan-plugin\src\index.ts`，文件**最顶部**有两个常量：
 
 ```ts
-const DOCK_POSITION = "RightTop";   // 停靠位置
-const DOCK_WIDTH    = 420;          // 面板宽度(px)
-const DOCK_SHOW     = false;        // true=启动即展开，false=点图标才展开
+const DIALOG_WIDTH  = "940px";   // ← 想多宽改这里
+const DIALOG_HEIGHT = "72vh";    // ← 想多高改这里
 ```
 
-- `DOCK_POSITION`：可选 `"RightTop"`（右上侧栏，默认）、`"RightBottom"`（右下）、`"LeftTop"`（左上）、`"LeftBottom"`（左下）、`"BottomLeft"` / `"BottomRight"`（底部）
-- `DOCK_WIDTH`：面板宽度（像素）。想更宽就调大，比如 `560`。
-- `DOCK_SHOW`：`true` = 每次启动思源自动展开面板；`false` = 需要手动点右侧栏的图标。
+- 宽度写法：`"940px"`（固定像素）、`"80vw"`（视口宽度的 80%）都行。
+- 高度写法：`"72vh"`（视口高度的 72%）、`"600px"` 都行。
 
-**注意思源的限制**：右侧边栏总宽度有限，面板太宽会被自动压窄，属正常行为。
+**注意一个思源的限制**：思源会给弹窗外壳设置 `max-width: 88vw`，也就是说
+**弹窗最宽只能到屏幕宽度的 88%**。在很窄的屏幕上，即使你写 `"2000px"` 也会被自动压到 88vw 以内，
+这是思源的行为，不是 bug。
 
 改完保存，重新执行 §2 的第 2、3 步（`build-plugin.ps1` + 完全重启思源）即可生效。
 如果想改默认打开的后端地址，改 `frontend/.env.production` 里的 `VITE_API_BASE_URL` 后重新构建即可。
 
-> 想改回「顶部图标 + 弹出窗口」的老方式？`src/index.ts` 里注释保留了一份 `openDialog()`（Dialog 版），
-> 把注释解开、并把 `onLayoutReady()` 换成 `addTopBar(...)` 即可（文件内注释有完整示例）。
+> 想改成「右侧边栏停靠面板」而不是弹窗？思源的右侧边栏原生支持 dock 面板
+> （`addDock`，`src/index.ts` 注释里有说明），把弹窗方案换成 `addDock` 即可。
 
 ---
 
@@ -197,10 +197,10 @@ my-plugin/
 }
 ```
 
-**`src/index.ts`**（核心逻辑，本项目全文就一个文件，很短；下面是“侧边栏版”的精简示意）：
+**`src/index.ts`**（核心逻辑，本项目全文就一个文件，很短；下面是精简示意）：
 
 ```ts
-import {Plugin} from "siyuan";
+import {Plugin, Dialog} from "siyuan";
 import "./index.css";
 import appHtml from "./assets/app.html";   // 单文件前端，由 webpack 以字符串内联
 
@@ -220,24 +220,27 @@ export default class MeiDayPlugin extends Plugin {
         this.addIcons(`<symbol id="iconMeiDay" viewBox="0 0 24 24">…</symbol>`);
     }
     async onLayoutReady() {
-        // ② 把面板注册到右侧边栏（addDock）
-        const objectUrl = this.ensureObjectUrl();
-        this.addDock({
-            config: {
-                position: "RightTop",
-                size: {width: 420, height: 0},
-                icon: "iconMeiDay",
-                title: "MeiDay",
-                show: false,
-                index: 1,
-            },
-            data: {},
-            type: "meiday",
-            init() {   // 每次面板展开都会执行，this.element 就是面板容器
-                this.element.classList.add("meiday__wrap");
-                this.element.innerHTML = `<iframe class="meiday__iframe" src="${objectUrl}"></iframe>`;
-            },
-            destroy() {},
+        // ② 把图标塞进右侧边栏的图标栏（#dockRight .dock__items）
+        this.ensureDockIcon();   // 见下
+    }
+    private ensureDockIcon(): void {
+        const rail = document.querySelector<HTMLElement>("#dockRight .dock__items");
+        if (!rail || rail.querySelector("[data-plugin-meiday]")) return;
+        const item = document.createElement("span");
+        item.setAttribute("data-plugin-meiday", "");
+        item.className = "dock__item ariaLabel";
+        item.title = "MeiDay";
+        item.innerHTML = `<svg><use xlink:href="#iconMeiDay"></use></svg>`;
+        item.addEventListener("click", () => this.openDialog());
+        rail.appendChild(item);
+    }
+    private openDialog() {
+        // ③ 弹窗方式打开：Dialog + iframe(blob URL)
+        new Dialog({
+            title: "MeiDay",
+            content: `<div class="meiday__wrap"><iframe src="${this.ensureObjectUrl()}"></iframe></div>`,
+            width: "940px",
+            height: "72vh",
         });
     }
     async onunload() {
@@ -249,8 +252,13 @@ export default class MeiDayPlugin extends Plugin {
 }
 ```
 
-`addDock` 的 `config.position` 可选：`"LeftTop" | "LeftBottom" | "RightTop" | "RightBottom" | "BottomLeft" | "BottomRight"`。
-`init` 里 `this` 是思源的 `Custom` 实例，`this.element` 即侧边栏面板容器——你想塞什么 HTML 都行。
+要点说明：
+
+- **图标放侧栏**：思源右侧边栏的图标栏 DOM 是 `#dockRight .dock__items`，往里面插入一个 `dock__item` 即可。
+  真正完整的实现还会用 `MutationObserver` 监听该栏，思源重渲染时自动补回图标（否则可能被覆盖）。
+- **打开用弹窗**：点击图标就 `new Dialog(...)`，Dialog 里放 iframe 加载 blob URL 指向的单文件前端。
+- 如果不想手动插 DOM，也可以用官方 `addDock`（注册一个真正的“停靠面板”，图标在侧栏、点开是内嵌面板，
+  不是弹窗）——两者二选一。
 
 ### 6.3 打包配置（webpack）
 
@@ -321,5 +329,6 @@ powershell -ExecutionPolicy Bypass -File .\build-plugin.ps1
 **Q：为什么前端不直接塞进 webpack？**
 可以，但 Vue 全家桶会让 webpack 配置和产物都变得很重，且和主项目的构建体系重复维护。单文件 + iframe 让“前端构建”和“插件构建”完全解耦：前端照常用 Vite 开发，最后只是多产出一个 HTML 而已。
 
-**Q：我想在顶部工具栏放个图标、点它弹窗，而不是侧边栏？**
-可以，`src/index.ts` 里保留了 Dialog 版 `openDialog()` 的注释示例，解开注释、把 `addDock` 换成 `addTopBar` 即可。
+**Q：图标在右侧边栏，打开却是弹窗，这是怎么做到的？**
+思源右侧边栏的图标栏是 `#dockRight .dock__items`（一个真正的 DOM 节点），插件往里面插入一个自定义 `dock__item`
+并绑定点击事件 → 点击就 `new Dialog()` 弹窗。注意别给它设 `data-type`，否则会被思源当成内置停靠面板接管点击。
