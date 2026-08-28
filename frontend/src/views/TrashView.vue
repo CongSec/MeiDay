@@ -542,9 +542,9 @@ async function confirmDelete() {
 <template>
   <div class="p-4 sm:p-6 max-w-3xl mx-auto">
     <h1 class="hidden lg:block text-xl font-bold text-slate-800">🗑 回收站</h1>
-    <div class="mt-0.5 flex items-center justify-between gap-3">
-      <div class="text-xs text-slate-400">被删除的任务与项目，永不自动清理。扫描只列出有回收站文件的项目，展开项目时才加载对应文件</div>
-      <div class="flex items-center gap-2">
+    <div class="mt-0.5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+      <div class="text-xs text-slate-400 leading-relaxed">被删除的任务与项目，永不自动清理。扫描只列出有回收站文件的项目，展开项目时才加载对应文件</div>
+      <div class="flex flex-wrap items-center gap-2">
         <button
           class="shrink-0 px-3 py-1.5 rounded-lg text-xs border border-slate-200 hover:bg-slate-50 disabled:opacity-60"
           :disabled="exportBusy"
