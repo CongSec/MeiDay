@@ -164,9 +164,10 @@ async function save() {
     err.value = `请填写：${missing.map((f) => f.label).join('、')}`
     return
   }
-  // S3 兼容服务地址：允许带协议或不带协议，只校验域名/URL 字形，避免把任意 host 拼进请求
+  // S3 兼容服务地址：允许带协议或不带协议，只校验域名/URL 字形，避免把任意 host 拼进请求。
+  // 允许可选端口（如 MinIO 自建 http://192.168.x.x:9000），oss.ts 会按 IP/内网自动回退 Path-Style
   let endpoint = form.endpoint.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '')
-  if (!/^[a-zA-Z0-9.-]+(?:\/[^\s]*)?$/.test(endpoint)) {
+  if (!/^[a-zA-Z0-9.-]+(?::\d{1,5})?(?:\/[^\s]*)?$/.test(endpoint)) {
     err.value = 'OSS Endpoint 格式不正确，请输入存储服务地址，如 cos.ap-shanghai.myqcloud.com'
     return
   }

@@ -334,7 +334,7 @@ def oss_check(body: OssCheckRequest, username: str = Depends(get_username)):
 
     # V-002：服务端二次校验（schema 已拦第一道，此处兜底防绕过）。
     endpoint = (body.endpoint or "").strip()
-    if not endpoint.lower().startswith("https://"):
+    if not re.match(r"^https?://", endpoint, re.IGNORECASE):
         endpoint = "https://" + endpoint
     parsed = urlparse(endpoint)
     host = (parsed.hostname or "").lower()
@@ -352,7 +352,13 @@ def oss_check(body: OssCheckRequest, username: str = Depends(get_username)):
     is_ip = bool(re.match(r"^\d{1,3}(\.\d{1,3}){3}$", host) or
                  (":" in host and re.match(r"^[0-9a-fA-F:]+$", host)))
     is_local = host == "localhost" or host.endswith(".local") or host.endswith(".internal")
-    if not (is_ip or is_local or "." in bucket):
+    # 仅公有云厂商域名（桶名作子域名）才用 Virtual-Hosted Style；MinIO/自建/
+    # 自定义域名通常没有通配符 DNS，一律 Path-Style（endpoint/bucket）。
+    is_vendor = bool(re.search(
+        r"(aliyuncs\.com|myqcloud\.com|myhuaweicloud\.com|qiniucs\.com|amazonaws\.com|r2\.cloudflarestorage\.com)$",
+        host,
+    ))
+    if is_vendor and not (is_ip or is_local or "." in bucket):
         url = "%s://%s/?max-keys=1" % (parsed.scheme, bucket + "." + parsed.netloc)
     else:
         url = "%s/%s?max-keys=1" % (endpoint.rstrip("/"), quote(bucket, safe=""))

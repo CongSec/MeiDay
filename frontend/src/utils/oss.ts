@@ -138,9 +138,17 @@ function parseListBucketResult(xml: string): {
   return { objects, isTruncated, nextMarker }
 }
 
+/** 公有云厂商（桶名作子域名）的 S3 域名后缀。
+ *
+ * 只有这些厂商提供 bucket.<endpoint> 的泛域名解析（Virtual-Hosted Style）；
+ * MinIO / 自建 / 自定义域名通常没有通配符 DNS，必须用 Path-Style（endpoint/bucket）。 */
+const VENDOR_HOST_RE =
+  /(aliyuncs\.com|myqcloud\.com|myhuaweicloud\.com|qiniucs\.com|amazonaws\.com|r2\.cloudflarestorage\.com)$/i
+
 /**
- * 解析访问基础 URL：默认 Virtual-Hosted Style（https://bucket.endpoint），
- * 仅当 endpoint 是 IP / localhost / 内网域名，或 bucket 名含点号时回退 Path-Style。
+ * 解析访问基础 URL：公网厂商域名走 Virtual-Hosted Style（https://bucket.endpoint）；
+ * endpoint 是 IP / localhost / 内网域名，或 bucket 名含点号，或非厂商自定义域名
+ * （MinIO 自建等）时回退 Path-Style（endpoint/bucket）。
  */
 function resolveBase(endpoint: string, bucket: string): string {
   let parsed: URL
@@ -154,7 +162,8 @@ function resolveBase(endpoint: string, bucket: string): string {
     /^\d{1,3}(\.\d{1,3}){3}$/.test(host) ||
     (host.includes(':') && /^[0-9a-f:]+$/.test(host))
   const isLocal = host === 'localhost' || host.endsWith('.local') || host.endsWith('.internal')
-  const pathStyle = isIp || isLocal || bucket.includes('.')
+  const isVendor = VENDOR_HOST_RE.test(host)
+  const pathStyle = isIp || isLocal || bucket.includes('.') || !isVendor
   if (pathStyle) return `${endpoint}/${encodeURIComponent(bucket)}`
   return `${parsed.protocol}//${encodeURIComponent(bucket)}.${parsed.host}`
 }
