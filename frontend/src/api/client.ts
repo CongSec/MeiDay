@@ -13,6 +13,8 @@ export function setToken(token: string): void {
   localStorage.setItem(`${TOKEN_KEY}_at`, String(Date.now()))
   // 新登录成功后重新武装 401 通知（保证后续会话再次失效时仍能触发一次跳登录）
   unauthorizedFired = false
+  // 同时重置“自动恢复已失败”闸门：下次会话失效仍允许用记住的密码再次静默恢复
+  restoreFailedOnce = false
 }
 
 export function clearToken(): void {
@@ -53,6 +55,21 @@ export function clearSavedPassword(): void {
   localStorage.removeItem(SAVED_PW_AT_KEY)
 }
 
+const USER_KEY = 'st_user'
+
+/** 持久化当前登录用户名：刷新/重启后自动解锁、401 自动滢复都需要它（token 之外的必要信息） */
+export function saveUsername(username: string): void {
+  localStorage.setItem(USER_KEY, username)
+}
+
+export function getSavedUsername(): string {
+  return localStorage.getItem(USER_KEY) ?? ''
+}
+
+export function clearSavedUsername(): void {
+  localStorage.removeItem(USER_KEY)
+}
+
 export class ApiError extends Error {
   status: number
   constructor(status: number, message: string) {
@@ -69,10 +86,90 @@ function fireUnauthorized(): void {
   window.dispatchEvent(new CustomEvent('st:unauthorized'))
 }
 
-async function request<T>(method: string, path: string, body?: unknown, tokenOverride?: string): Promise<T> {
+/** 401 自动恢复钩子：由 auth store 注册，用“记住的密码”静默重新登录，
+ *  返回 true 表示已成功恢复会话；false 表示无法恢复，走正常登出/跳登录。 */
+export type UnauthorizedRestoreHook = () => Promise<boolean>
+let restoreHook: UnauthorizedRestoreHook | null = null
+export function setUnauthorizedRestoreHook(hook: UnauthorizedRestoreHook | null): void {
+  restoreHook = hook
+}
+
+/** 401 自动恢复去重：并发 401 只触发一次恢复。
+ *  避免多请求同时 401 时重复重登；更关键的是防止“记住的密码已失效”时
+ *  每个 401 都拿错误密码重试，导致账号被误判暴力破解而锁定。 */
+let restorePromise: Promise<boolean> | null = null
+/** 自动恢复已经失败过的闸门：证明记住的密码已失效/错误，
+ *  同一登录生命周期内不再重试（防止多次拿错误密码重登导致账号锁定）。
+ *  下一次成功登录（setToken）时重置。 */
+let restoreFailedOnce = false
+async function attemptRestore(): Promise<boolean> {
+  if (restoreFailedOnce) return false
+  if (restorePromise) return restorePromise
+  restorePromise = (async () => {
+    try {
+      return restoreHook ? await restoreHook() : false
+    } catch {
+      return false
+    }
+  })()
+  try {
+    const ok = await restorePromise
+    if (!ok) restoreFailedOnce = true
+    return ok
+  } finally {
+    restorePromise = null
+  }
+}
+
+/** 思源插件 srcdoc 双保险：插件把登录态镜像在 plugin.storage，并在父窗口挂 __meiday_restore。
+ *  当思源端口变化或 localStorage 被清时，iframe 的 localStorage 为空，此处把插件保存的
+ *  登录态重新灌回 localStorage，让应用照常“已登录”。Web / APK 环境无此全局，自动跳过。 */
+export function seedFromParentRestore(): void {
+  if (typeof window === 'undefined') return
+  try {
+    const r = (window.parent as unknown as { __meiday_restore?: SessionMirrorLike }).__meiday_restore
+    if (!r || !r.token) return
+    if (getToken()) return // 本地已有 token，以本地为准（插件镜像会随 storage 事件同步为最新）
+    localStorage.setItem(TOKEN_KEY, r.token)
+    localStorage.setItem(`${TOKEN_KEY}_at`, String(r.tokenAt ?? Date.now()))
+    if (r.savedPw) {
+      localStorage.setItem(SAVED_PW_KEY, r.savedPw)
+      localStorage.setItem(SAVED_PW_AT_KEY, String(r.savedPwAt ?? Date.now()))
+    }
+    if (r.username) localStorage.setItem(USER_KEY, r.username)
+  } catch {
+    /* 非插件环境（跨源 iframe 等）读取失败时忽略 */
+  }
+}
+
+interface SessionMirrorLike {
+  token?: string
+  tokenAt?: number
+  savedPw?: string
+  savedPwAt?: number
+  username?: string
+}
+
+interface RequestOpts {
+  /** 已重试过一次（恢复后重发）：再 401 就不重试，直接登出 */
+  retried?: boolean
+  /** 是否允许触发 401 自动恢复：登录请求本身 401 是“登录失败”，
+   *  不应触发恢复（否则会拿记住的密码再登一次，重复计数异常导致锁定） */
+  restoreOn401?: boolean
+}
+async function request<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  tokenOverride?: string,
+  opts?: RequestOpts,
+): Promise<T> {
+  const { retried = false, restoreOn401 = true } = opts ?? {}
   // 本地会话过期（7 天未活动）：直接视为未认证，清理本地态并跳登录。
-  // 让 isTokenExpiredLocal/tokenAgeMs 真正生效，避免“本地已过期仍发请求”（BUG-36）
-  if (isTokenExpiredLocal()) {
+  // 让 isTokenExpiredLocal/tokenAgeMs 真正生效，避免“本地已过期仍发请求”（BUG-36）。
+  // tokenOverride 是内部重登（login/legacyLogin 携带旧 token 判定“后台静默重登”），
+  // 跳过本地过期检查，否则会拿过期 token 递归触发恢复逻辑。
+  if (!tokenOverride && isTokenExpiredLocal()) {
     clearToken()
     clearSavedPassword()
     fireUnauthorized()
@@ -95,6 +192,12 @@ async function request<T>(method: string, path: string, body?: unknown, tokenOve
       /* ignore */
     }
     if (res.status === 401) {
+      // 会话过期/被挤下线：先用“记住的密码”静默恢复，成功则用新 token 重试一次当前请求，
+      // 避免“过几天就被踢去登录页”的问题。恢复失败（密码也失效/已登出）才真正登出。
+      if (restoreOn401 && !retried) {
+        const restored = await attemptRestore()
+        if (restored) return request<T>(method, path, body, undefined, { retried: true, restoreOn401 })
+      }
       clearToken()
       fireUnauthorized()
     }
@@ -175,11 +278,13 @@ export const api = {
   },
   /** 登录只发送 SHA-256(password) 校验子（不可逆密文），明文密码不出浏览器 */
   login(body: { username: string; passwordHash: string }, token?: string) {
-    return request<LoginResponse>('POST', '/api/login', body, token)
+    // restoreOn401:false —— 登录请求本身的 401 是“登录失败”（密码错/锁定），
+    // 不触发自动恢复，避免拿记住的密码无限重登（递归）与重复计数导致账号锁定
+    return request<LoginResponse>('POST', '/api/login', body, token, { restoreOn401: false })
   },
   /** 旧账号一次性迁移登录：仅 auth_version=0 的历史账号首次登录时发送一次明文密码 */
   legacyLogin(body: { username: string; password: string }, token?: string) {
-    return request<LoginResponse>('POST', '/api/login/legacy', body, token)
+    return request<LoginResponse>('POST', '/api/login/legacy', body, token, { restoreOn401: false })
   },
   logout() {
     return request<{ ok: true }>('POST', '/api/logout')

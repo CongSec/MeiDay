@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { api } from '@/api/client'
-import { ApiError, clearSavedPassword, clearToken, getSavedPassword, getToken, savePassword, setToken } from '@/api/client'
+import { ApiError, clearSavedPassword, clearSavedUsername, clearToken, getSavedPassword, getSavedUsername, getToken, savePassword, saveUsername, setToken, setUnauthorizedRestoreHook } from '@/api/client'
 import type { LoginResponse, SmtpPlain } from '@/api/client'
 import { idbClearUserCache } from '@/utils/idb'
 import { flushPendingSyncReports } from '@/utils/syncReport'
@@ -53,6 +53,7 @@ export const useAuthStore = defineStore('auth', {
         this.creds = null
       }
       await this.fetchMe()
+      saveUsername(this.username)
       if (remember) savePassword(password)
       else clearSavedPassword()
       if (this.credError) useUiStore().toast(this.credError, 'error')
@@ -73,6 +74,10 @@ export const useAuthStore = defineStore('auth', {
      *  网络/后端临时不可达导致失败时不销毁保存的密码（避免反复要求重新输入）；
      *  仅当密码本身错误（登录返回 401，会触发 st:unauthorized 重置）时才清除。 */
     async tryAutoUnlock(): Promise<boolean> {
+      // 已在内存解锁（比如 401 自动恢复刚用记住的密码重登过），直接视为解锁成功，
+      // 避免每次刷新/重启都重复重登挤占服务端会话
+      if (this.userKey && this.username) return true
+      if (!this.username) this.username = getSavedUsername()
       if (!this.username) return false
       const pw = getSavedPassword()
       if (!pw) return false
@@ -94,6 +99,7 @@ export const useAuthStore = defineStore('auth', {
         setToken(r.sessionToken)
         this.userKey = await deriveUserKey(pw, this.username)
         this.creds = r.encrypted_creds ? await decryptCreds(this.userKey, r.encrypted_creds) : null
+        saveUsername(this.username)
         savePassword(pw)
         return true
       } catch {
@@ -183,9 +189,25 @@ export const useAuthStore = defineStore('auth', {
       // 下次登录一律以云端为权威，防止把过期数据当成本地数据展示或再次同步回云端造成冲突
       await idbClearUserCache(username)
     },
+    /** 刷新/重启后从持久化用户名恢复内存态：自动解锁与 401 自动恢复都依赖 username */
+    restoreUser() {
+      if (!this.username) this.username = getSavedUsername()
+    },
+
+    /** 注册 401 自动恢复钩子：会话过期/被挤下线时，用记住的密码静默重登，避免强制重新输入密码。
+     *  登出（token 被清）后不再自动尝试，防止“记住的密码已失效”时反复重试导致账号被锁定。 */
+    registerRestoreHook() {
+      setUnauthorizedRestoreHook(async () => {
+        if (!getToken()) return false
+        if (!this.username) this.username = getSavedUsername()
+        return this.tryAutoUnlock()
+      })
+    },
+
     reset() {
       clearToken()
       clearSavedPassword()
+      clearSavedUsername()
       this.token = ''
       this.username = ''
       this.hasCreds = false
