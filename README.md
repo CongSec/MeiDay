@@ -10,13 +10,13 @@ MeiDay 专注于“当下”——只做好两件事：**稳定的任务提醒�
 不堆砌功能，只追求最纯粹的流畅体验。
 
 
-**web端体验地址:** https://task.congsec.cn（体验账号：congsec/congsec,请不要修改密码等密钥,每小时清空测试数据）
+**web端体验地址:** https://task.congsec.cn（体验账号：congsec/12345678,请不要修改密码等密钥,每小时清空测试数据）
 
 测试配置(每小时清空一次数据):
 OSS AccessKey:qpKs9nm0kUTBB1jcHWa2
 OSS SecretKey:ywyuyxdmvQNQbV0pccoNHrsHVm1Ubs6pJzCEyCqD
 OSS Bucket名称:meiday
-OSS Endpoint:[https://datatest.congsec.cn](https://datatest.congsec.cn)
+OSS Endpoint:datatest.congsec.cn
 
 ![数据同步架构图优化-3b9ec276-8bc2-4175-81df-95bcf3743820](https://assets.b3logfile.com/siyuan/1714493573033/assets/数据同步架构图优化-3b9ec276-8bc2-4175-81df-95bcf3743820-20260828225217-zo7jyz5.jpg)
 
