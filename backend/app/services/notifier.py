@@ -53,7 +53,7 @@ async def notify_security_event(username: str, kind: str, ip: str = "", ua: str 
     """按用户设置发送一条安全邮件（登录成功/失败、查看密钥、隐私日记相关）。
 
     全程 try/except：发送失败绝不影响登录/查看密钥/日记等业务请求。
-    - 未配置 SMTP / 该事件开关关闭 / 处于节流窗口内 → 直接跳过；
+    - 未配置 SMTP / 该事件开关关闭 → 直接跳过；节流窗口内 → 写 email_suppressed 日志；
     - 发送成功/失败均写审计日志（email_send / email_fail），不暴露密钥明文。
     """
     try:
@@ -67,6 +67,13 @@ async def notify_security_event(username: str, kind: str, ip: str = "", ua: str 
         now = time.monotonic()
         last = _last_sent.get(key)
         if last is not None and now - last < SECURITY_EMAIL_MIN_INTERVAL:
+            # 节流窗口内静默跳过会让人误以为“没收到邮件”，写一条审计日志便于排查。
+            # 同一账号同一事件 60 秒内只发一封，避免暴力破解时按每次失败狂发邮件。
+            log_action(
+                "email_suppressed",
+                username=username,
+                detail=f"安全通知[{kind}] 距上次发送不足 {SECURITY_EMAIL_MIN_INTERVAL} 秒，节流跳过",
+            )
             return
         _last_sent[key] = now
         await send_security_email(
