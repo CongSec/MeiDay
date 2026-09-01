@@ -129,6 +129,9 @@ async function openNew() {
 
 function openEdit(task: Task) {
   editing.value = task
+  // 主任务编辑：退出子任务模式，避免弹窗复用上次编辑的子任务内容
+  subtaskParent.value = null
+  editingSubtask.value = null
   taskModalOpen.value = true
 }
 

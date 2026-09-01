@@ -741,11 +741,11 @@ export const useTasksStore = defineStore('tasks', {
 
     /** 立即保存该项目任务（取消防抖，供“确认式保存”使用）；成功返回 true，失败返回 false（已弹错误提示）。
      *  同一文件已有在途保存时先等待其落盘，再写入最新状态，避免并发互相覆盖。 */
-    async saveProjectNow(projectId: string): Promise<boolean> {
+    async saveProjectNow(projectId: string, snapshot?: Task[]): Promise<boolean> {
       saveDebouncers.get(projectId)?.cancel()
       const prev = tasksSaving.get(projectId)
       if (prev) await prev.catch(() => {})
-      const p = this.saveProject(projectId).finally(() => {
+      const p = this.saveProject(projectId, snapshot).finally(() => {
         if (tasksSaving.get(projectId) === p) tasksSaving.delete(projectId)
       })
       tasksSaving.set(projectId, p)
@@ -1466,12 +1466,21 @@ export const useTasksStore = defineStore('tasks', {
      * 确认式保存任务：先并入内存，立即写入 OSS，全部成功才返回 true（调用方据此弹成功提示）；
      * 失败时回滚内存与 IDB 到保存前状态并返回 false，避免“提示失败但内存已改”。
      * 跨项目移动会同时保存新旧两个项目文件。
+     * 注意：跨项目移动前必须先把涉及的新旧项目都加载进内存，否则——
+     *   1) 目标项目未加载时会把其 OSS 文件覆盖成只剩这一条任务（丢失该项目其他任务）；
+     *   2) 源项目未加载时不会从源文件移除该任务，导致“目标项目多了一条、源项目没删”。
      */
-    async saveTaskConfirmed(task: Task): Promise<boolean> {
+    async saveTaskConfirmed(task: Task, opts?: { prevProjectId?: string }): Promise<boolean> {
       const auth = useAuthStore()
+      // 涉及的项目 = 新项目 + 显式传入的旧项目 + 内存中能找到该任务的所有已加载项目
       const touchPids = new Set<string>([task.projectId])
+      if (opts?.prevProjectId) touchPids.add(opts.prevProjectId)
       for (const [pid, list] of Object.entries(this.tasks)) {
         if (list.some((t) => t.id === task.id)) touchPids.add(pid)
+      }
+      // 确保涉及的项目都已加载（源项目在正常编辑流中必然已加载，这里对未加载的目标/源项目兜底）
+      for (const pid of touchPids) {
+        if (!this.loadedProjects.includes(pid)) await this.loadProject(pid)
       }
       const tasksSnap = new Map<string, Task[]>()
       const repeatsSnap = (this.repeats[task.projectId] ?? []).slice()
@@ -1479,10 +1488,12 @@ export const useTasksStore = defineStore('tasks', {
       this.upsert(task)
       const results = await Promise.all([...touchPids].map((pid) => this.saveProjectNow(pid)))
       if (results.every(Boolean)) return true
-      // 失败回滚：恢复任务列表与重复模板（内存 + IDB），避免缓存残留未保存的改动
+      // 失败回滚：恢复内存 + IDB，并尽力把已写入 OSS 的文件还原为保存前快照，
+      // 避免“目标项目多了一条、源项目没删”的脏数据残留在远端（半成功写入无法靠内存回滚撤销）
       for (const [pid, list] of tasksSnap) {
         this.tasks[pid] = list
         await idbPut('tasks', taskCacheKey(auth.username, pid), list)
+        await this.saveProjectNow(pid, list)
       }
       this.repeats[task.projectId] = repeatsSnap
       await idbPut('repeats', repeatsCacheKey(auth.username, task.projectId), repeatsSnap)

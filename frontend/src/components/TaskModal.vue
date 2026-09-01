@@ -477,7 +477,7 @@ async function submit() {
   try {
     const ok = props.templateMasterId
       ? await tasks.saveFutureOccurrenceConfirmed(task, props.templateMasterId)
-      : await tasks.saveTaskConfirmed(task)
+      : await tasks.saveTaskConfirmed(task, { prevProjectId: props.task?.projectId ?? undefined })
     if (!ok) {
       // 保存失败：store 已弹错误提示，这里清理本次新上传的孤文件并停止后台上传
       cleanupNewUploads()
