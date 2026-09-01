@@ -7,11 +7,8 @@ from ..schemas import NotifyPrefs, NotifyPrefsRequest
 router = APIRouter(prefix="/api", tags=["notify"])
 
 
-@router.get("/notify-prefs", response_model=NotifyPrefs)
-def get_notify_prefs(response: Response, username: str = Depends(get_username)):
-    """查询安全邮件通知开关（登录成功/失败、隐私日记解锁），默认全部开启。"""
-    # 通知开关是账号级敏感配置，禁止浏览器/CDN 缓存，避免重新进入后读到旧值
-    response.headers["Cache-Control"] = "no-store"
+def _load_prefs(username: str) -> NotifyPrefs:
+    """读取某账号的安全邮件通知开关；未配置时返回全默认（全部开启）。"""
     with get_conn() as conn:
         row = conn.execute(
             "SELECT login_success, login_failed, diary_unlock_success, diary_unlock_failed "
@@ -28,13 +25,21 @@ def get_notify_prefs(response: Response, username: str = Depends(get_username)):
     )
 
 
+@router.get("/notify-prefs", response_model=NotifyPrefs)
+def get_notify_prefs(response: Response, username: str = Depends(get_username)):
+    """查询安全邮件通知开关（登录成功/失败、隐私日记解锁），默认全部开启。"""
+    # 通知开关是账号级敏感配置，禁止浏览器/CDN 缓存，避免重新进入后读到旧值
+    response.headers["Cache-Control"] = "no-store"
+    return _load_prefs(username)
+
+
 @router.put("/notify-prefs", response_model=NotifyPrefs)
 def update_notify_prefs(body: NotifyPrefsRequest, response: Response, username: str = Depends(get_username)):
     """更新安全邮件通知开关：只更新提交的字段，未提交字段保持不变。"""
     # 通知开关是账号级敏感配置，禁止缓存，避免重新进入后读到旧值
     response.headers["Cache-Control"] = "no-store"
     cur = NotifyPrefs().model_dump()
-    cur.update(get_notify_prefs(username).model_dump())
+    cur.update(_load_prefs(username).model_dump())
     if body.login_success is not None:
         cur["login_success"] = body.login_success
     if body.login_failed is not None:

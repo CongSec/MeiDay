@@ -336,7 +336,8 @@ async function setDiaryNotify(key: 'diary_unlock_success' | 'diary_unlock_failed
     ui.toast('日记邮件通知设置已保存')
     logAudit('修改设置', safeDetail('更新隐私日记通知开关：' + key))
   } catch (e) {
-    ui.toast(e instanceof Error ? e.message : '保存失败', 'error')
+    const msg = e instanceof Error && e.message ? e.message : '保存失败'
+    ui.toast(msg, 'error')
   } finally {
     diaryNotifySaving.value = false
   }
