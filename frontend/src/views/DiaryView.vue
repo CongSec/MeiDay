@@ -437,6 +437,16 @@ async function confirmImport(): Promise<void> {
   }
 }
 
+// 解锁后再次拉取通知开关：enter 模式输入密码解锁时，
+// diary.unlocked 先于 gate 的 emit('unlocked') 被置位（组件随即被 v-if 卸载），
+// 事件监听收不到，这里用 watch 兜底，保证重新进入后开关状态正确。
+watch(
+  () => diary.unlocked,
+  (v) => {
+    if (v) void loadDiaryNotify()
+  },
+)
+
 // 小屏选中某天后收起日历抽屉
 watch(
   () => diary.selectedDate,
@@ -454,10 +464,9 @@ onMounted(async () => {
     if (mode === 'setup') gateMode.value = 'setup'
     else if (mode === 'enter') gateMode.value = 'enter'
     // unlocked：直接进入主界面（diary.unlocked 已为 true）
-    if (mode === 'unlocked') {
-      // 内存中已解锁直达主界面，也需要加载日记通知开关
-      void loadDiaryNotify()
-    }
+    // 无论 setup/enter/unlocked 都先加载一次日记通知开关（进入成功/失败），
+    // 避免重新进入（enter 模式）时开关停留在默认开启值
+    void loadDiaryNotify()
   } catch (e) {
     ui.toast(e instanceof Error ? e.message : '进入日记失败', 'error')
     router.push('/today')
