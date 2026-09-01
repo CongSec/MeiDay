@@ -317,8 +317,8 @@ async function loadDiaryNotify(): Promise<void> {
   try {
     const prefs = await api.getNotifyPrefs()
     diaryNotifyPrefs.value = {
-      diary_unlock_success: prefs.diary_unlock_success,
-      diary_unlock_failed: prefs.diary_unlock_failed,
+      diary_unlock_success: prefs.diary_unlock_success ?? true,
+      diary_unlock_failed: prefs.diary_unlock_failed ?? true,
     }
   } catch {
     // 加载失败保持默认开启，不阻塞日记界面
@@ -330,8 +330,8 @@ async function setDiaryNotify(key: 'diary_unlock_success' | 'diary_unlock_failed
   try {
     const prefs = await api.setNotifyPrefs({ [key]: val })
     diaryNotifyPrefs.value = {
-      diary_unlock_success: prefs.diary_unlock_success,
-      diary_unlock_failed: prefs.diary_unlock_failed,
+      diary_unlock_success: prefs.diary_unlock_success ?? true,
+      diary_unlock_failed: prefs.diary_unlock_failed ?? true,
     }
     ui.toast('日记邮件通知设置已保存')
     logAudit('修改设置', safeDetail('更新隐私日记通知开关：' + key))

@@ -92,7 +92,7 @@ function onAddSubtask() {
         <div class="flex items-center gap-2">
           <button
             v-if="hasSubtasks && !future"
-            class="shrink-0 w-5 h-5 rounded text-slate-400 hover:bg-slate-100 flex items-center justify-center text-xs"
+            class="shrink-0 w-6 h-6 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-100 hover:text-slate-800 flex items-center justify-center text-base leading-none"
             :title="expanded ? '折叠子任务' : '展开子任务'"
             @click.stop="expanded = !expanded"
           >

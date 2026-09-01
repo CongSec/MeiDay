@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 
 from ..auth import get_username
 from ..db import get_conn
@@ -8,8 +8,10 @@ router = APIRouter(prefix="/api", tags=["notify"])
 
 
 @router.get("/notify-prefs", response_model=NotifyPrefs)
-def get_notify_prefs(username: str = Depends(get_username)):
+def get_notify_prefs(response: Response, username: str = Depends(get_username)):
     """查询安全邮件通知开关（登录成功/失败、隐私日记解锁），默认全部开启。"""
+    # 通知开关是账号级敏感配置，禁止浏览器/CDN 缓存，避免重新进入后读到旧值
+    response.headers["Cache-Control"] = "no-store"
     with get_conn() as conn:
         row = conn.execute(
             "SELECT login_success, login_failed, diary_unlock_success, diary_unlock_failed "
@@ -27,8 +29,10 @@ def get_notify_prefs(username: str = Depends(get_username)):
 
 
 @router.put("/notify-prefs", response_model=NotifyPrefs)
-def update_notify_prefs(body: NotifyPrefsRequest, username: str = Depends(get_username)):
+def update_notify_prefs(body: NotifyPrefsRequest, response: Response, username: str = Depends(get_username)):
     """更新安全邮件通知开关：只更新提交的字段，未提交字段保持不变。"""
+    # 通知开关是账号级敏感配置，禁止缓存，避免重新进入后读到旧值
+    response.headers["Cache-Control"] = "no-store"
     cur = NotifyPrefs().model_dump()
     cur.update(get_notify_prefs(username).model_dump())
     if body.login_success is not None:

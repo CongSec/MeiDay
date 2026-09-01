@@ -100,9 +100,6 @@ export function parseMarkdownImport(md: string): ImportResult {
     if (!line) continue
     const lineNo = i + 1
 
-    // 单 # 标题 / 分割线：作为文档说明，静默忽略
-    if (/^#{1}\s/.test(line) || /^-{3,}$/.test(line) || /^\*{3,}$/.test(line)) continue
-
     const h2 = line.match(/^##\s+(.+)$/)
     if (h2) {
       const t: ParsedTask = {
@@ -138,6 +135,11 @@ export function parseMarkdownImport(md: string): ImportResult {
       currentSub = s
       continue
     }
+
+    // 任意 # 开头（含 # 后无空格等）一律视为注释，静默忽略，不进入任务/子任务描述
+    if (/^#/.test(line)) continue
+    // 分割线：作为文档说明，静默忽略
+    if (/^-{3,}$/.test(line) || /^\*{3,}$/.test(line)) continue
 
     const kv = line.match(/^[-*]\s*(开始时间|开始|截止时间|截止|结束时间|结束|提醒时间|提醒|项目)\s*[:：]\s*(.+)$/)
     if (kv) {
