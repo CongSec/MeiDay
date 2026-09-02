@@ -11,7 +11,7 @@ import TaskCard from '@/components/TaskCard.vue'
 import TaskModal from '@/components/TaskModal.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { dateKeyOf, nowIso, toLocalInput, todayKey } from '@/utils/time'
-import { isFutureTask, isTaskVisibleToday } from '@/utils/todayFilter'
+import { isFutureTask, isSubtaskFuture, isTaskVisibleToday } from '@/utils/todayFilter'
 import { UNCATEGORIZED, type Subtask, type Task } from '@/types'
 import { useSync } from '@/composables/useSync'
 
@@ -105,7 +105,14 @@ const futureOpen = ref(false)
 const futureTasks = computed(() => {
   const out: { task: Task; date: string }[] = []
   for (const t of tasks.all) {
-    if (isFutureTask(t, today)) out.push({ task: t, date: t.startTime ? dateKeyOf(t.startTime) : '' })
+    if (!isFutureTask(t, today)) continue
+    // 展示/排序日期：取「自身开始时间」与「未来子任务开始时间」中最早的一天
+    const dates: string[] = []
+    if (t.startTime && dateKeyOf(t.startTime) > today) dates.push(dateKeyOf(t.startTime))
+    for (const s of t.subtasks ?? []) {
+      if (isSubtaskFuture(s, today) && s.startTime) dates.push(dateKeyOf(s.startTime))
+    }
+    out.push({ task: t, date: dates.length ? dates.sort()[0] : '' })
   }
   for (const pid of Object.keys(tasks.repeats)) {
     for (const m of tasks.repeats[pid] ?? []) {

@@ -1268,13 +1268,25 @@ export const useTasksStore = defineStore('tasks', {
         this._deleteMasterForTask(task.id)
       }
       task.status = completing ? 'completed' : 'pending'
-      task.updatedAt = nowIso()
+      const now = nowIso()
+      task.updatedAt = now
+      // 完成父任务 → 子任务全部标记完成；取消父任务完成 → 子任务全部恢复未完成
+      // （父任务完成时子任务视为完成，保持父子状态一致；仅变化时更新时间避免无谓写入）
+      for (const s of task.subtasks ?? []) {
+        if (s.completed !== completing) {
+          s.completed = completing
+          s.updatedAt = now
+        }
+      }
       this._persist(task.projectId)
       if (applyStats) {
         // 累计完成任务统计（存用户 OSS，绝不清零/重算）：完成 +1，取消完成 -1
         useStatsStore().addDelta(completing ? 1 : -1, task.id)
       }
-      logAudit(completing ? '完成任务' : '取消完成', safeDetail(`任务ID：${task.id}，项目ID：${task.projectId}`))
+      logAudit(
+        completing ? '完成任务' : '取消完成',
+        safeDetail(`任务ID：${task.id}，项目ID：${task.projectId}${task.subtasks?.length ? `，自动联动子任务 ${task.subtasks.length} 个` : ''}`),
+      )
       return completing
     },
     /** 确认式完成/取消完成：先翻转，立即写盘（重复任务同时写重复模板），OSS 全部成功才返回 true；
@@ -1289,6 +1301,11 @@ export const useTasksStore = defineStore('tasks', {
         const pid = task.projectId
         const tasksSnap = (this.tasks[pid] ?? []).slice()
         const repeatsSnap = (this.repeats[pid] ?? []).slice()
+        // 深拷贝受影响任务：_flipComplete 会原地修改任务（状态 + 子任务联动），
+        // 浅拷贝数组无法回滚这些原地修改，失败时需用深拷贝恢复原任务。
+        // 注意：任务对象是 Vue reactive 代理，structuredClone 会抛 DataCloneError，
+        // 必须改用 JSON 深拷贝（Task/Subtask 字段均为 JSON 可序列化数据）。
+        const taskSnap = JSON.parse(JSON.stringify(task))
         const completing = this._flipComplete(id, false)
         const okTasks = await this.saveProjectNow(pid)
         const repeatsChanged = !!task.repeat && JSON.stringify(this.repeats[pid]) !== JSON.stringify(repeatsSnap)
@@ -1298,6 +1315,8 @@ export const useTasksStore = defineStore('tasks', {
           return true
         }
         // 失败回滚：恢复任务与重复模板（内存 + IDB），避免缓存残留未保存的改动
+        const rollbackIdx = tasksSnap.findIndex((x) => x.id === id)
+        if (rollbackIdx >= 0) tasksSnap[rollbackIdx] = taskSnap
         this.tasks[pid] = tasksSnap
         this.repeats[pid] = repeatsSnap
         await idbPut('tasks', taskCacheKey(auth.username, pid), tasksSnap)
@@ -1403,8 +1422,20 @@ export const useTasksStore = defineStore('tasks', {
       const sub = task.subtasks.find((s) => s.id === subId)
       if (!sub) return
       sub.completed = !sub.completed
-      sub.updatedAt = nowIso()
-      task.updatedAt = nowIso()
+      const now = nowIso()
+      sub.updatedAt = now
+      task.updatedAt = now
+      // 一致性联动：父任务已完成时取消子任务勾选 → 父任务一并改回未完成；
+      // 其它子任务保持原状（仅当前子任务回到未完成，父任务恢复待办）
+      if (!sub.completed && task.status === 'completed') {
+        task.status = 'pending'
+        task.updatedAt = now
+        // 取消完成重复任务：删除其重复模板，恢复由任务自己承担后续周期（与 _flipComplete 取消完成一致）
+        if (task.repeat) this._deleteMasterForTask(task.id)
+        // 累计完成统计回退 -1（父任务由完成改为未完成）
+        void useStatsStore().addDelta(-1, task.id)
+        logAudit('取消完成', safeDetail(`任务ID：${task.id}，项目ID：${task.projectId}，由取消子任务勾选联动`))
+      }
       this._persist(task.projectId)
       logAudit(sub.completed ? '完成子任务' : '取消完成子任务', safeDetail(`子任务ID：${sub.id}，所属任务ID：${task.id}`))
     },
