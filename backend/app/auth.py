@@ -119,7 +119,7 @@ def clear_failed_attempts(username: str) -> None:
 
 
 # 每账号最多允许的并发会话数：超出后踢掉最旧会话（BUG-11）
-MAX_SESSIONS_PER_USER = 5
+MAX_SESSIONS_PER_USER = 10
 
 
 def _hash_token(token: str) -> str:
@@ -146,6 +146,29 @@ def create_session(username: str) -> str:
             "  SELECT rowid FROM sessions WHERE username=? ORDER BY rowid DESC LIMIT ?"
             ")",
             (username, username, MAX_SESSIONS_PER_USER),
+        )
+    return token
+
+
+def reuse_session(username: str, token: str) -> Optional[str]:
+    """同一账号携带有效会话 token 的静默重登（页面刷新/重启恢复）：复用原会话。
+
+    刷新/重启时的自动解锁携带本账号当前有效 token 调 /login，若每次都新建会话，
+    会不断占用会话槽位并把其它设备挤下线（MAX_SESSIONS_PER_USER 上限踢出最旧会话）。
+    这里仅续期该 token 的过期时间并原样返回（不新建行、不触发踢出），
+    只有 token 确属同一 username 且未过期时才复用，否则返回 None 由调用方新建会话。
+    """
+    now = _now()
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM sessions WHERE token=? AND username=? AND expires_at >= ?",
+            (_hash_token(token), username, now.isoformat(timespec="seconds")),
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute(
+            "UPDATE sessions SET expires_at=? WHERE token=?",
+            ((now + timedelta(days=SESSION_TTL_DAYS)).isoformat(timespec="seconds"), _hash_token(token)),
         )
     return token
 

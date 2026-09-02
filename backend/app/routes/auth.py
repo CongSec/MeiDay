@@ -13,6 +13,7 @@ from ..audit import (
 from ..auth import (
     clear_failed_attempts,
     create_session,
+    reuse_session,
     destroy_other_sessions,
     destroy_session,
     get_username,
@@ -187,16 +188,22 @@ async def login(
             raise HTTPException(status_code=423, detail="密码错误次数过多，账号已锁定 30 分钟")
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     clear_failed_attempts(username)
-    token = create_session(username)
+    # 会话复用（BUG：刷新/重启静默重登把其它设备挤下线）：携带本账号当前有效会话
+    # token 时直接续期并返回同一 token（不新建行、不触发踢出最旧会话）；
+    # 仅当未携带 token 或 token 无效/非本账号时才新建会话。
+    is_background_relogin = False
+    token: Optional[str] = None
+    if authorization and authorization.startswith("Bearer "):
+        bearer = authorization[len("Bearer "):].strip()
+        if username_from_token(bearer) == username:
+            is_background_relogin = True
+            token = reuse_session(username, bearer) or create_session(username)
+    if token is None:
+        token = create_session(username)
     # 登录成功通知误报修复：只有当本次登录【未携带】该账号当前有效会话 token 时，
     # 才判定为“真实新登录/潜在攻击者”并发登录成功邮件；若携带有效 token（页面刷新
     # 后的后台自动解锁/重登等内部调用），判定为本人操作，不发邮件，避免正常使用频繁骚扰。
     # 攻击者暴力破解时不持有有效会话 token，无法伪造跳过该通知。
-    is_background_relogin = False
-    if authorization and authorization.startswith("Bearer "):
-        token_user = username_from_token(authorization[len("Bearer "):].strip())
-        if token_user == username:
-            is_background_relogin = True
     if not is_background_relogin:
         _spawn_security_notification(username, "login_success", ip, ua)
     return _build_login_response(username, row, token, request)
@@ -259,13 +266,17 @@ async def legacy_login(
         )
         row = conn.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
     clear_failed_attempts(username)
-    token = create_session(username)
-    # 与 /login 一致：携带本账号有效会话 token 的后台重登不触发登录成功邮件
+    # 与 /login 一致：携带本账号有效会话 token 的后台重登复用原会话，
+    # 避免刷新/重启静默重登新建会话把其它设备挤下线
     is_background_relogin = False
+    token: Optional[str] = None
     if authorization and authorization.startswith("Bearer "):
-        token_user = username_from_token(authorization[len("Bearer "):].strip())
-        if token_user == username:
+        bearer = authorization[len("Bearer "):].strip()
+        if username_from_token(bearer) == username:
             is_background_relogin = True
+            token = reuse_session(username, bearer) or create_session(username)
+    if token is None:
+        token = create_session(username)
     if not is_background_relogin:
         _spawn_security_notification(username, "login_success", ip, ua)
     return _build_login_response(
