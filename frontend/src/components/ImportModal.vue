@@ -18,11 +18,46 @@ const projects = useProjectsStore()
 const md = ref('')
 const targetProjectId = ref('')
 
-function buildSample(): string {
-  // 示例日期随今天动态生成，保证填入示例后 AI 生成的示例任务能在「今日」视图看到
+function todayStr(): string {
+  // 今天的日期 YYYY-MM-DD，保证填入示例后能在「今日」视图看到
   const today = new Date()
   const pad = (n: number) => String(n).padStart(2, '0')
-  const d = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`
+  return `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`
+}
+
+function buildSample(): string {
+  // 标准导入示例：可直接导入，`#` 开头为注释会被忽略
+  const d = todayStr()
+  return `# 批量导入示例（本行 # 标题会被忽略）
+
+## 晨间开发
+
+- 开始：${d} 09:00
+- 截止：${d} 12:00
+- 提醒：${d} 08:30
+- 项目：工作
+- [ ] 写技术方案
+- [x] 提交 PR
+
+### 补充用例
+
+- 开始：${d} 10:00
+- 截止：${d} 11:30
+  补充的描述文字
+
+## 下午会议
+
+- 提醒：${d} 13:50
+  准备周会材料，逐条列出：
+
+1. 同步项目进度
+2. 确认下个迭代范围
+`
+}
+
+function buildAiPrompt(): string {
+  // AI 提示词模板：复制到 AI 生成批量导入文本（含可替换的 {{用户需求描述}} 占位）
+  const d = todayStr()
   return `# 任务：生成任务管理系统批量导入文本
 
 ## 角色设定
@@ -99,6 +134,9 @@ function fillSample() {
   md.value = buildSample()
 }
 
+function fillAiPrompt() {
+  md.value = buildAiPrompt()
+}
 function close() {
   emit('update:open', false)
 }
@@ -119,7 +157,10 @@ function confirmImport() {
     <div class="bg-white rounded-xl shadow-xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
       <div class="flex items-center justify-between">
         <div class="text-base font-semibold">📥 批量导入任务（Markdown）</div>
-        <button class="text-xs text-slate-400 hover:text-brand" @click="fillSample">填入示例</button>
+        <div class="flex items-center gap-2">
+          <button class="text-xs text-slate-400 hover:text-brand" @click="fillAiPrompt">填入AI提示词</button>
+          <button class="text-xs text-slate-400 hover:text-brand" @click="fillSample">填入示例</button>
+        </div>
       </div>
 
       <div class="mt-3 text-xs text-slate-500 space-y-1">
