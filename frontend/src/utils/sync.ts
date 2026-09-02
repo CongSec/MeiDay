@@ -205,6 +205,19 @@ export function mergeTasks(local: Task[], remote: Task[]): Task[] {
   return [...byId.values()]
 }
 
+/**
+ * 过滤出真正属于某项目的任务：丢弃“任务声明的 projectId 与所在文件项目不一致”的脏副本。
+ *
+ * 跨项目移动任务时，源项目 tasks.json 里若残留该任务的旧副本（其 projectId 已改为新项目，
+ * 但轮询/CAS 冲突合并仍按“只在一侧出现则保留”把它并回源项目），会导致“源项目没删、目标项目
+ * 多一条”的复制现象。此处按 projectId 识别并丢弃这类过期副本：
+ * - 任务 projectId 明确且不等于当前项目文件 => 已移走/错位，丢弃；
+ * - projectId 为 undefined 的历史数据 => 无法判定，一律保留，避免误删旧数据。
+ */
+export function filterTasksForProject(tasks: Task[], projectId: string): Task[] {
+  return tasks.filter((t) => t.projectId === undefined || t.projectId === projectId)
+}
+
 /** 合并多个“已从活跃列表移除的任务”集合（回收站 tombstone：含已删除与已完成）；同 id 保留 updatedAt 最新的 tombstone */
 export function mergeDeletedTombstones(...groups: Task[][]): Task[] {
   const byId = new Map<string, Task>()

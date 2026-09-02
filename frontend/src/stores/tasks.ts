@@ -4,7 +4,7 @@ import { useAuthStore } from './auth'
 import { useUiStore } from './ui'
 import { useStatsStore } from './stats'
 import { createOssClient, describeOssError, paths } from '@/utils/oss'
-import { applyDeletedTombstones, compareAndSwapPut, mergeDeletedTombstones, mergeTasks, versionToken } from '@/utils/sync'
+import { applyDeletedTombstones, compareAndSwapPut, filterTasksForProject, mergeDeletedTombstones, mergeTasks, versionToken } from '@/utils/sync'
 import { enrichOssError } from '@/utils/ossDiag'
 import { idbGet, idbPut, idbDel } from '@/utils/idb'
 import { debounce, type Debounced } from '@/utils/debounce'
@@ -128,6 +128,30 @@ function splitDeleted(list: Task[]): { active: Task[]; deleted: Task[] } {
     else active.push(t)
   }
   return { active, deleted }
+}
+/**
+ * 跨项目去重：同 id 任务若在其它“已加载”项目中存在更新（updatedAt 更大）的副本，
+ * 则本文件里的这份视为过期副本丢弃。
+ *
+ * 跨项目移动时目标项目副本的 updatedAt 恒比源项目残留副本新，因此轮询/CAS 冲突合并
+ * 若把移动前读到的旧副本“复活”回源项目，此处能按最新归属收敛到唯一一份（BUG）。
+ * 仅比较已加载项目，未加载项目由 projectId 过滤与后续同步自愈兜底。
+ */
+function filterStaleAcrossProjects(
+  allTasks: Record<string, Task[]>,
+  projectId: string,
+  tasks: Task[],
+): Task[] {
+  if (!tasks.length) return tasks
+  const others: Task[] = []
+  for (const [pid, list] of Object.entries(allTasks)) {
+    if (pid === projectId) continue
+    for (const t of list) others.push(t)
+  }
+  if (!others.length) return tasks
+  return tasks.filter(
+    (t) => !others.some((o) => o.id === t.id && (o.updatedAt || '').localeCompare(t.updatedAt || '') > 0),
+  )
 }
 /** 拉取远端回收站文件；文件不存在时视为空，网络/权限错误向上抛。
  *  带 ETag 条件 GET：远端未变化返回 304 时直接复用本地缓存，避免每次同步都全量
@@ -254,8 +278,14 @@ export const useTasksStore = defineStore('tasks', {
       if (cached) {
         normalizeTasks(cached)
         const { active, deleted } = splitDeleted(cached)
-        this.tasks[projectId] = active
-        await idbPut('tasks', taskCacheKey(auth.username, projectId), active)
+        // 丢弃 projectId 与所在项目不一致的过期副本（跨项目移动残留），防止本地缓存复活
+        const cachedActive = filterStaleAcrossProjects(
+          this.tasks,
+          projectId,
+          filterTasksForProject(active, projectId),
+        )
+        this.tasks[projectId] = cachedActive
+        await idbPut('tasks', taskCacheKey(auth.username, projectId), cachedActive)
         if (deleted.length) {
           this.trash[projectId] = mergeUnique(this.trash[projectId] ?? [], deleted)
           await idbPut('trash', trashCacheKey(auth.username, projectId), this.trash[projectId])
@@ -277,7 +307,13 @@ export const useTasksStore = defineStore('tasks', {
                   const remote = JSON.parse(res.content.toString()) as Task[]
           normalizeTasks(remote)
           const { active, deleted } = splitDeleted(remote)
-          this.tasks[projectId] = sortActiveList(active)
+          this.tasks[projectId] = sortActiveList(
+            filterStaleAcrossProjects(
+              this.tasks,
+              projectId,
+              filterTasksForProject(active, projectId),
+            ),
+          )
           // 跨天归档：非当天完成的已完成任务稍后由 sweepCompleted 统一移入回收站
           await idbPut('tasks', taskCacheKey(auth.username, projectId), this.tasks[projectId])
           if (deleted.length) {
@@ -542,8 +578,20 @@ export const useTasksStore = defineStore('tasks', {
       if (res.res.status === 304) return // 远端未变化（ETag 命中），无需下载/合并
       const remote = JSON.parse(res.content.toString()) as Task[]
       normalizeTasks(remote)
-      const { active: remoteActive, deleted: remoteDeleted } = splitDeleted(remote)
-      const local = this.tasks[projectId] ?? []
+      const { active: rawRemoteActive, deleted: remoteDeleted } = splitDeleted(remote)
+      // 丢弃任务文件里 projectId 与所在项目不一致的过期副本（跨项目移动残留），
+      // 并跨项目去重（其它已加载项目里有更新的同 id 副本时本份视为过期），
+      // 防止轮询合并把已移走的任务“复活”回源项目（BUG：移动任务被复制一份）
+      const remoteActive = filterStaleAcrossProjects(
+        this.tasks,
+        projectId,
+        filterTasksForProject(rawRemoteActive, projectId),
+      )
+      const local = filterStaleAcrossProjects(
+        this.tasks,
+        projectId,
+        filterTasksForProject(this.tasks[projectId] ?? [], projectId),
+      )
       const localTombstones = this.trash[projectId] ?? []
       const remoteTrash = await fetchRemoteTrash(client, auth.username, projectId)
       const tombstones = mergeDeletedTombstones(
@@ -565,8 +613,9 @@ export const useTasksStore = defineStore('tasks', {
       }
       const newEtag = versionToken(res.res.headers as Record<string, unknown>, res.content) ?? ''
       if (newEtag) await idbPut('kv', `etag:${auth.username}:${projectId}`, newEtag)
-      // 本地相对远端有改动时写回合并结果，让其他设备也能看到（无改动则跳过，省一次写）
-      if (JSON.stringify(merged) !== JSON.stringify(remoteActive)) {
+      // 合并结果相对远端原始内容有差异（含被过滤掉的过期副本）时写回，
+      // 让其他设备也能看到，并顺带“自愈”掉源项目里残留的旧副本（BUG）
+      if (JSON.stringify(merged) !== JSON.stringify(rawRemoteActive)) {
         await this.saveProject(projectId, [...merged])
       }
     },
@@ -640,6 +689,13 @@ export const useTasksStore = defineStore('tasks', {
           const remoteList = [...(result.remote as Task[])]
           normalizeTasks(remoteList)
           const { active: remoteActive, deleted: remoteDeleted } = splitDeleted(remoteList)
+          // 冲突合并同样丢弃源项目文件里 projectId 不一致/其它已加载项目有更新副本的
+          // 过期任务，避免复活已移走任务（BUG：移动任务被复制一份）
+          const filteredRemote = filterStaleAcrossProjects(
+            this.tasks,
+            projectId,
+            filterTasksForProject(remoteActive, projectId),
+          )
           const localTombstones = this.trash[projectId] ?? []
           const remoteTrash = await fetchRemoteTrash(client, auth.username, projectId)
           const tombstones = mergeDeletedTombstones(
@@ -647,7 +703,7 @@ export const useTasksStore = defineStore('tasks', {
             remoteDeleted,
             remoteTrash,
           )
-          list = sortActiveList(applyDeletedTombstones(mergeTasks(list, remoteActive), tombstones))
+          list = sortActiveList(applyDeletedTombstones(mergeTasks(list, filteredRemote), tombstones))
           knownEtag = result.remoteEtag ?? undefined
           if (!snapshot) {
             this.tasks[projectId] = list
@@ -1483,8 +1539,11 @@ export const useTasksStore = defineStore('tasks', {
         if (!this.loadedProjects.includes(pid)) await this.loadProject(pid)
       }
       const tasksSnap = new Map<string, Task[]>()
-      const repeatsSnap = (this.repeats[task.projectId] ?? []).slice()
-      for (const pid of touchPids) tasksSnap.set(pid, (this.tasks[pid] ?? []).slice())
+      const repeatsSnap = new Map<string, RepeatMaster[]>()
+      for (const pid of touchPids) {
+        tasksSnap.set(pid, (this.tasks[pid] ?? []).slice())
+        repeatsSnap.set(pid, (this.repeats[pid] ?? []).slice())
+      }
       this.upsert(task)
       const results = await Promise.all([...touchPids].map((pid) => this.saveProjectNow(pid)))
       if (results.every(Boolean)) return true
@@ -1495,8 +1554,10 @@ export const useTasksStore = defineStore('tasks', {
         await idbPut('tasks', taskCacheKey(auth.username, pid), list)
         await this.saveProjectNow(pid, list)
       }
-      this.repeats[task.projectId] = repeatsSnap
-      await idbPut('repeats', repeatsCacheKey(auth.username, task.projectId), repeatsSnap)
+      for (const [pid, list] of repeatsSnap) {
+        this.repeats[pid] = list
+        await idbPut('repeats', repeatsCacheKey(auth.username, pid), list)
+      }
       return false
     },
     /** 确认式保存子任务：应用到父任务后立即写入 OSS；失败时回滚并返回 false */
