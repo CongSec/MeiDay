@@ -27,6 +27,74 @@ const cleanMsg = ref('')
 
 let timer: number | undefined
 
+/* ---- 表格横向拖拽滚动 ----
+ * 全局 touch-action: pan-y 禁用了原生横向 pan（配合右滑开侧栏/下拉刷新手势），
+ * 因此日志表格用 Pointer Events 手动接管左右拖拽：横向占优时滚动 scrollLeft，
+ * 纵向占优时放行给页面滚动，互不干扰。 */
+const tableWrap = ref<HTMLElement | null>(null)
+const tableDragging = ref(false)
+let dragStartX = 0
+let dragStartY = 0
+let dragStartScroll = 0
+let dragAxis: 'h' | 'v' | null = null
+
+function onTablePointerDown(e: PointerEvent) {
+  const el = tableWrap.value
+  if (!el || e.button !== 0) return
+  // 表格未溢出（桌面宽屏）时保持原生选择/滚动，不进入拖拽
+  if (el.scrollWidth <= el.clientWidth + 1) return
+  dragStartX = e.clientX
+  dragStartY = e.clientY
+  dragStartScroll = el.scrollLeft
+  dragAxis = null
+  tableDragging.value = true
+  el.classList.add('dragging')
+  try {
+    el.setPointerCapture(e.pointerId)
+  } catch {
+    /* ignore */
+  }
+}
+
+function onTablePointerMove(e: PointerEvent) {
+  const el = tableWrap.value
+  if (!el || !tableDragging.value) return
+  const dx = e.clientX - dragStartX
+  const dy = e.clientY - dragStartY
+  if (!dragAxis) {
+    // 先判定方向：横向占优才接管，纵向放行页面滚动/下拉刷新
+    if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return
+    dragAxis = Math.abs(dx) >= Math.abs(dy) ? 'h' : 'v'
+    if (dragAxis === 'v') {
+      tableDragging.value = false
+      el.classList.remove('dragging')
+      try {
+        el.releasePointerCapture(e.pointerId)
+      } catch {
+        /* ignore */
+      }
+      return
+    }
+  }
+  if (dragAxis === 'h') {
+    if (e.cancelable) e.preventDefault()
+    el.scrollLeft = dragStartScroll - dx
+  }
+}
+
+function onTablePointerEnd(e: PointerEvent) {
+  const el = tableWrap.value
+  tableDragging.value = false
+  dragAxis = null
+  if (el) {
+    el.classList.remove('dragging')
+    try {
+      el.releasePointerCapture(e.pointerId)
+    } catch {
+      /* ignore */
+    }
+  }
+}
 const page = computed(() => (limit.value ? Math.floor(offset.value / limit.value) : 0))
 const pageCount = computed(() => (limit.value ? Math.max(1, Math.ceil(total.value / limit.value)) : 1))
 
@@ -266,18 +334,27 @@ onUnmounted(() => {
       </button>
     </div>
 
-    <div class="mt-4 bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
-      <table class="w-full text-sm">
+    <div class="mt-4 sm:hidden flex items-center justify-end gap-1 text-[11px] text-slate-400 select-none">
+      <span>左右滑动查看更多</span>
+      <AppIcon name="arrow-right" :size="11" class="shrink-0" />
+    </div>
+    <div class="mt-2 sm:mt-4 bg-white rounded-xl shadow-sm border border-slate-100 h-scroll" ref="tableWrap"
+      @pointerdown="onTablePointerDown"
+      @pointermove="onTablePointerMove"
+      @pointerup="onTablePointerEnd"
+      @pointercancel="onTablePointerEnd"
+    >
+      <table class="w-full text-sm min-w-[960px]">
         <thead>
           <tr class="text-left text-[11px] text-slate-400 border-b border-slate-100 bg-slate-50/60">
             <th class="px-3 py-2 font-medium whitespace-nowrap">时间</th>
             <th class="px-3 py-2 font-medium">用户</th>
             <th class="px-3 py-2 font-medium">行为</th>
-            <th class="px-3 py-2 font-medium hidden md:table-cell">方式</th>
-            <th class="px-3 py-2 font-medium hidden md:table-cell">路径</th>
+            <th class="px-3 py-2 font-medium whitespace-nowrap">方式</th>
+            <th class="px-3 py-2 font-medium whitespace-nowrap">路径</th>
             <th class="px-3 py-2 font-medium">状态</th>
-            <th class="px-3 py-2 font-medium hidden sm:table-cell">IP</th>
-            <th class="px-3 py-2 font-medium hidden lg:table-cell">耗时</th>
+            <th class="px-3 py-2 font-medium whitespace-nowrap">IP</th>
+            <th class="px-3 py-2 font-medium whitespace-nowrap">耗时</th>
           </tr>
         </thead>
         <tbody>
@@ -297,8 +374,8 @@ onUnmounted(() => {
               </div>
               <div v-if="log.detail" class="mt-0.5 text-[11px] text-slate-400 break-all">{{ log.detail }}</div>
             </td>
-            <td class="px-3 py-2 text-xs text-slate-400 hidden md:table-cell">{{ log.method || '-' }}</td>
-            <td class="px-3 py-2 text-xs text-slate-400 break-all hidden md:table-cell">{{ log.path || '-' }}</td>
+            <td class="px-3 py-2 text-xs text-slate-400 whitespace-nowrap">{{ log.method || '-' }}</td>
+            <td class="px-3 py-2 text-xs text-slate-400 break-all">{{ log.path || '-' }}</td>
             <td class="px-3 py-2">
               <span
                 class="inline-block px-1.5 py-0.5 rounded text-[11px] font-medium"
@@ -307,8 +384,8 @@ onUnmounted(() => {
                 {{ log.status ?? '-' }}
               </span>
             </td>
-            <td class="px-3 py-2 text-xs text-slate-400 hidden sm:table-cell">{{ log.ip || '-' }}</td>
-            <td class="px-3 py-2 text-xs text-slate-400 hidden lg:table-cell">
+            <td class="px-3 py-2 text-xs text-slate-400 whitespace-nowrap">{{ log.ip || '-' }}</td>
+            <td class="px-3 py-2 text-xs text-slate-400 whitespace-nowrap">
               {{ log.duration_ms !== null ? `${log.duration_ms}ms` : '-' }}
             </td>
           </tr>

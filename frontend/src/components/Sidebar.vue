@@ -67,7 +67,7 @@ const activeDrag = ref<Project[]>([])
 /** 统一拖拽参数（触屏 fallback 拖拽更丝滑） */
 const dragOptions = getDragOptions()
 watch(
-  () => projects.projects,
+  () => [...projects.projects],
   () => {
     // 拷贝一份，避免拖拽组件直接共享 store 的响应式数组引用
     //（拖拽排序改到副本，结束后再由 setOrder 回写持久化）

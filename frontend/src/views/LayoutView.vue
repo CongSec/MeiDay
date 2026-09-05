@@ -80,6 +80,11 @@ function isInsideModal(el: EventTarget | null): boolean {
   return !!el && el instanceof HTMLElement && !!el.closest('.fixed.inset-0.z-50')
 }
 
+/** 触摸点是否在横向滚动容器内（日志表格）：内部由组件接管左右拖拽，不触发开侧栏/下拉刷新 */
+function isInsideHScroll(el: EventTarget | null): boolean {
+  return !!el && el instanceof HTMLElement && !!el.closest('.h-scroll')
+}
+
 /** 是否移动端布局（<1024px）：桌面端侧栏常驻，不参与边缘滑动手势 */
 function isMobileLayout(): boolean {
   return window.matchMedia('(max-width: 1023px)').matches
@@ -101,7 +106,8 @@ function canSwipeOpen(e: TouchEvent): boolean {
     !ui.drawerOpen &&
     !syncing.value &&
     !isGestureHandle(e.target) &&
-    !isInsideModal(e.target)
+    !isInsideModal(e.target) &&
+    !isInsideHScroll(e.target)
   )
 }
 
@@ -117,11 +123,16 @@ function onDrawerTouchStart(e: TouchEvent) {
   touchStartAt = Date.now()
   const onHandle = isGestureHandle(e.target)
   const inModal = isInsideModal(e.target)
+  const inHScroll = isInsideHScroll(e.target)
   // 全局右滑开侧栏：抽屉关闭、移动端、任意位置、非拖拽手柄/非同步中/非弹窗内
   swipeOpen = canSwipeOpen(e)
   // 关键：在浏览器“返回/前进”的原生手势窄条内（非交互控件上）提前拦截 touchstart，
   // 主动声明“这块区域由页面处理”，避免浏览器在咱们 touchend 开侧栏之前就把页面导航走。
   if (swipeOpen && t.clientX < EDGE_BACK_ZONE && !isInteractive(e.target)) {
+    if (e.cancelable) e.preventDefault()
+  }
+  // 横向滚动容器内（日志表格）：左边缘同样拦截浏览器返回手势，交给我们自己拖拽
+  if (inHScroll && t.clientX < EDGE_BACK_ZONE && !isInteractive(e.target)) {
     if (e.cancelable) e.preventDefault()
   }
   pullY = mainEl.value?.scrollTop ?? 0
@@ -133,7 +144,8 @@ function onDrawerTouchStart(e: TouchEvent) {
     !!mainEl.value &&
     mainEl.value.scrollTop <= 0 &&
     !onHandle &&
-    !inModal
+    !inModal &&
+    !inHScroll
 }
 
 function onDrawerTouchMove(e: TouchEvent) {

@@ -79,7 +79,20 @@ main {
 .drag-handle {
   touch-action: none;
 }
-
+/* ---- 横向滚动容器（日志表格等） ----
+ * 全局 touch-action: pan-y 禁用了原生横向 pan，横向滚动由组件内 Pointer Events 接管；
+ * 保留纵向滚动手势（页面滚动/下拉刷新），并阻止横向 overscroll 触发浏览器返回/侧滑。 */
+.h-scroll {
+  overflow-x: auto;
+  touch-action: pan-y;
+  overscroll-behavior-x: contain;
+  cursor: grab;
+}
+.h-scroll.dragging {
+  cursor: grabbing;
+  -webkit-user-select: none;
+  user-select: none;
+}
 /* ---- 拖拽过程视觉反馈（vue-draggable-plus ghost/chosen/drag 类） ---- */
 .drag-ghost {
   opacity: 0.35;
