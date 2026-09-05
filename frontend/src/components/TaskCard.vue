@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
+import { useNow } from '@/composables/useNow'
 import { formatTodayTitle, todayKey } from '@/utils/time'
 import { formatRepeat, isNewStyleRepeat, isRepeatDay } from '@/utils/repeat'
 import type { Project, Subtask, Task } from '@/types'
@@ -18,9 +19,8 @@ const emit = defineEmits<{
 
 const auth = useAuthStore()
 
-const now = ref(Date.now())
-const timer = window.setInterval(() => (now.value = Date.now()), 30000)
-onUnmounted(() => window.clearInterval(timer))
+// 全局共享时钟（单一 30s 定时器，替代每个卡片各自 setInterval）
+const { now } = useNow()
 
 const overdue = computed(() => {
   if (props.task.status !== 'pending' || !props.task.reminderTime) return false

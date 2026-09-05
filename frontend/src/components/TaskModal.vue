@@ -63,9 +63,15 @@ const repeatInterval = ref(1)
 const repeatWeekdays = ref<number[]>([])
 const repeatMonthDay = ref(1)
 const repeatEndAfter = ref('')
-// 打开任务编辑即可预取法定节假日安排（编辑重复任务的「每个法定工作日」时用）
-void ensureLegalCalendar(new Date().getFullYear())
-void ensureLegalCalendar(new Date().getFullYear() + 1)
+watch(
+  () => props.open,
+  (v) => {
+    if (v) {
+      void ensureLegalCalendar(new Date().getFullYear())
+      void ensureLegalCalendar(new Date().getFullYear() + 1)
+    }
+  },
+)
 const monthDayTouched = ref(false)
 const WEEKDAY_SHORT = ['日', '一', '二', '三', '四', '五', '六']
 

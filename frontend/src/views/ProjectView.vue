@@ -50,15 +50,9 @@ const dragOptions = getDragOptions({ wholeCard: true })
 watch(
   pending,
   (list) => {
-    const cur = dragList.value
-    // 同步合并可能带来「同 id 但内容已更新」的新对象；若仅 id/顺序相同但 updatedAt
-    // 已变，也必须刷新 dragList，否则要刷新浏览器才看得到新数据。
-    if (
-      cur.length === list.length &&
-      cur.every((t, i) => t.id === list[i].id && t.updatedAt === list[i].updatedAt)
-    )
-      return
-    cur.splice(0, cur.length, ...list)
+    // 同步合并可能带来「同 id 但内容已更新」的新对象；直接整体替换新数组，
+    // 由 VueDraggable 的 v-model 接收（不再原地 splice 共享引用，也省去手动深比较）。
+    dragList.value = [...list]
   },
   { immediate: true },
 )

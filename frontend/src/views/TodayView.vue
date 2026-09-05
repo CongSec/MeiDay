@@ -10,10 +10,11 @@ import { useUiStore } from '@/stores/ui'
 import TaskCard from '@/components/TaskCard.vue'
 import TaskModal from '@/components/TaskModal.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
-import { dateKeyOf, nowIso, toLocalInput, todayKey } from '@/utils/time'
+import { dateKeyOf, nowIso, toLocalInput } from '@/utils/time'
 import { isFutureTask, isSubtaskFuture, isTaskVisibleToday } from '@/utils/todayFilter'
 import { UNCATEGORIZED, type Subtask, type Task } from '@/types'
 import { useSync } from '@/composables/useSync'
+import { useNow } from '@/composables/useNow'
 
 const auth = useAuthStore()
 const projects = useProjectsStore()
@@ -64,10 +65,11 @@ onUnmounted(() => {
   }
 })
 
-const today = todayKey()
+// 跨天自动更新的今天日期（由全局共享时钟驱动）
+const { today } = useNow()
 const filtered = computed(() => {
   const list = tasks.all
-  return list.filter((t) => isTaskVisibleToday(t, today))
+  return list.filter((t) => isTaskVisibleToday(t, today.value))
 })
 
 const sorted = computed(() => {
@@ -105,18 +107,18 @@ const futureOpen = ref(false)
 const futureTasks = computed(() => {
   const out: { task: Task; date: string }[] = []
   for (const t of tasks.all) {
-    if (!isFutureTask(t, today)) continue
+    if (!isFutureTask(t, today.value)) continue
     // 展示/排序日期：取「自身开始时间」与「未来子任务开始时间」中最早的一天
     const dates: string[] = []
-    if (t.startTime && dateKeyOf(t.startTime) > today) dates.push(dateKeyOf(t.startTime))
+    if (t.startTime && dateKeyOf(t.startTime) > today.value) dates.push(dateKeyOf(t.startTime))
     for (const s of t.subtasks ?? []) {
-      if (isSubtaskFuture(s, today) && s.startTime) dates.push(dateKeyOf(s.startTime))
+      if (isSubtaskFuture(s, today.value) && s.startTime) dates.push(dateKeyOf(s.startTime))
     }
     out.push({ task: t, date: dates.length ? dates.sort()[0] : '' })
   }
   for (const pid of Object.keys(tasks.repeats)) {
     for (const m of tasks.repeats[pid] ?? []) {
-      if (m.dueDate > today) out.push({ task: m.template, date: m.dueDate })
+      if (m.dueDate > today.value) out.push({ task: m.template, date: m.dueDate })
     }
   }
   // 同一任务只展示一次；按出现日期升序
@@ -145,7 +147,7 @@ const dragOptions = getDragOptions({ wholeCard: true })
 const visibleKey = computed(() => {
   let key = ''
   for (const t of tasks.all) {
-    if (isTaskVisibleToday(t, today)) key += `${t.id}:${t.status}:${t.updatedAt}\n`
+    if (isTaskVisibleToday(t, today.value)) key += `${t.id}:${t.status}:${t.updatedAt}\n`
   }
   return key
 })
@@ -308,7 +310,7 @@ async function confirmDelete() {
       <div class="hidden lg:flex items-center justify-between">
         <div>
           <h1 class="text-xl font-bold text-slate-800">📅 今日任务</h1>
-          <div class="text-xs text-slate-400 mt-0.5">{{ nowIso().slice(0, 10) }}</div>
+          <div class="text-xs text-slate-400 mt-0.5">{{ today }}</div>
         </div>
         <div class="flex items-center gap-2">
           <button

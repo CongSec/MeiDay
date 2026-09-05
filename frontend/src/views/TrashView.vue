@@ -5,7 +5,7 @@ import { useProjectsStore } from '@/stores/projects'
 import { useTasksStore } from '@/stores/tasks'
 import { useUiStore } from '@/stores/ui'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
-import JSZip from 'jszip'
+import type JSZip from 'jszip'
 import { deleteAttachments, downloadAttachment } from '@/utils/attachments'
 import { createOssClient } from '@/utils/oss'
 import { formatTodayTitle, nowIso, todayKey } from '@/utils/time'
@@ -316,6 +316,11 @@ function collectAttachments(list: Task[]): AttachmentMeta[] {
   return out
 }
 
+/** 按需加载 jszip：仅导出/导入回收站备份时才拉取压缩库，避免进入回收站页即下载 */
+async function loadJSZip() {
+  return (await import('jszip')).default
+}
+
 /** 一次性导出全部回收站为 ZIP 备份（任务 JSON + 附件二进制），可用来导入恢复 */
 async function exportTrash() {
   if (exportBusy.value) return
@@ -327,7 +332,7 @@ async function exportTrash() {
       return
     }
     const payload = { exportedAt: nowIso(), version: 1, projects: projectsData }
-    const zip = new JSZip()
+    const zip = new (await loadJSZip())()
     zip.file('data.json', JSON.stringify(payload, null, 2))
     // 附件：逐个下载原始字节写入 zip（attachments/{key}）；单附件失败不中断
     const allAtts = collectAttachments(projectsData.flatMap((p) => p.tasks))
@@ -383,7 +388,7 @@ async function onImportFile(e: Event) {
     const attBlobs = new Map<string, Blob>()
     let zip: JSZip | null = null
     try {
-      zip = await JSZip.loadAsync(file)
+      zip = await (await loadJSZip()).loadAsync(file)
     } catch {
       zip = null
     }

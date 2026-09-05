@@ -1,4 +1,4 @@
-import { reactive } from 'vue'
+import { ref } from 'vue'
 
 /** 隐私日记：任务系统全局的 10 分钟空闲自动锁定（含普通任务页）。
  *  - 日记解锁后启动；任何交互（鼠标/键盘/触摸/滚轮/点击预警按钮）都重置计时；
@@ -8,13 +8,11 @@ import { reactive } from 'vue'
 const LOCK_MS = 10 * 60 * 1000
 const WARNING_MS = [2 * 60 * 1000, 60 * 1000, 30 * 1000]
 
-export const idleLockState = reactive({
-  active: false,
-  /** 距锁定剩余毫秒 */
-  remainingMs: LOCK_MS,
-  /** 当前应显示的预警剩余毫秒（命中 2min/1min/30s 阈值时），否则 null */
-  warningMs: null as number | null,
-})
+export const idleLockActive = ref(false)
+/** 距锁定剩余毫秒 */
+export const idleLockRemainingMs = ref(LOCK_MS)
+/** 当前应显示的预警剩余毫秒（命中 2min/1min/30s 阈值时），否则 null */
+export const idleLockWarningMs = ref<number | null>(null)
 
 let timer: number | undefined
 let lastActivity = 0
@@ -24,9 +22,9 @@ let expireHandler: (() => void) | null = null
 let clearHandler: (() => void) | null = null
 
 function update() {
-  if (!idleLockState.active) return
+  if (!idleLockActive.value) return
   const remain = Math.max(0, LOCK_MS - (Date.now() - lastActivity))
-  idleLockState.remainingMs = remain
+  idleLockRemainingMs.value = remain
   if (remain <= 0) {
     stopIdleLock()
     clearHandler?.()
@@ -36,16 +34,16 @@ function update() {
   const hit = WARNING_MS.find((w) => remain <= w && w < lastWarn)
   if (hit !== undefined) {
     lastWarn = hit
-    idleLockState.warningMs = hit
+    idleLockWarningMs.value = hit
   }
 }
 
 function onActivity() {
-  if (!idleLockState.active) return
+  if (!idleLockActive.value) return
   lastActivity = Date.now()
   lastWarn = Infinity
-  idleLockState.warningMs = null
-  idleLockState.remainingMs = LOCK_MS
+  idleLockWarningMs.value = null
+  idleLockRemainingMs.value = LOCK_MS
 }
 
 /** 注册到期回调（由日记视图设置；模块级保存，离开日记页后仍生效） */
@@ -59,15 +57,15 @@ export function setDiaryIdleClearHandler(fn: (() => void) | null): void {
 
 
 export function startIdleLock(): void {
-  if (idleLockState.active) {
+  if (idleLockActive.value) {
     onActivity()
     return
   }
-  idleLockState.active = true
+  idleLockActive.value = true
   lastActivity = Date.now()
   lastWarn = Infinity
-  idleLockState.warningMs = null
-  idleLockState.remainingMs = LOCK_MS
+  idleLockWarningMs.value = null
+  idleLockRemainingMs.value = LOCK_MS
   window.addEventListener('pointerdown', onActivity, { passive: true })
   window.addEventListener('keydown', onActivity, { passive: true })
   window.addEventListener('touchstart', onActivity, { passive: true })
@@ -78,9 +76,9 @@ export function startIdleLock(): void {
 export function stopIdleLock(): void {
   if (timer !== undefined) window.clearInterval(timer)
   timer = undefined
-  idleLockState.active = false
-  idleLockState.warningMs = null
-  idleLockState.remainingMs = LOCK_MS
+  idleLockActive.value = false
+  idleLockWarningMs.value = null
+  idleLockRemainingMs.value = LOCK_MS
   window.removeEventListener('pointerdown', onActivity)
   window.removeEventListener('keydown', onActivity)
   window.removeEventListener('touchstart', onActivity)

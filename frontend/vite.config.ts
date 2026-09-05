@@ -39,7 +39,6 @@ export default defineConfig(({ mode }) => {
             // ali-oss（SDK 体积大、只在同步/诊断时用到）单独分包，配合按需 import 可延迟加载
             if (id.includes('ali-oss')) return 'vendor-oss'
             if (id.includes('vue-draggable-plus')) return 'vendor-drag'
-            if (id.includes('vue-virtual-scroller')) return 'vendor-scroll'
             // 框架核心：vue / pinia / vue-router 放一起，缓存命中率高
             if (
               /[\\/]node_modules[\\/](vue|@vue|pinia|vue-router|vue-demi|@vueuse)[\\/]/.test(id)

@@ -25,6 +25,10 @@ const navClass = (active: boolean) =>
     active ? 'bg-brand/10 text-brand font-medium' : 'text-slate-600 hover:bg-slate-200'
   }`
 
+// 导航高亮类改为 computed：仅在 route.path 变化时重算，避免每次渲染重复执行
+const navTodayClass = computed(() => navClass(route.path === '/today'))
+const navSettingsClass = computed(() => navClass(route.path === '/settings'))
+
 async function onLogout() {
   await auth.logout()
   ui.closeDrawer()
@@ -64,7 +68,9 @@ const dragOptions = getDragOptions()
 watch(
   () => projects.projects,
   () => {
-    activeDrag.value = projects.projects
+    // 拷贝一份，避免拖拽组件直接共享 store 的响应式数组引用
+    //（拖拽排序改到副本，结束后再由 setOrder 回写持久化）
+    activeDrag.value = [...projects.projects]
   },
   { immediate: true },
 )
@@ -88,7 +94,7 @@ function onActiveDragEnd() {
 
     <div class="flex-1 overflow-y-auto px-3 py-3">
       <div class="mb-1 text-xs text-slate-400 px-3">视图</div>
-      <router-link :to="'/today'" :class="navClass(route.path === '/today')" @click="ui.closeDrawer()">
+      <router-link :to="'/today'" :class="navTodayClass" @click="ui.closeDrawer()">
         <span>📅</span> 今日任务
         <span
           v-if="tasks.todayCount"
@@ -155,7 +161,7 @@ function onActiveDragEnd() {
       >
         <span>📥</span> 批量导入
       </button>
-      <router-link :to="'/settings'" :class="navClass(route.path === '/settings')" @click="ui.closeDrawer()">
+      <router-link :to="'/settings'" :class="navSettingsClass" @click="ui.closeDrawer()">
         <span>⚙️</span> 设置
       </router-link>
       <div class="flex items-center justify-between px-3 py-2 text-xs text-slate-400">
