@@ -7,7 +7,6 @@ export interface ParsedSubtask {
   startTime: string
   endTime: string
   reminderTime: string | null
-  completed: boolean
 }
 
 export interface ParsedTask {
@@ -76,17 +75,16 @@ const KV_KEYS: Record<string, 'startTime' | 'endTime' | 'reminderTime' | 'projec
  *   ## 任务名称              → 新任务
  *   - 开始：2026-08-18 09:00 → 设置字段（开始/截止/提醒/项目）
  *   ### 子任务名称           → 新子任务（后随文本为子任务描述）
- *   - [ ] 简单子任务         → 一行式简单子任务（[x] 表示已完成）
  *   其他文本                  → 追加到当前任务/子任务描述
- * 规则：文档含 ## 标题时，- [ ] 视为子任务；不含 ## 标题时，- [ ] 视为顶层任务。
+ * 规则：子任务只能用三级标题（###）创建；- [ ] 勾选框语法已废除，不再创建任务/子任务。
  */
 export function parseMarkdownImport(md: string): ImportResult {
   const warnings: string[] = []
   const tasks: ParsedTask[] = []
   let currentTask: ParsedTask | null = null
   let currentSub: ParsedSubtask | null = null
+  let checkboxAsText = false
 
-  const hasHeadings = /^##\s+/m.test(md)
   const lines = md.split(/\r?\n/)
 
   const appendText = (text: string) => {
@@ -129,7 +127,6 @@ export function parseMarkdownImport(md: string): ImportResult {
         startTime: '',
         endTime: '',
         reminderTime: null,
-        completed: false,
       }
       currentTask.subtasks.push(s)
       currentSub = s
@@ -166,41 +163,28 @@ export function parseMarkdownImport(md: string): ImportResult {
       continue
     }
 
+    // 勾选框（- [ ] / - [x]）语法已废除：不再创建任务或子任务，
+    // 内容仅保留为当前任务/子任务的描述文本
     const cb = line.match(/^[-*]\s*\[([ xX])\]\s*(.*)$/)
     if (cb) {
-      const name = cb[2].trim()
-      if (!currentTask || !hasHeadings) {
-        // 顶层 checkbox（文档无 ## 标题时所有 checkbox 均为顶层任务）
-        const t: ParsedTask = {
-          name: name || '未命名任务',
-          description: '',
-          startTime: '',
-          endTime: '',
-          reminderTime: null,
-          projectName: '',
-          subtasks: [],
-        }
-        tasks.push(t)
-        currentTask = t
-        currentSub = null
-        continue
+      const text = cb[2].trim()
+      if (!currentTask) {
+        warnings.push(`第 ${lineNo} 行：勾选框内容前没有所属任务，已忽略：「${line}」`)
+      } else {
+        appendText(text)
+        checkboxAsText = true
       }
-      // 有 ## 标题：当前任务下的简单子任务
-      const s: ParsedSubtask = {
-        name: name || '未命名子任务',
-        description: '',
-        startTime: '',
-        endTime: '',
-        reminderTime: null,
-        completed: cb[1].toLowerCase() === 'x',
-      }
-      currentTask.subtasks.push(s)
-      currentSub = null // checkbox 子任务为一行式，后续文本回到任务描述
       continue
     }
 
     // 其余文本：去列表前缀后追加为描述
     appendText(line.replace(/^[-*]\s+/, ''))
+  }
+
+  if (checkboxAsText) {
+    warnings.push(
+      '检测到 - [ ] / - [x] 勾选框：已不再支持用勾选框创建任务或子任务，内容已作为描述文本处理，子任务请改用三级标题（###）',
+    )
   }
 
   return { tasks, warnings }
@@ -243,7 +227,7 @@ export function buildTasksFromImport(
       startTime: s.startTime,
       endTime: s.endTime,
       reminderTime: s.reminderTime,
-      completed: s.completed,
+      completed: false,
       createdAt: now,
       updatedAt: now,
       attachments: [],
