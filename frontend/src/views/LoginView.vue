@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import ClickCaptcha from '@/components/ClickCaptcha.vue'
 import { useAuthStore } from '@/stores/auth'
 import logo from '@/assets/logo.png'
+import AppIcon from '@/components/AppIcon.vue'
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -76,8 +77,8 @@ async function submit() {
 </script>
 
 <template>
-  <div class="min-h-full flex items-center justify-center px-4 bg-gradient-to-br from-indigo-50 to-slate-100">
-    <div class="w-full max-w-sm bg-white rounded-2xl shadow-xl p-8">
+  <div class="min-h-full flex items-center justify-center px-4 bg-app">
+    <div class="w-full max-w-sm bg-white rounded-2xl shadow-lift border border-line p-8">
       <div class="text-center">
         <div class="flex items-center justify-center gap-2">
           <img :src="logo" alt="MeiDay" class="h-10 w-10 rounded-xl object-cover" />
@@ -86,7 +87,7 @@ async function submit() {
         <div class="mt-1 text-xs text-slate-400">高安全的轻量任务管理</div>
       </div>
 
-      <div class="mt-6 grid grid-cols-2 bg-slate-100 rounded-lg p-1 text-sm">
+      <div class="mt-6 grid grid-cols-2 bg-surface-2 rounded-xl p-1 text-sm">
         <button
           class="py-1.5 rounded-md font-medium transition"
           :class="mode === 'login' ? 'bg-white text-brand shadow-sm' : 'text-slate-500'"
@@ -104,30 +105,44 @@ async function submit() {
       </div>
 
       <form class="mt-5 space-y-3" @submit.prevent="submit">
-        <input
-          v-model="username"
-          name="username"
-          placeholder="用户名"
-          autocomplete="username"
-          class="w-full border rounded-lg px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-brand/50"
-        />
-        <input
-          v-model="password"
-          name="password"
-          placeholder="密码"
-          type="password"
-          :autocomplete="mode === 'login' ? 'current-password' : 'new-password'"
-          class="w-full border rounded-lg px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-brand/50"
-        />
-        <input
-          v-if="mode === 'register'"
-          v-model="confirm"
-          name="confirm_password"
-          placeholder="确认密码"
-          type="password"
-          autocomplete="new-password"
-          class="w-full border rounded-lg px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-brand/50"
-        />
+        <div class="relative">
+          <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
+            <AppIcon name="user" :size="16" />
+          </span>
+          <input
+            v-model="username"
+            name="username"
+            placeholder="用户名"
+            autocomplete="username"
+            class="w-full border border-line rounded-lg pl-10 pr-3 py-2.5 text-sm outline-none bg-white focus:ring-2 focus:ring-brand/40 focus:border-brand/50"
+          />
+        </div>
+        <div class="relative">
+          <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
+            <AppIcon name="lock" :size="16" />
+          </span>
+          <input
+            v-model="password"
+            name="password"
+            placeholder="密码"
+            type="password"
+            :autocomplete="mode === 'login' ? 'current-password' : 'new-password'"
+            class="w-full border border-line rounded-lg pl-10 pr-3 py-2.5 text-sm outline-none bg-white focus:ring-2 focus:ring-brand/40 focus:border-brand/50"
+          />
+        </div>
+        <div v-if="mode === 'register'" class="relative">
+          <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
+            <AppIcon name="lock" :size="16" />
+          </span>
+          <input
+            v-model="confirm"
+            name="confirm_password"
+            placeholder="确认密码"
+            type="password"
+            autocomplete="new-password"
+            class="w-full border border-line rounded-lg pl-10 pr-3 py-2.5 text-sm outline-none bg-white focus:ring-2 focus:ring-brand/40 focus:border-brand/50"
+          />
+        </div>
         <ClickCaptcha
           v-if="mode === 'register'"
           :key="captchaKey"
@@ -142,7 +157,7 @@ async function submit() {
         <button
           type="submit"
           :disabled="busy"
-          class="w-full bg-brand hover:bg-brand-dark text-white rounded-lg py-2.5 text-sm font-medium disabled:opacity-60 transition"
+          class="w-full bg-brand hover:bg-brand-dark text-white rounded-lg py-2.5 text-sm font-medium disabled:opacity-60 btn-press shadow-sm"
         >
           {{ busy ? '处理中…' : mode === 'login' ? '登录' : '注册' }}
         </button>

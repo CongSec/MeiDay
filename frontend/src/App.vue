@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useUiStore } from '@/stores/ui'
 import IdleLockBanner from '@/components/diary/IdleLockBanner.vue'
+import AppIcon from '@/components/AppIcon.vue'
 import { idbClearUserCache } from '@/utils/idb'
 import { stopSyncPoll } from '@/composables/useSyncPoll'
 
@@ -38,15 +39,21 @@ onMounted(() => {
   <!-- 隐私日记空闲锁定预警（全局：任务系统普通页也提示） -->
   <IdleLockBanner />
   <!-- 全局 Toast（隐私日记为独立全屏路由，须在 App 层渲染才可见） -->
-  <div class="fixed top-4 right-4 z-[70] space-y-2">
+  <div class="fixed top-4 inset-x-0 z-[70] flex flex-col items-center gap-2 pointer-events-none">
     <div
       v-for="t in ui.toasts"
       :key="t.id"
-      class="px-4 py-2 rounded-lg shadow-lg text-sm text-white cursor-pointer"
-      :class="t.type === 'ok' ? 'bg-slate-800' : 'bg-red-500'"
+      class="pointer-events-auto flex items-center gap-2.5 rounded-full pl-3 pr-4 py-2.5 text-sm text-white shadow-lg cursor-pointer animate-toast-in"
+      :class="t.type === 'ok' ? 'bg-slate-800/95' : 'bg-red-500/95'"
       title="点击关闭"
       @click="ui.dismiss(t.id)"
     >
+      <span
+        class="w-5 h-5 rounded-full flex items-center justify-center shrink-0"
+        :class="t.type === 'ok' ? 'bg-white/15' : 'bg-white/20'"
+      >
+        <AppIcon :name="t.type === 'ok' ? 'check' : 'alert'" :size="12" :stroke-width="2.5" />
+      </span>
       {{ t.text }}
     </div>
   </div>

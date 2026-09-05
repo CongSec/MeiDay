@@ -4,6 +4,7 @@ import Sidebar from '@/components/Sidebar.vue'
 import ProjectModal from '@/components/ProjectModal.vue'
 import UploadIndicator from '@/components/UploadIndicator.vue'
 import ImportModal from '@/components/ImportModal.vue'
+import AppIcon from '@/components/AppIcon.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useProjectsStore } from '@/stores/projects'
 import { useTasksStore } from '@/stores/tasks'
@@ -294,24 +295,16 @@ async function onImported(list: Task[]) {
 
     <div class="lg:ml-64 h-full flex flex-col">
       <header class="h-12 px-2 sm:px-4 flex items-center gap-1 sm:gap-2 bg-white border-b border-slate-100 lg:hidden">
-        <button class="w-8 h-8 sm:w-9 sm:h-9 flex items-center justify-center text-lg" @click="ui.openDrawer()">☰</button>
+        <button class="w-8 h-8 sm:w-9 sm:h-9 flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100" @click="ui.openDrawer()"><AppIcon name="menu" :size="20" /></button>
         <span class="font-semibold text-sm sm:text-base min-w-0 truncate">{{ mobileActions.title || 'MeiDay' }}</span>
         <div class="ml-auto flex items-center gap-1 sm:gap-1.5">
-          <button
-            v-if="mobileActions.newTask"
-            class="w-8 h-8 flex items-center justify-center rounded-lg bg-brand text-white text-base leading-none font-medium active:bg-brand-dark"
-            title="新建任务"
-            @click="mobileActions.newTask?.()"
-          >
-            ＋
-          </button>
           <button
             class="w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 active:bg-slate-200 disabled:opacity-50"
             title="同步刷新"
             :disabled="syncing"
             @click="syncNow"
           >
-            <span class="text-base leading-none" :class="syncing ? 'inline-block animate-spin' : ''">⟳</span>
+            <AppIcon name="refresh" :size="16" :class="syncing ? 'animate-spin' : ''" />
           </button>
         </div>
       </header>
@@ -330,7 +323,7 @@ async function onImported(list: Task[]) {
       class="fixed top-0 inset-x-0 z-[45] flex justify-center pointer-events-none"
       :style="{ transform: `translateY(${refreshState !== 'idle' ? 6 : -64}px)` }"
     >
-      <div class="mt-1 px-4 py-1.5 rounded-full bg-slate-800/90 text-white text-xs flex items-center gap-2 shadow-lg">
+      <div class="mt-1 px-4 py-1.5 rounded-full bg-slate-900/90 text-white text-xs flex items-center gap-2 shadow-lg backdrop-blur">
         <span
           v-if="refreshState === 'refreshing'"
           class="inline-block w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"
@@ -339,7 +332,7 @@ async function onImported(list: Task[]) {
           v-else
           class="inline-block text-sm leading-none transition-transform duration-150"
           :class="refreshState === 'ready' ? 'rotate-180' : ''"
-        >↓</span>
+        ><AppIcon name="arrow-down" :size="12" /></span>
         <span>
           {{ refreshState === 'refreshing' ? '正在同步…' : refreshState === 'ready' ? '松开立即同步' : '下拉刷新' }}
         </span>
@@ -348,10 +341,10 @@ async function onImported(list: Task[]) {
 
     <div
       v-if="needsUnlock"
-      class="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center px-4"
+      class="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-sm flex items-center justify-center px-4"
     >
       <form
-        class="bg-white rounded-xl shadow-xl p-6 w-full max-w-sm"
+        class="modal-panel rounded-2xl p-6 w-full max-w-sm animate-modal-pop"
         @submit.prevent="onUnlock"
       >
         <div class="text-lg font-semibold mb-1">重新解锁</div>
@@ -385,10 +378,10 @@ async function onImported(list: Task[]) {
     <ImportModal v-model:open="importModalOpen" @imported="onImported" />
 
 
-    <div v-if="ui.ossError" class="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center px-4">
-      <div class="bg-white rounded-xl shadow-xl p-6 w-full max-w-md">
+    <div v-if="ui.ossError" class="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-sm flex items-center justify-center px-4">
+      <div class="modal-panel rounded-2xl p-6 w-full max-w-md animate-modal-pop">
         <div class="flex items-start gap-2">
-          <span class="text-xl">⚠️</span>
+          <span class="w-9 h-9 rounded-full bg-red-50 text-red-500 flex items-center justify-center shrink-0"><AppIcon name="alert" :size="20" /></span>
           <div class="flex-1">
             <div class="text-base font-semibold text-red-600">{{ ui.ossError.title }}</div>
             <div class="mt-1 text-sm text-slate-700">{{ ui.ossError.hint }}</div>
@@ -412,6 +405,15 @@ async function onImported(list: Task[]) {
         </div>
       </div>
     </div>
+    <!-- 右下角圆形「新建任务」悬浮按钮（今日/项目视图注册后显示） -->
+    <button
+      v-if="mobileActions.newTask"
+      class="fixed bottom-6 right-6 z-40 h-14 w-14 rounded-full bg-brand text-white shadow-fab flex items-center justify-center btn-press hover:bg-brand-dark animate-fab-in"
+      title="新建任务"
+      @click="mobileActions.newTask?.()"
+    >
+      <AppIcon name="plus" :size="26" :stroke-width="2" />
+    </button>
     <!-- Toast 已移至 App.vue 全局渲染 -->
     <UploadIndicator />
   </div>

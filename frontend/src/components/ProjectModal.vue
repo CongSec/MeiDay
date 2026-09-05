@@ -91,8 +91,8 @@ async function confirmDelete() {
 </script>
 
 <template>
-  <div v-if="open" class="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center px-4">
-    <div class="bg-white rounded-xl shadow-xl p-6 w-full max-w-sm">
+  <div v-if="open" class="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-sm flex items-center justify-center px-4">
+    <div class="modal-panel rounded-2xl p-6 w-full max-w-sm animate-modal-pop">
       <div class="text-base font-semibold">{{ editingId ? '重命名项目' : '新建项目' }}</div>
       <form @submit.prevent="submit">
         <input

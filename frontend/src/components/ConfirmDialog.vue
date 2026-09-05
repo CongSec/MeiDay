@@ -17,9 +17,9 @@ const emit = defineEmits<{ confirm: []; cancel: [] }>()
 <template>
   <div
     v-if="open"
-    class="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center px-4"
+    class="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-sm flex items-center justify-center px-4"
   >
-    <div class="bg-white rounded-xl shadow-xl p-6 w-full max-w-sm">
+    <div class="modal-panel rounded-2xl p-6 w-full max-w-sm animate-modal-pop">
       <div class="text-base font-semibold">{{ title }}</div>
       <div class="mt-2 text-sm text-slate-600 whitespace-pre-wrap">{{ message }}</div>
       <div class="mt-5 flex justify-end gap-2">

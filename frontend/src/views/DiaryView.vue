@@ -13,12 +13,16 @@
       <header class="h-12 shrink-0 bg-white border-b border-slate-100 flex items-center gap-1 px-2 md:px-4 z-[60]">
         <!-- 手机端：日历抽屉开关（md 以上隐藏） -->
         <button
-          class="md:hidden w-9 h-9 rounded-lg text-slate-500 hover:bg-slate-100 flex items-center justify-center text-lg shrink-0"
+          class="md:hidden w-9 h-9 rounded-lg text-slate-500 hover:bg-slate-100 flex items-center justify-center shrink-0"
           title="打开日历"
           @click="calendarOpen = !calendarOpen"
-        >📅</button>
+        >
+          <AppIcon name="calendar" :size="18" />
+        </button>
         <div class="flex items-center gap-2 min-w-0">
-          <span class="text-xl shrink-0">🔒</span>
+          <span class="w-8 h-8 rounded-lg bg-brand/10 text-brand flex items-center justify-center shrink-0">
+            <AppIcon name="lock" :size="16" />
+          </span>
           <span class="font-bold whitespace-nowrap text-slate-800">隐私日记</span>
           <span class="text-xs text-slate-400 truncate hidden sm:inline">@{{ diary.username }}</span>
         </div>
@@ -30,7 +34,8 @@
             title="回顾历史日记"
             @click="reviewOpen = true"
           >
-            📅 回顾
+            <AppIcon name="calendar" :size="15" />
+            回顾
           </button>
           <!-- 设置下拉：修改密码 / 导出 / 导入 / 删除 折叠于此 -->
           <div ref="settingsMenuEl" class="relative">
@@ -38,7 +43,9 @@
               class="px-2 md:px-2.5 py-1.5 rounded-lg text-xs md:text-sm text-slate-600 hover:bg-slate-100 whitespace-nowrap"
               @click="settingsOpen = !settingsOpen"
             >
-              ⚙ 设置<span class="hidden sm:inline"> ▾</span>
+              <AppIcon name="gear" :size="15" />
+              <span>设置</span>
+              <AppIcon name="chevron-down" :size="12" class="text-slate-400 hidden sm:inline-block" />
             </button>
             <div
               v-if="settingsOpen"
@@ -48,7 +55,7 @@
                 class="w-full flex items-center gap-2 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-100 whitespace-nowrap"
                 @click="openChangePassword"
               >
-                <span class="text-base shrink-0">🔑</span>
+                <AppIcon name="key" :size="15" class="text-slate-400 shrink-0" />
                 <span>修改密码</span>
               </button>
               <button
@@ -56,7 +63,7 @@
                 :disabled="diary.exporting"
                 @click="exportOpen = true"
               >
-                <span class="text-base shrink-0">📦</span>
+                <AppIcon name="box" :size="15" class="text-slate-400 shrink-0" />
                 <span>{{ diary.exporting ? '导出中…' : '导出日记' }}</span>
               </button>
               <button
@@ -64,7 +71,7 @@
                 :disabled="diary.importing"
                 @click="importInput?.click()"
               >
-                <span class="text-base shrink-0">📥</span>
+                <AppIcon name="inbox" :size="15" class="text-slate-400 shrink-0" />
                 <span>{{ diary.importing ? '导入中…' : '导入日记' }}</span>
               </button>
               <div class="h-px bg-slate-100 my-1" />
@@ -73,12 +80,15 @@
                 :disabled="diary.deleting"
                 @click="deleteOpen = true"
               >
-                <span class="text-base shrink-0">🗑️</span>
+                <AppIcon name="trash" :size="15" class="text-red-400 shrink-0" />
                 <span>{{ diary.deleting ? '删除中…' : '删除日记' }}</span>
               </button>
               <div class="h-px bg-slate-100 my-1" />
               <div class="px-3 pt-1 pb-2">
-                <div class="text-[11px] text-slate-400 font-medium mb-1.5">🔔 日记邮件通知</div>
+                <div class="flex items-center gap-1.5 text-[11px] text-slate-400 font-medium mb-1.5">
+                  <AppIcon name="bell" :size="12" class="text-slate-400" />
+                  日记邮件通知
+                </div>
                 <label class="flex items-center justify-between gap-2">
                   <span class="text-xs text-slate-600">进入成功</span>
                   <button
@@ -149,8 +159,8 @@
     </div>
 
     <!-- 导出弹层 -->
-    <div v-if="exportOpen && diary.unlocked" class="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center px-4" data-testid="diary-export-modal">
-      <div class="bg-white rounded-xl shadow-xl p-6 w-full max-w-sm">
+    <div v-if="exportOpen && diary.unlocked" class="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-sm flex items-center justify-center px-4" data-testid="diary-export-modal">
+      <div class="modal-panel rounded-2xl p-6 w-full max-w-sm animate-modal-pop">
         <h3 class="text-base font-semibold text-slate-800 mb-3">导出日记</h3>
         <label class="block text-xs text-slate-500 mb-1">年份</label>
         <select v-model.number="exportYear" data-testid="diary-export-year" class="w-full border rounded-lg px-3 py-2 text-sm mb-3">
@@ -176,8 +186,8 @@
     </div>
 
     <!-- 跨账号导入密码弹层（压缩包含 dek.json 时弹出） -->
-    <div v-if="importPromptOpen && diary.unlocked" class="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center px-4" data-testid="diary-import-modal">
-      <div class="bg-white rounded-xl shadow-xl p-6 w-full max-w-sm">
+    <div v-if="importPromptOpen && diary.unlocked" class="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-sm flex items-center justify-center px-4" data-testid="diary-import-modal">
+      <div class="modal-panel rounded-2xl p-6 w-full max-w-sm animate-modal-pop">
         <h3 class="text-base font-semibold text-slate-800 mb-3">导入日记</h3>
         <p class="text-xs text-slate-500 mb-3">该压缩包包含加密密钥，需要输入导出时设置的「导出密码」才能解密导入。</p>
         <p class="text-[11px] text-slate-400 mb-2 truncate">文件：{{ importFileName }}</p>
@@ -194,8 +204,8 @@
     </div>
 
     <!-- 删除日记弹层（按年 / 月 / 全年） -->
-    <div v-if="deleteOpen && diary.unlocked" class="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center px-4" data-testid="diary-delete-modal">
-      <div class="bg-white rounded-xl shadow-xl p-6 w-full max-w-sm">
+    <div v-if="deleteOpen && diary.unlocked" class="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-sm flex items-center justify-center px-4" data-testid="diary-delete-modal">
+      <div class="modal-panel rounded-2xl p-6 w-full max-w-sm animate-modal-pop">
         <h3 class="text-base font-semibold text-red-600 mb-3">删除日记</h3>
         <label class="block text-xs text-slate-500 mb-1">年份</label>
         <select v-model.number="deleteYear" data-testid="diary-delete-year" class="w-full border rounded-lg px-3 py-2 text-sm mb-3">
@@ -247,6 +257,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import AppIcon from '@/components/AppIcon.vue'
 import DiaryPasswordGate from '@/components/diary/DiaryPasswordGate.vue'
 import DiaryCalendar from '@/components/diary/DiaryCalendar.vue'
 import DiaryChat from '@/components/diary/DiaryChat.vue'

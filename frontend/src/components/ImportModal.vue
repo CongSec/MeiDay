@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { useProjectsStore } from '@/stores/projects'
 import { buildTasksFromImport, parseMarkdownImport } from '@/utils/markdownImport'
 import type { Task } from '@/types'
+import AppIcon from '@/components/AppIcon.vue'
 
 const props = defineProps<{
   open: boolean
@@ -164,10 +165,10 @@ function confirmImport() {
 </script>
 
 <template>
-  <div v-if="open" class="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center px-4">
-    <div class="bg-white rounded-xl shadow-xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+  <div v-if="open" class="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-sm flex items-center justify-center px-4">
+    <div class="modal-panel rounded-2xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto animate-modal-pop">
       <div class="flex items-center justify-between">
-        <div class="text-base font-semibold">📥 批量导入任务（Markdown）</div>
+        <div class="text-base font-semibold flex items-center gap-2"><span class="w-7 h-7 rounded-lg bg-brand/10 text-brand flex items-center justify-center"><AppIcon name="download" :size="15" /></span>批量导入任务（Markdown）</div>
         <div class="flex items-center gap-2">
           <button class="text-xs text-slate-400 hover:text-brand" @click="fillAiPrompt">填入AI提示词</button>
           <button class="text-xs text-slate-400 hover:text-brand" @click="fillSample">填入示例</button>
@@ -225,7 +226,7 @@ function confirmImport() {
       </div>
 
       <div v-if="preview.warnings.length" class="mt-2 text-xs text-amber-600 space-y-0.5 max-h-28 overflow-y-auto">
-        <div v-for="(w, i) in preview.warnings" :key="i">⚠ {{ w }}</div>
+        <div v-for="(w, i) in preview.warnings" :key="i" class="inline-flex items-start gap-1"><AppIcon name="warning" :size="13" class="mt-0.5 shrink-0" />{{ w }}</div>
       </div>
 
       <div class="flex justify-end gap-2 pt-4">

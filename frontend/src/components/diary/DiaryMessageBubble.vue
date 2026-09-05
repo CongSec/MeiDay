@@ -11,11 +11,11 @@
         <!-- 文本：微信「我」风格，品牌色气泡 -->
         <div v-if="message.type === 'text'" class="relative">
           <div
-            class="rounded-2xl rounded-tr-sm bg-[#95ec69] text-slate-800 shadow px-3.5 py-2.5 text-[15px] leading-relaxed break-words"
+            class="rounded-2xl rounded-tr-sm bg-brand text-white shadow px-3.5 py-2.5 text-[15px] leading-relaxed break-words"
           >
             <span
               v-if="message.appended"
-              class="mr-1.5 inline-block align-middle leading-none text-[10px] font-medium text-[#2f9e44] bg-white/80 border border-white/60 rounded px-1 py-px"
+              class="mr-1.5 inline-block align-middle leading-none text-[10px] font-medium text-white/90 bg-white/20 border border-white/25 rounded px-1 py-px"
             >追加</span>
             <span class="whitespace-pre-wrap break-words">{{ (message.text ?? '').trim() }}</span>
           </div>
@@ -59,7 +59,9 @@
           </div>
           <div class="relative">
             <div class="rounded-2xl rounded-tr-sm bg-white shadow px-3 py-2.5 flex items-center gap-2">
-              <span class="text-lg">🎙️</span>
+              <span class="w-9 h-9 rounded-lg bg-brand/10 text-brand flex items-center justify-center shrink-0">
+                <AppIcon name="mic" :size="18" />
+              </span>
               <audio :src="url || undefined" controls preload="metadata" class="h-9 w-52 max-w-[180px]" />
               <span v-if="message.file?.duration" class="text-[11px] text-slate-400 shrink-0">{{ fmtDuration(message.file.duration) }}</span>
             </div>
@@ -79,7 +81,9 @@
               rel="noopener"
               class="flex items-center gap-3 rounded-2xl rounded-tr-sm bg-white shadow px-3.5 py-3 hover:bg-slate-50"
             >
-              <span class="w-9 h-9 rounded-lg bg-brand/10 flex items-center justify-center text-lg shrink-0">📄</span>
+              <span class="w-9 h-9 rounded-lg bg-brand/10 text-brand flex items-center justify-center shrink-0">
+                <AppIcon name="document" :size="18" />
+              </span>
               <span class="min-w-0">
                 <span class="block text-sm text-slate-800 truncate">{{ message.file?.name }}</span>
                 <span class="block text-[11px] text-slate-400">{{ fmtSize(message.file?.size) }}</span>
@@ -108,11 +112,13 @@
       >
         <img :src="url" class="max-w-full max-h-full object-contain rounded-lg shadow-2xl select-none" />
         <button
-          class="absolute top-4 right-4 w-9 h-9 rounded-full bg-white/15 text-white text-xl hover:bg-white/30 flex items-center justify-center"
+          class="absolute top-4 right-4 w-9 h-9 rounded-full bg-white/15 text-white hover:bg-white/30 flex items-center justify-center"
           title="关闭"
           @click="closePreview"
-        >×</button>
-        <div class="absolute bottom-4 text-white/60 text-xs select-none">双击或点击 × 关闭预览</div>
+        >
+          <AppIcon name="close" :size="18" />
+        </button>
+        <div class="absolute bottom-4 text-white/60 text-xs select-none">双击或点击关闭预览</div>
       </div>
     </Teleport>
   </div>
@@ -120,6 +126,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import AppIcon from '@/components/AppIcon.vue'
 import DiaryDeleteButton from './DiaryDeleteButton.vue'
 import { useDiaryStore } from '@/stores/diary'
 import { formatDiaryMsgTime } from '@/utils/time'

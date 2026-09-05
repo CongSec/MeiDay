@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import AppIcon from '@/components/AppIcon.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useUiStore } from '@/stores/ui'
 import { useStatsStore } from '@/stores/stats'
@@ -199,11 +200,19 @@ async function save() {
 
 <template>
   <div class="p-4 sm:p-6 max-w-2xl mx-auto">
-    <h1 class="hidden lg:block text-xl font-bold text-slate-800">⚙️ 设置</h1>
+    <div class="hidden lg:flex items-center gap-2.5">
+      <span class="w-9 h-9 rounded-xl bg-white border border-line shadow-card text-brand flex items-center justify-center shrink-0">
+        <AppIcon name="gear" :size="18" />
+      </span>
+      <h1 class="text-xl font-bold text-slate-800">设置</h1>
+    </div>
     <div class="text-xs text-slate-400 mt-0.5">凭证在浏览器本地用你的密码派生密钥 AES-GCM 加密后上传</div>
 
     <div class="mt-4 bg-white rounded-xl shadow-sm border border-slate-100 p-4">
-      <div class="text-sm font-semibold text-slate-800">📊 我的统计</div>
+      <div class="flex items-center gap-2 text-sm font-semibold text-slate-800">
+        <AppIcon name="chart" :size="16" class="text-brand" />
+        我的统计
+      </div>
       <div class="text-[11px] text-slate-400 mt-0.5">数据仅存于你的 OSS 存储桶，服务器不可修改</div>
       <div class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div class="rounded-lg bg-slate-50 border border-slate-100 p-3">
@@ -264,7 +273,10 @@ async function save() {
     </div>
 
     <div class="mt-4 bg-white rounded-xl shadow-sm border border-slate-100 p-4">
-      <div class="text-sm font-semibold text-slate-800">📧 安全邮件通知</div>
+      <div class="flex items-center gap-2 text-sm font-semibold text-slate-800">
+        <AppIcon name="mail" :size="16" class="text-brand" />
+        安全邮件通知
+      </div>
       <div class="text-[11px] text-slate-400 mt-0.5">
         登录成功 / 登录失败时通过邮件提醒（发往上方配置的收件邮箱）；查看密钥与修改密钥配置的通知为安全保护，始终开启。邮件发送失败不影响使用。
       </div>
@@ -319,20 +331,27 @@ async function save() {
         class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-slate-700 hover:bg-slate-50 border border-slate-200 text-left"
         @click="router.push('/trash')"
       >
-        <span>🗑</span> 回收站
-        <span class="ml-auto text-slate-400 text-xs shrink-0">恢复被删除的任务与项目 →</span>
+        <AppIcon name="trash" :size="16" class="text-slate-400 shrink-0" />
+        <span>回收站</span>
+        <span class="ml-auto text-slate-400 text-xs shrink-0">恢复被删除的任务与项目</span>
+        <AppIcon name="chevron-right" :size="14" class="text-slate-300 shrink-0" />
       </button>
       <button
         class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-slate-700 hover:bg-slate-50 border border-slate-200 text-left"
         @click="router.push('/logs')"
       >
-        <span>📋</span> 操作日志
-        <span class="ml-auto text-slate-400 text-xs shrink-0">查看与清理操作记录 →</span>
+        <AppIcon name="clipboard" :size="16" class="text-slate-400 shrink-0" />
+        <span>操作日志</span>
+        <span class="ml-auto text-slate-400 text-xs shrink-0">查看与清理操作记录</span>
+        <AppIcon name="chevron-right" :size="14" class="text-slate-300 shrink-0" />
       </button>
     </div>
 
     <div class="mt-4 bg-white rounded-xl shadow-sm border border-slate-100 p-4">
-      <div class="text-sm font-semibold text-slate-800">🔑 修改密码</div>
+      <div class="flex items-center gap-2 text-sm font-semibold text-slate-800">
+        <AppIcon name="key" :size="16" class="text-brand" />
+        修改密码
+      </div>
       <div class="text-[11px] text-slate-400 mt-0.5">
         修改后 OSS 凭证与历史附件会改用新密码派生的密钥重新加密，解密、提醒、附件预览等功能不受影响。
       </div>

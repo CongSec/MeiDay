@@ -1,8 +1,10 @@
 <template>
-  <div class="min-h-full flex items-center justify-center px-4 bg-gradient-to-br from-indigo-50 to-slate-100">
+  <div class="min-h-full flex items-center justify-center px-4 bg-app">
     <div class="w-full max-w-sm bg-white rounded-2xl shadow-xl p-6">
       <div class="flex flex-col items-center mb-5">
-        <div class="w-12 h-12 rounded-full bg-brand/10 flex items-center justify-center text-2xl">🔒</div>
+        <div class="w-12 h-12 rounded-full bg-brand/10 text-brand flex items-center justify-center">
+          <AppIcon name="lock" :size="24" />
+        </div>
         <h1 class="mt-3 text-lg font-bold text-slate-800">隐私日记</h1>
         <p class="mt-1 text-xs text-slate-500 text-center leading-relaxed">
           {{ mode === 'setup' ? '首次使用，请设置一个专属日记密码。' : '请输入日记密码以进入。' }}<br />
@@ -50,7 +52,8 @@
           class="mt-2 w-full text-slate-500 text-sm py-1 hover:text-slate-700"
           @click="router.push('/today')"
         >
-          ← 返回任务管理系统
+          <AppIcon name="arrow-left" :size="14" class="shrink-0" />
+          返回任务管理系统
         </button>
       </form>
 
@@ -100,6 +103,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import AppIcon from '@/components/AppIcon.vue'
 import { useDiaryStore } from '@/stores/diary'
 import { useUiStore } from '@/stores/ui'
 

@@ -3,13 +3,21 @@
     <!-- 月份/年份切换 -->
     <div class="flex items-center justify-between px-2 pb-2">
       <div class="flex items-center gap-1">
-        <button class="w-7 h-7 rounded-lg hover:bg-slate-200 text-slate-500" title="上一年" @click="shiftYear(-1)">«</button>
-        <button class="w-7 h-7 rounded-lg hover:bg-slate-200 text-slate-500" title="上个月" @click="shiftMonth(-1)">‹</button>
+        <button class="w-7 h-7 rounded-lg hover:bg-slate-200 text-slate-500 flex items-center justify-center" title="上一年" @click="shiftYear(-1)">
+          <AppIcon name="chevron-left-double" :size="15" />
+        </button>
+        <button class="w-7 h-7 rounded-lg hover:bg-slate-200 text-slate-500 flex items-center justify-center" title="上个月" @click="shiftMonth(-1)">
+          <AppIcon name="chevron-left" :size="15" />
+        </button>
       </div>
       <span class="text-sm font-semibold text-slate-700 select-none">{{ year }} 年 {{ month }} 月</span>
       <div class="flex items-center gap-1">
-        <button class="w-7 h-7 rounded-lg hover:bg-slate-200 text-slate-500" title="下个月" @click="shiftMonth(1)">›</button>
-        <button class="w-7 h-7 rounded-lg hover:bg-slate-200 text-slate-500" title="下一年" @click="shiftYear(1)">»</button>
+        <button class="w-7 h-7 rounded-lg hover:bg-slate-200 text-slate-500 flex items-center justify-center" title="下个月" @click="shiftMonth(1)">
+          <AppIcon name="chevron-right" :size="15" />
+        </button>
+        <button class="w-7 h-7 rounded-lg hover:bg-slate-200 text-slate-500 flex items-center justify-center" title="下一年" @click="shiftYear(1)">
+          <AppIcon name="chevron-right-double" :size="15" />
+        </button>
       </div>
     </div>
 
@@ -35,7 +43,7 @@
           <span
             v-if="hasRecord(cell)"
             class="absolute bottom-1 left-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full"
-            :class="cell === selectedDay ? 'bg-white' : 'bg-green-500'"
+            :class="cell === selectedDay ? 'bg-white' : 'bg-brand'"
           />
         </button>
       </template>
@@ -45,6 +53,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import AppIcon from '@/components/AppIcon.vue'
 import { useDiaryStore } from '@/stores/diary'
 import { addDaysKey, todayKey } from '@/utils/time'
 

@@ -28,10 +28,10 @@
               draggable="false"
               alt=""
             />
-            <span v-else>🖼️</span>
+            <span v-else class="text-slate-300"><AppIcon name="image" :size="22" /></span>
           </div>
-          <div class="absolute inset-0 bg-slate-900/45 flex flex-col items-center justify-center gap-0.5 text-white">
-            <span class="text-lg leading-none">🖼️</span>
+          <div class="absolute inset-0 bg-slate-900/45 flex flex-col items-center justify-center gap-1 text-white">
+            <AppIcon name="image" :size="20" class="opacity-90" />
             <span class="text-[13px] font-semibold">{{ messages.length }} 张图片</span>
             <span class="text-[11px] opacity-85">点击展开查看</span>
           </div>
@@ -57,7 +57,9 @@
                 draggable="false"
                 @dblclick.prevent="openPreview(m)"
               />
-              <div v-else class="h-28 w-28 sm:h-32 sm:w-32 flex items-center justify-center text-2xl text-slate-300">🖼️</div>
+              <div v-else class="h-28 w-28 sm:h-32 sm:w-32 flex items-center justify-center text-slate-300">
+                <AppIcon name="image" :size="30" />
+              </div>
               <span
                 v-if="m.appended"
                 class="absolute top-1 right-1 z-[5] text-[10px] font-medium text-amber-600 bg-amber-50 border border-amber-300 rounded px-1 py-px"
@@ -66,10 +68,13 @@
             </div>
           </div>
           <button
-            class="text-[11px] text-slate-400 hover:text-slate-600 px-2 py-0.5 rounded hover:bg-slate-200"
+            class="inline-flex items-center gap-1 text-[11px] text-slate-400 hover:text-slate-600 px-2 py-0.5 rounded hover:bg-slate-200"
             title="收起图片列表"
             @click="expanded = false"
-          >− 收起（{{ messages.length }} 张）</button>
+          >
+            <AppIcon name="chevron-up" :size="12" />
+            收起（{{ messages.length }} 张）
+          </button>
         </div>
       </div>
 
@@ -92,11 +97,13 @@
       >
         <img :src="previewUrl" class="max-w-full max-h-full object-contain rounded-lg shadow-2xl select-none" />
         <button
-          class="absolute top-4 right-4 w-9 h-9 rounded-full bg-white/15 text-white text-xl hover:bg-white/30 flex items-center justify-center"
+          class="absolute top-4 right-4 w-9 h-9 rounded-full bg-white/15 text-white hover:bg-white/30 flex items-center justify-center"
           title="关闭"
           @click="closePreview"
-        >×</button>
-        <div class="absolute bottom-4 text-white/60 text-xs select-none">双击或点击 × 关闭预览</div>
+        >
+          <AppIcon name="close" :size="18" />
+        </button>
+        <div class="absolute bottom-4 text-white/60 text-xs select-none">双击或点击关闭预览</div>
       </div>
     </Teleport>
   </div>
@@ -104,6 +111,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import AppIcon from '@/components/AppIcon.vue'
 import DiaryDeleteButton from './DiaryDeleteButton.vue'
 import { useDiaryStore } from '@/stores/diary'
 import { formatDiaryMsgTime } from '@/utils/time'

@@ -12,6 +12,7 @@ import { ensureLegalCalendar } from '@/utils/legalWorkday'
 import { currentOrNextOccurrence, firstOccurrenceDate, isNewStyleRepeat } from '@/utils/repeat'
 import { REPEAT_TYPES } from '@/types'
 import type { AttachmentMeta, RepeatRule, RepeatType, Subtask, Task } from '@/types'
+import AppIcon from '@/components/AppIcon.vue'
 
 const props = defineProps<{
   open: boolean
@@ -514,11 +515,11 @@ onUnmounted(() => {
 <template>
   <div
     v-if="open"
-    class="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center px-3 py-3"
+    class="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-sm flex items-center justify-center px-3 py-3"
     title="点击空白处取消编辑"
     @click.self="cancel"
   >
-    <div class="bg-white rounded-xl shadow-xl p-4 w-full max-w-xl max-h-[96dvh] overflow-y-auto">
+    <div class="modal-panel rounded-2xl p-4 w-full max-w-xl max-h-[96dvh] overflow-y-auto animate-modal-pop">
       <div class="text-base font-semibold">
         {{ subtaskMode ? (subtask ? '编辑子任务' : '添加子任务') : task ? '编辑任务' : '新建任务' }}
       </div>
@@ -570,7 +571,7 @@ onUnmounted(() => {
         <div v-if="!subtaskMode" class="rounded-lg border border-slate-100 p-2.5">
           <label class="flex items-center gap-2 text-xs text-slate-600 cursor-pointer select-none">
             <input v-model="repeatEnabled" type="checkbox" class="accent-brand" />
-            🔁 重复任务（到期当天自动显示；提醒邮件由服务器按时发送）
+            <AppIcon name="repeat" :size="14" class="text-brand shrink-0" /> 重复任务（到期当天自动显示；提醒邮件由服务器按时发送）
           </label>
           <div v-if="repeatEnabled" class="grid grid-cols-2 gap-2 pt-2">
             <div>
@@ -625,7 +626,7 @@ onUnmounted(() => {
               @click="fileInput?.click()"
             >
               <template v-if="uploading">上传中…（剩余 {{ activeUploadCount }}）</template>
-              <template v-else>＋ 添加附件</template>
+              <template v-else><span class="inline-flex items-center gap-1"><AppIcon name="plus" :size="12" />添加附件</span></template>
             </button>
           </div>
           <input ref="fileInput" type="file" multiple class="hidden" @change="onPickFiles" />
@@ -636,7 +637,7 @@ onUnmounted(() => {
               :key="a.id"
               class="flex items-center gap-2 rounded-lg border border-slate-100 bg-slate-50/70 px-2.5 py-1 text-xs"
             >
-              <span class="shrink-0">📎</span>
+              <span class="shrink-0 text-brand/70 flex items-center"><AppIcon name="paperclip" :size="13" /></span>
               <span class="flex-1 min-w-0 truncate text-slate-700" :title="a.name">{{ a.name }}</span>
               <span class="shrink-0 text-slate-400">{{ formatSize(a.size) }}</span>
               <button
@@ -649,19 +650,19 @@ onUnmounted(() => {
               </button>
               <button
                 type="button"
-                class="shrink-0 text-slate-400 hover:text-brand"
+                class="shrink-0 text-slate-400 hover:text-brand px-1 py-0.5 rounded"
                 title="下载"
                 @click="download(a)"
               >
-                ⤓
+                <AppIcon name="download" :size="14" />
               </button>
               <button
                 type="button"
-                class="shrink-0 text-slate-300 hover:text-red-500"
+                class="shrink-0 text-slate-300 hover:text-red-500 px-1 py-0.5 rounded hover:bg-red-50"
                 title="删除附件"
                 @click="removeAttachment(a)"
               >
-                ✕
+                <AppIcon name="close" :size="14" />
               </button>
             </div>
           </div>

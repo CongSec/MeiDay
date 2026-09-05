@@ -10,6 +10,7 @@ import TaskCard from '@/components/TaskCard.vue'
 import TaskModal from '@/components/TaskModal.vue'
 import ProjectModal from '@/components/ProjectModal.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import AppIcon from '@/components/AppIcon.vue'
 import type { Subtask, Task } from '@/types'
 import { useSync } from '@/composables/useSync'
 
@@ -202,7 +203,7 @@ async function confirmDelete() {
     <template v-if="project">
       <!-- 顶部进度条：任务完成 / 未完成百分比（替换原来的纯色横线） -->
       <div class="flex items-center gap-2">
-        <div class="flex-1 h-1.5 rounded-full bg-slate-100 overflow-hidden">
+        <div class="flex-1 h-1.5 rounded-full bg-surface-2 overflow-hidden">
           <div
             class="h-full rounded-full transition-all duration-300"
             :style="{ width: progressPct + '%', backgroundColor: project.color }"
@@ -211,46 +212,43 @@ async function confirmDelete() {
         <span class="text-[11px] text-slate-400 tabular-nums shrink-0">{{ completed.length }}/{{ totalTasks }} {{ progressPct }}%</span>
       </div>
 
-      <!-- 桌面标题行：项目名 + 编辑/移入回收站 + 操作按钮 -->
+      <!-- 桌面标题行：项目名（颜色标识）+ 编辑/移入回收站 + 同步（新建任务在右下角悬浮按钮） -->
       <div class="mt-3 hidden lg:flex items-center justify-between">
-        <div class="flex items-center gap-2">
+        <div class="flex items-center gap-3">
+          <span class="w-2.5 h-2.5 rounded-full shrink-0" :style="{ backgroundColor: project.color }" />
           <h1 class="text-xl font-bold text-slate-800">{{ project.name }}</h1>
-          <button class="text-xs text-slate-400 hover:text-brand" @click="projectModalOpen = true">✎ 编辑</button>
+          <button class="text-xs text-slate-400 hover:text-brand flex items-center gap-1 btn-press" @click="projectModalOpen = true">
+            <AppIcon name="edit" :size="13" /> 编辑
+          </button>
           <button
-            class="text-xs text-slate-400 hover:text-red-500"
+            class="text-xs text-slate-400 hover:text-red-500 flex items-center gap-1 btn-press"
             title="移入回收站：项目及其任务进入回收站，可恢复整个项目"
             @click="askTrashProject"
           >
-            🗑 移入回收站
+            <AppIcon name="trash" :size="13" /> 移入回收站
           </button>
         </div>
-        <div class="flex items-center gap-2">
-          <button
-            class="w-9 h-9 flex items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 active:bg-slate-100 disabled:opacity-50"
-            title="同步刷新"
-            :disabled="syncing"
-            @click="syncNow"
-          >
-            <span class="text-sm leading-none" :class="syncing ? 'inline-block animate-spin' : ''">⟳</span>
-          </button>
-          <button
-            class="px-4 py-2 rounded-lg bg-brand text-white text-sm font-medium hover:bg-brand-dark"
-            @click="openNew"
-          >
-            ＋ 新建任务
-          </button>
-        </div>
+        <button
+          class="w-9 h-9 flex items-center justify-center rounded-lg border border-line bg-white text-slate-500 hover:bg-surface-2 active:bg-slate-200 disabled:opacity-50 btn-press"
+          title="同步刷新"
+          :disabled="syncing"
+          @click="syncNow"
+        >
+          <AppIcon name="refresh" :size="16" :class="syncing ? 'animate-spin' : ''" />
+        </button>
       </div>
 
       <!-- 手机端紧凑行：编辑 / 移入回收站（项目名已上移到头部显示） -->
       <div class="mt-1 flex items-center gap-2 lg:hidden">
-        <button class="text-[11px] text-slate-400 hover:text-brand" @click="projectModalOpen = true">✎ 编辑</button>
+        <button class="text-[11px] text-slate-400 hover:text-brand flex items-center gap-1" @click="projectModalOpen = true">
+          <AppIcon name="edit" :size="12" /> 编辑
+        </button>
         <button
-          class="text-[11px] text-slate-400 hover:text-red-500"
+          class="text-[11px] text-slate-400 hover:text-red-500 flex items-center gap-1"
           title="移入回收站"
           @click="askTrashProject"
         >
-          🗑 移入回收站
+          <AppIcon name="trash" :size="12" /> 移入回收站
         </button>
       </div>
 
@@ -270,17 +268,21 @@ async function confirmDelete() {
             @delete="onDelete"
           />
         </VueDraggable>
-        <div v-if="!pending.length" class="py-16 text-center text-sm text-slate-400">
-          该项目暂无进行中的任务
+        <div v-if="!pending.length" class="py-16 flex flex-col items-center text-center">
+          <span class="w-14 h-14 rounded-2xl bg-white border border-line shadow-card flex items-center justify-center text-slate-300">
+            <AppIcon name="check-circle" :size="26" />
+          </span>
+          <div class="mt-3 text-sm font-medium text-slate-500">暂无进行中的任务</div>
+          <div class="mt-1 text-xs text-slate-400">点击右下角圆形按钮添加任务</div>
         </div>
 
         <!-- BUG-13: 已完成任务折叠区，保证“完成即消失”不再发生 -->
         <div v-if="completed.length" class="mt-6">
           <button
-            class="flex items-center gap-2 text-sm text-slate-500 hover:text-slate-700"
+            class="flex items-center gap-2 text-sm text-slate-500 hover:text-slate-700 btn-press"
             @click="showCompleted = !showCompleted"
           >
-            <span class="w-4 text-center">{{ showCompleted ? '▾' : '▸' }}</span>
+            <AppIcon :name="showCompleted ? 'chevron-down' : 'chevron-right'" :size="15" />
             <span>已完成（{{ completed.length }}）</span>
           </button>
           <div v-if="showCompleted" class="mt-2 space-y-2">

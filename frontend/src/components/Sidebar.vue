@@ -10,6 +10,7 @@ import { useUiStore } from '@/stores/ui'
 import { setDiaryEntryIntent } from '@/utils/diarySession'
 import type { Project } from '@/types'
 import logo from '@/assets/logo.png'
+import AppIcon from '@/components/AppIcon.vue'
 
 const emit = defineEmits<{ 'new-project': []; 'open-project': [id: string]; 'open-import': [] }>()
 
@@ -21,8 +22,8 @@ const route = useRoute()
 const router = useRouter()
 
 const navClass = (active: boolean) =>
-  `flex items-center gap-2 px-3 py-2 rounded-lg text-sm cursor-pointer transition ${
-    active ? 'bg-brand/10 text-brand font-medium' : 'text-slate-600 hover:bg-slate-200'
+  `relative flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm cursor-pointer transition ${
+    active ? 'bg-brand/10 text-brand font-medium' : 'text-slate-600 hover:bg-slate-100'
   }`
 
 // 导航高亮类改为 computed：仅在 route.path 变化时重算，避免每次渲染重复执行
@@ -89,16 +90,21 @@ function onActiveDragEnd() {
         <img :src="logo" alt="MeiDay" class="h-7 w-7 rounded-lg object-cover" />
         <span class="text-lg font-bold text-slate-800">MeiDay</span>
       </div>
-      <button class="lg:hidden text-slate-400 hover:text-slate-600" @click="ui.closeDrawer()">✕</button>
+      <button class="lg:hidden w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100" @click="ui.closeDrawer()"><AppIcon name="close" :size="18" /></button>
     </div>
 
     <div class="flex-1 overflow-y-auto px-3 py-3">
       <div class="mb-1 text-xs text-slate-400 px-3">视图</div>
       <router-link :to="'/today'" :class="navTodayClass" @click="ui.closeDrawer()">
-        <span>📅</span> 今日任务
+        <span
+          class="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-4 rounded-r-full bg-brand transition-opacity"
+          :class="route.path === '/today' ? 'opacity-100' : 'opacity-0'"
+        />
+        <AppIcon name="calendar" :size="17" class="shrink-0" />
+        <span>今日任务</span>
         <span
           v-if="tasks.todayCount"
-          class="ml-auto shrink-0 text-[11px] bg-brand text-white rounded-full px-1.5 py-0.5"
+          class="ml-auto shrink-0 text-[11px] font-medium bg-slate-100 text-slate-500 rounded-full px-1.5 py-0.5"
         >
           {{ tasks.todayCount }}
         </span>
@@ -109,10 +115,10 @@ function onActiveDragEnd() {
         <button
           v-if="canEditProjects"
           title="新建项目"
-          class="text-slate-400 hover:text-brand text-sm px-1"
+          class="w-6 h-6 flex items-center justify-center rounded-md text-slate-400 hover:text-brand hover:bg-slate-100"
           @click="$emit('new-project')"
         >
-          ＋
+          <AppIcon name="plus" :size="15" />
         </button>
       </div>
       <VueDraggable
@@ -126,17 +132,17 @@ function onActiveDragEnd() {
           v-for="p in activeDrag"
           :key="p.id"
           class="group flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer text-sm"
-          :class="route.params.id === p.id ? 'bg-brand/10 text-brand font-medium' : 'text-slate-600 hover:bg-slate-200'"
+          :class="route.params.id === p.id ? 'bg-brand/10 text-brand font-medium' : 'text-slate-600 hover:bg-slate-100'"
           @click="$emit('open-project', p.id)"
         >
           <span
-            class="drag-handle text-slate-300 group-hover:text-slate-500 cursor-grab text-sm leading-none select-none"
+            class="drag-handle text-slate-300 group-hover:text-slate-500 cursor-grab flex items-center select-none"
             title="拖动排序"
-          >☰</span>
+          ><AppIcon name="grip" :size="16" /></span>
           <span class="flex-1 truncate">{{ p.name }}</span>
           <span
             v-if="projects.countBy(p.id)"
-            class="shrink-0 text-[11px] bg-brand text-white rounded-full px-1.5 py-0.5"
+            class="shrink-0 text-[11px] font-medium bg-slate-100 text-slate-500 rounded-full px-1.5 py-0.5"
           >
             {{ projects.countBy(p.id) }}
           </span>
@@ -152,28 +158,28 @@ function onActiveDragEnd() {
         title="隐私日记模式"
         @click="goDiary"
       >
-        <span>🔒</span> 隐私日记模式
+        <AppIcon name="lock" :size="17" class="text-slate-400 shrink-0" /> <span>隐私日记模式</span>
       </button>
       <button
         class="flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-slate-600 hover:bg-slate-200 w-full"
         title="批量导入"
         @click="ui.closeDrawer(); $emit('open-import')"
       >
-        <span>📥</span> 批量导入
+        <AppIcon name="download" :size="17" class="text-slate-400 shrink-0" /> <span>批量导入</span>
       </button>
       <router-link :to="'/settings'" :class="navSettingsClass" @click="ui.closeDrawer()">
-        <span>⚙️</span> 设置
+        <AppIcon name="gear" :size="17" class="text-slate-400 shrink-0" /> <span>设置</span>
       </router-link>
       <div class="flex items-center justify-between px-3 py-2 text-xs text-slate-400">
         <span class="truncate">{{ auth.username }}</span>
-        <button class="hover:text-red-500" @click="onLogout">↩ 退出</button>
+        <button class="hover:text-red-500 flex items-center gap-1" @click="onLogout"><AppIcon name="logout" :size="13" /> 退出</button>
       </div>
     </div>
   </div>
 
   <div
     v-if="ui.drawerOpen"
-    class="fixed inset-0 z-30 bg-black/30 lg:hidden"
+    class="fixed inset-0 z-30 bg-slate-900/25 backdrop-blur-sm lg:hidden"
     @click="ui.closeDrawer()"
   />
 </template>

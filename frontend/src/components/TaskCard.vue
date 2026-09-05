@@ -5,6 +5,7 @@ import { useNow } from '@/composables/useNow'
 import { formatTodayTitle, todayKey } from '@/utils/time'
 import { formatRepeat, isNewStyleRepeat, isRepeatDay } from '@/utils/repeat'
 import type { Project, Subtask, Task } from '@/types'
+import AppIcon from '@/components/AppIcon.vue'
 
 const props = defineProps<{ task: Task; project?: Project; future?: boolean }>()
 const emit = defineEmits<{
@@ -74,20 +75,26 @@ function onAddSubtask() {
 
 <template>
   <div
-    class="task-card group bg-white rounded-xl shadow-sm border border-slate-100 p-4 transition hover:shadow-md"
+    class="task-card group bg-white rounded-xl shadow-card border border-line p-4 transition hover:shadow-lift hover:border-slate-200"
     :class="[overdue ? 'border-l-4 border-l-red-500' : '', task.status === 'completed' ? 'opacity-70' : '']"
     @click="emit('edit', task)"
   >
     <div class="flex items-start gap-3">
-      <label v-if="!future" class="pt-0.5 shrink-0" @click.stop>
+      <label v-if="!future" class="pt-0.5 shrink-0 cursor-pointer select-none" title="标记完成 / 取消完成" @click.stop>
         <input
           type="checkbox"
-          class="w-5 h-5 accent-brand cursor-pointer"
+          class="sr-only"
           :checked="task.status === 'completed'"
           @change="emit('toggle', task.id)"
         />
+        <span
+          class="w-5 h-5 rounded-md border flex items-center justify-center transition-all duration-150"
+          :class="task.status === 'completed' ? 'bg-brand border-brand text-white' : 'border-slate-300 bg-white text-transparent hover:border-brand hover:bg-brand/5'"
+        >
+          <AppIcon name="check" :size="13" :stroke-width="2.5" />
+        </span>
       </label>
-      <span v-else class="pt-0.5 shrink-0 text-base leading-none" title="未来任务">📅</span>
+      <span v-else class="pt-0.5 shrink-0 text-slate-300" title="未来任务"><AppIcon name="calendarFuture" :size="20" /></span>
       <div class="flex-1 min-w-0">
         <div class="flex items-center gap-2">
           <button
@@ -96,7 +103,7 @@ function onAddSubtask() {
             :title="expanded ? '折叠子任务' : '展开子任务'"
             @click.stop="expanded = !expanded"
           >
-            {{ expanded ? '▾' : '▸' }}
+            <AppIcon :name="expanded ? 'chevron-down' : 'chevron-right'" :size="14" />
           </button>
           <span
             class="font-medium text-sm"
@@ -111,48 +118,54 @@ function onAddSubtask() {
           >
             未来
           </span>
-          <span v-if="overdue" class="text-red-500 text-sm" title="已过提醒时间">🔔</span>
+          <span v-if="overdue" class="text-red-500" title="已过提醒时间"><AppIcon name="bell" :size="15" /></span>
         </div>
         <p v-if="task.description" class="mt-1 text-xs text-slate-500 clamp-2">{{ task.description }}</p>
-        <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-400">
-          <span v-if="task.startTime">{{ dateStr(task.startTime) }}</span>
-          <span v-if="task.endTime">⏳ {{ dateStr(task.endTime) }}</span>
-          <span v-if="task.reminderTime">🔔 {{ timeStr(task.reminderTime) }}</span>
-          <span v-if="task.repeat" class="text-brand/90" :title="`重复任务：${formatRepeat(task.repeat)}`">
-            🔁 {{ formatRepeat(task.repeat) }}
+        <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1.5 text-[11px] text-slate-400">
+          <span v-if="task.startTime" class="inline-flex items-center gap-1">
+            <AppIcon name="calendar" :size="12" />{{ dateStr(task.startTime) }}
+          </span>
+          <span v-if="task.endTime" class="inline-flex items-center gap-1">
+            <AppIcon name="clock" :size="12" />{{ dateStr(task.endTime) }}
+          </span>
+          <span v-if="task.reminderTime" class="inline-flex items-center gap-1">
+            <AppIcon name="bell" :size="12" />{{ timeStr(task.reminderTime) }}
+          </span>
+          <span v-if="task.repeat" class="inline-flex items-center gap-1 text-brand/90" :title="`重复任务：${formatRepeat(task.repeat)}`">
+            <AppIcon name="repeat" :size="12" />{{ formatRepeat(task.repeat) }}
           </span>
           <span
             v-if="(task.attachments?.length ?? 0) > 0"
-            class="text-brand/80 cursor-pointer"
+            class="inline-flex items-center gap-1 text-brand/80 cursor-pointer"
             :title="`${task.attachments.length} 个附件，点击打开查看/预览`"
             @click.stop="emit('edit', task)"
           >
-            📎 {{ task.attachments.length }}
+            <AppIcon name="paperclip" :size="12" />{{ task.attachments.length }}
           </span>
         </div>
       </div>
       <button
         v-if="!future"
-        class="shrink-0 w-7 h-7 flex items-center justify-center rounded-lg border border-brand/30 text-brand text-base leading-none hover:bg-brand/5"
+        class="shrink-0 w-7 h-7 flex items-center justify-center rounded-lg border border-brand/30 text-brand hover:bg-brand/5 hover:border-brand/50 btn-press"
         title="添加子任务"
         @click.stop="onAddSubtask"
       >
-        ＋
+        <AppIcon name="plus" :size="15" />
       </button>
       <button
         v-else
-        class="shrink-0 w-7 h-7 flex items-center justify-center rounded-lg border border-red-200 text-red-400 text-sm leading-none hover:bg-red-50"
+        class="shrink-0 w-7 h-7 flex items-center justify-center rounded-lg border border-red-200 text-red-400 hover:bg-red-50 btn-press"
         title="删除（移入回收站）"
         @click.stop="emit('delete', task.id)"
       >
-        🗑
+        <AppIcon name="trash" :size="14" />
       </button>
     </div>
 
     <!-- 子任务进度条：与主任务框同宽对齐 -->
     <div v-if="subProgress" class="mt-2">
       <div class="flex items-center gap-2 text-[11px] text-slate-400">
-        <span>☑ 子任务 {{ subProgress.done }}/{{ subProgress.total }}</span>
+        <span class="inline-flex items-center gap-1"><AppIcon name="check-circle" :size="12" />子任务 {{ subProgress.done }}/{{ subProgress.total }}</span>
       </div>
       <div class="mt-1 h-1 rounded-full bg-slate-100 overflow-hidden">
         <div
@@ -172,7 +185,7 @@ function onAddSubtask() {
           title="添加子任务"
           @click="onAddSubtask"
         >
-          ＋ 添加子任务
+          <span class="inline-flex items-center gap-1"><AppIcon name="plus" :size="11" />添加子任务</span>
         </button>
       </div>
       <div class="space-y-1.5">
@@ -183,13 +196,19 @@ function onAddSubtask() {
           :class="s.completed ? 'opacity-75' : ''"
         >
           <div class="flex items-center gap-2">
-            <label class="shrink-0 cursor-pointer" title="标记完成" @click.stop>
+            <label class="shrink-0 cursor-pointer select-none" title="标记完成" @click.stop>
               <input
                 type="checkbox"
-                class="w-4 h-4 accent-brand cursor-pointer rounded"
+                class="sr-only"
                 :checked="s.completed"
                 @change="emit('toggleSubtask', task.id, s.id)"
               />
+              <span
+                class="w-4 h-4 rounded border flex items-center justify-center transition-all duration-150"
+                :class="s.completed ? 'bg-brand border-brand text-white' : 'border-slate-300 bg-white text-transparent hover:border-brand'"
+              >
+                <AppIcon name="check" :size="10" :stroke-width="2.5" />
+              </span>
             </label>
             <span
               class="flex-1 min-w-0 text-[13px] cursor-pointer"
@@ -201,26 +220,26 @@ function onAddSubtask() {
             </span>
             <span
               v-if="(s.attachments?.length ?? 0) > 0"
-              class="shrink-0 text-[11px] text-brand/80 cursor-pointer"
+              class="shrink-0 text-[11px] text-brand/80 cursor-pointer inline-flex items-center gap-0.5"
               :title="`${s.attachments.length} 个附件，点击查看/预览`"
               @click="emit('editSubtask', task, s)"
             >
-              📎{{ s.attachments.length }}
+              <AppIcon name="paperclip" :size="11" />{{ s.attachments.length }}
             </span>
-            <span v-if="subOverdue(s)" class="text-xs text-red-500 shrink-0" title="已过提醒时间">🔔</span>
+            <span v-if="subOverdue(s)" class="text-red-500 shrink-0" title="已过提醒时间"><AppIcon name="bell" :size="13" /></span>
             <button
-              class="shrink-0 text-slate-300 hover:text-brand text-sm px-1"
+              class="shrink-0 text-slate-300 hover:text-brand px-1.5 py-0.5 rounded-md hover:bg-brand/5"
               title="编辑子任务"
               @click="emit('editSubtask', task, s)"
             >
-              ✎
+              <AppIcon name="edit" :size="14" />
             </button>
             <button
-              class="shrink-0 text-slate-300 hover:text-red-500 text-sm px-1"
+              class="shrink-0 text-slate-300 hover:text-red-500 px-1.5 py-0.5 rounded-md hover:bg-red-50"
               title="删除子任务"
               @click="emit('removeSubtask', task.id, s.id)"
             >
-              ✕
+              <AppIcon name="close" :size="14" />
             </button>
           </div>
           <p v-if="s.description" class="mt-1 pl-6 text-[11px] text-slate-400 break-all clamp-2">
@@ -230,10 +249,10 @@ function onAddSubtask() {
             v-if="s.startTime || s.endTime || s.reminderTime"
             class="mt-1 pl-6 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-slate-400"
           >
-            <span v-if="s.startTime">📅 {{ dateStr(s.startTime) }}</span>
-            <span v-if="s.endTime">⏳ {{ dateStr(s.endTime) }}</span>
-            <span v-if="s.reminderTime" :class="subOverdue(s) ? 'text-red-500' : ''">
-              🔔 {{ timeStr(s.reminderTime) }}
+            <span v-if="s.startTime" class="inline-flex items-center gap-1"><AppIcon name="calendar" :size="11" />{{ dateStr(s.startTime) }}</span>
+            <span v-if="s.endTime" class="inline-flex items-center gap-1"><AppIcon name="clock" :size="11" />{{ dateStr(s.endTime) }}</span>
+            <span v-if="s.reminderTime" :class="subOverdue(s) ? 'text-red-500' : ''" class="inline-flex items-center gap-1">
+              <AppIcon name="bell" :size="11" />{{ timeStr(s.reminderTime) }}
             </span>
           </div>
         </div>

@@ -9,8 +9,43 @@ body,
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
-  @apply bg-slate-100 text-slate-800;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  @apply bg-app text-slate-800;
+}
+
+::selection {
+  background: rgba(69, 87, 201, 0.18);
+}
+
+/* 细滚动条（桌面端可见，移动端隐藏） */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #d6dae1 transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #d6dae1;
+  border-radius: 8px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #c2c8d2;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 键盘可访问性：仅键盘导航时显示焦点环 */
+:focus-visible {
+  outline: 2px solid rgba(69, 87, 201, 0.55);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 .clamp-2 {
@@ -20,11 +55,16 @@ body {
   overflow: hidden;
 }
 
-/* ---- 移动端滑动交互 ---- */
-/* 阻止浏览器在页面边缘左右滑时触发“返回/前进/退出网页”的手势：
-   touch-action: pan-y 把横向手势完全交给 JS（右滑开侧栏），浏览器不再
-   把它当作“返回”手势；overscroll-behavior-x: none 双保险（尤其 iOS）。
-   纵向滚动仍保留，main 用 overscroll-behavior-y: contain 禁用原生下拉刷新。 */
+/* ---- 通用交互反馈 ---- */
+.btn-press {
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease,
+    box-shadow 0.15s ease, transform 0.08s ease, opacity 0.15s ease;
+}
+.btn-press:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+/* ---- 移动端滑动交互（保留原逻辑，勿删） ---- */
 html,
 body {
   touch-action: pan-y;
@@ -52,12 +92,10 @@ main {
   user-select: none;
 }
 .drag-active {
-  /* 拖动跟随的克隆：不用 scale/rotate，避免拖动时文字发虚；
-     半透明可透出下方目标项，配合 swapThreshold 看到实时“占位排斥” */
-  opacity: 0.85;
+  opacity: 0.9;
   will-change: transform;
   backface-visibility: hidden;
-  box-shadow: 0 16px 32px -10px rgba(15, 23, 42, 0.3);
+  box-shadow: 0 12px 32px -8px rgba(69, 87, 201, 0.30);
   border-radius: 0.75rem;
   cursor: grabbing !important;
   -webkit-user-select: none;
@@ -90,4 +128,61 @@ body.meiday-dragging * {
   -ms-user-select: none !important;
   user-select: none !important;
   -webkit-touch-callout: none !important;
+}
+
+/* ---- 动效 ---- */
+@keyframes md-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes md-modal-pop {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes md-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes md-fab-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.animate-toast-in {
+  animation: md-toast-in 0.22s cubic-bezier(0.21, 1.02, 0.73, 1) both;
+}
+.animate-modal-pop {
+  animation: md-modal-pop 0.18s cubic-bezier(0.21, 1.02, 0.73, 1) both;
+}
+.animate-fade-in {
+  animation: md-fade-in 0.16s ease-out both;
+}
+.animate-fab-in {
+  animation: md-fab-in 0.22s cubic-bezier(0.21, 1.02, 0.73, 1) both;
+}
+
+/* 弹窗面板统一微调 */
+.modal-panel {
+  @apply bg-white shadow-lift border border-line;
 }

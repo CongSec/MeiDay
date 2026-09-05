@@ -4,6 +4,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useProjectsStore } from '@/stores/projects'
 import { useTasksStore } from '@/stores/tasks'
 import { useUiStore } from '@/stores/ui'
+import AppIcon from '@/components/AppIcon.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import type JSZip from 'jszip'
 import { deleteAttachments, downloadAttachment } from '@/utils/attachments'
@@ -546,36 +547,45 @@ async function confirmDelete() {
 
 <template>
   <div class="p-4 sm:p-6 max-w-3xl mx-auto">
-    <h1 class="hidden lg:block text-xl font-bold text-slate-800">🗑 回收站</h1>
+    <div class="hidden lg:flex items-center gap-2.5">
+      <span class="w-9 h-9 rounded-xl bg-white border border-line shadow-card text-brand flex items-center justify-center shrink-0">
+        <AppIcon name="trash" :size="18" />
+      </span>
+      <h1 class="text-xl font-bold text-slate-800">回收站</h1>
+    </div>
     <div class="mt-0.5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
       <div class="text-xs text-slate-400 leading-relaxed">被删除的任务与项目，永不自动清理。扫描只列出有回收站文件的项目，展开项目时才加载对应文件</div>
       <div class="flex flex-wrap items-center gap-2">
         <button
-          class="shrink-0 px-3 py-1.5 rounded-lg text-xs border border-slate-200 hover:bg-slate-50 disabled:opacity-60"
+          class="inline-flex items-center gap-1.5 shrink-0 px-3 py-1.5 rounded-lg text-xs border border-slate-200 hover:bg-slate-50 disabled:opacity-60"
           :disabled="exportBusy"
           @click="exportTrash"
         >
-          {{ exportBusy ? '导出中…' : '📤 导出备份' }}
+          <AppIcon name="download" :size="13" class="text-slate-500" />
+          {{ exportBusy ? '导出中…' : '导出备份' }}
         </button>
         <button
-          class="shrink-0 px-3 py-1.5 rounded-lg text-xs border border-slate-200 hover:bg-slate-50"
+          class="inline-flex items-center gap-1.5 shrink-0 px-3 py-1.5 rounded-lg text-xs border border-slate-200 hover:bg-slate-50"
           @click="onPickImport"
         >
-          📥 从备份导入
+          <AppIcon name="upload" :size="13" class="text-slate-500" />
+          从备份导入
         </button>
         <button
-          class="shrink-0 px-3 py-1.5 rounded-lg text-xs border border-red-200 text-red-500 hover:bg-red-50 disabled:opacity-60"
+          class="inline-flex items-center gap-1.5 shrink-0 px-3 py-1.5 rounded-lg text-xs border border-red-200 text-red-500 hover:bg-red-50 disabled:opacity-60"
           :disabled="clearBusy"
           @click="clearOpen = true"
         >
-          {{ clearBusy ? '清空中…' : '🗑 清空回收站' }}
+          <AppIcon name="trash" :size="13" class="shrink-0" />
+          {{ clearBusy ? '清空中…' : '清空回收站' }}
         </button>
         <button
-          class="shrink-0 px-3 py-1.5 rounded-lg text-xs border border-slate-200 hover:bg-slate-50 disabled:opacity-60"
+          class="inline-flex items-center gap-1.5 shrink-0 px-3 py-1.5 rounded-lg text-xs border border-slate-200 hover:bg-slate-50 disabled:opacity-60"
           :disabled="scanning"
           @click="scanTrash"
         >
-          {{ scanning ? '扫描中…' : '📥 扫描回收站文件' }}
+          <AppIcon name="search" :size="13" class="text-slate-500" />
+          {{ scanning ? '扫描中…' : '扫描回收站文件' }}
         </button>
       </div>
       <input ref="fileInput" type="file" accept=".zip,.json,application/json,application/zip" class="hidden" @change="onImportFile" />
@@ -591,7 +601,9 @@ async function confirmDelete() {
           :title="isExpanded(g.key) ? '点击折叠' : '点击展开并加载该项目回收站'"
           @click="toggleGroup(g.key)"
         >
-          <span class="w-4 text-center text-slate-400 text-xs shrink-0">{{ isExpanded(g.key) ? '▾' : '▸' }}</span>
+          <span class="w-4 flex items-center justify-center text-slate-400 shrink-0">
+            <AppIcon :name="isExpanded(g.key) ? 'chevron-down' : 'chevron-right'" :size="14" />
+          </span>
           <span class="text-sm font-medium text-slate-600 truncate">{{ g.label }}</span>
           <span v-if="g.deleted" class="shrink-0 text-[11px] text-slate-400">已删除项目</span>
           <span class="shrink-0 text-[11px] text-slate-400">
@@ -606,7 +618,8 @@ async function confirmDelete() {
           title="恢复整个项目（重名时自动合并进同名项目）"
           @click="restoreProjectGroup(g)"
         >
-          ↺ 恢复整个项目
+          <AppIcon name="rotate-ccw" :size="12" class="shrink-0" />
+          恢复整个项目
         </button>
       </div>
       <div v-if="isExpanded(g.key)" class="space-y-2">
@@ -616,7 +629,7 @@ async function confirmDelete() {
           <div
             v-for="t in g.tasks"
             :key="t.id"
-            class="bg-white rounded-xl shadow-sm border border-slate-100 p-4 flex items-center gap-3"
+            class="bg-white rounded-xl border border-line shadow-card p-4 flex items-center gap-3"
           >
             <div class="flex-1 min-w-0">
               <div class="flex items-center gap-2">

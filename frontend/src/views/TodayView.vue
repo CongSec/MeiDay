@@ -10,6 +10,7 @@ import { useUiStore } from '@/stores/ui'
 import TaskCard from '@/components/TaskCard.vue'
 import TaskModal from '@/components/TaskModal.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import AppIcon from '@/components/AppIcon.vue'
 import { dateKeyOf, nowIso, toLocalInput } from '@/utils/time'
 import { isFutureTask, isSubtaskFuture, isTaskVisibleToday } from '@/utils/todayFilter'
 import { UNCATEGORIZED, type Subtask, type Task } from '@/types'
@@ -294,7 +295,7 @@ async function confirmDelete() {
 <template>
   <div class="p-4 sm:p-6 max-w-3xl mx-auto">
     <div v-if="!auth.hasCreds" class="py-16 text-center">
-      <div class="text-6xl">🗄️</div>
+      <div class="mx-auto w-16 h-16 rounded-2xl bg-white border border-line shadow-card flex items-center justify-center text-slate-300"><AppIcon name="box" :size="30" /></div>
       <div class="mt-4 text-base font-medium text-slate-700">还没有配置存储和邮箱</div>
       <div class="mt-1 text-sm text-slate-400">配置后即可开始使用 OSS 存储与离线邮箱提醒</div>
       <button
@@ -306,28 +307,25 @@ async function confirmDelete() {
     </div>
 
     <template v-else>
-      <!-- 桌面标题行：今日任务 + 日期 + 操作按钮（手机端已上移到头部显示） -->
+      <!-- 顶部信息带：日期标题 + 同步（桌面端，新建任务统一在右下角悬浮按钮） -->
       <div class="hidden lg:flex items-center justify-between">
-        <div>
-          <h1 class="text-xl font-bold text-slate-800">📅 今日任务</h1>
-          <div class="text-xs text-slate-400 mt-0.5">{{ today }}</div>
+        <div class="flex items-center gap-3">
+          <span class="w-10 h-10 rounded-xl bg-white border border-line shadow-card flex items-center justify-center text-brand">
+            <AppIcon name="calendar" :size="20" />
+          </span>
+          <div>
+            <h1 class="text-xl font-bold text-slate-800 leading-tight">今日任务</h1>
+            <div class="text-xs text-slate-400 mt-0.5">{{ today }}</div>
+          </div>
         </div>
-        <div class="flex items-center gap-2">
-          <button
-            class="w-9 h-9 flex items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 active:bg-slate-100 disabled:opacity-50"
-            title="同步刷新"
-            :disabled="syncing"
-            @click="syncNow"
-          >
-            <span class="text-sm leading-none" :class="syncing ? 'inline-block animate-spin' : ''">⟳</span>
-          </button>
-          <button
-            class="px-4 py-2 rounded-lg bg-brand text-white text-sm font-medium hover:bg-brand-dark"
-            @click="openNew"
-          >
-            ＋ 新建任务
-          </button>
-        </div>
+        <button
+          class="w-9 h-9 flex items-center justify-center rounded-lg border border-line bg-white text-slate-500 hover:bg-surface-2 active:bg-slate-200 disabled:opacity-50 btn-press"
+          title="同步刷新"
+          :disabled="syncing"
+          @click="syncNow"
+        >
+          <AppIcon name="refresh" :size="16" :class="syncing ? 'animate-spin' : ''" />
+        </button>
       </div>
 
       <!-- 今日任务进度条：完成 / 未完成百分比 -->
@@ -357,19 +355,30 @@ async function confirmDelete() {
             @delete="onDelete"
           />
         </VueDraggable>
-        <div v-if="!dragList.length" class="py-16 text-center text-sm text-slate-400">
-          今天没有任务，点右上角「＋ 新建任务」
+        <div v-if="!dragList.length" class="py-16 flex flex-col items-center text-center">
+          <span class="w-14 h-14 rounded-2xl bg-white border border-line shadow-card flex items-center justify-center text-slate-300">
+            <AppIcon name="calendar" :size="26" />
+          </span>
+          <div class="mt-3 text-sm font-medium text-slate-500">今天没有任务</div>
+          <div class="mt-1 text-xs text-slate-400">点击右下角圆形按钮，开始今天的第一项任务</div>
         </div>
       </div>
 
       <!-- 未来任务：可折叠分组（默认收起），放在已完成下方，不限时间范围 -->
       <div v-if="futureTasks.length" class="mt-5 border-t border-slate-100 pt-3">
         <button
-          class="w-full flex items-center justify-between py-1.5 text-sm font-medium text-slate-500 hover:text-slate-700"
+          class="w-full flex items-center justify-between py-1.5 text-sm font-medium text-slate-500 hover:text-slate-700 btn-press"
           @click="futureOpen = !futureOpen"
         >
-          <span>🗓 未来任务（{{ futureTasks.length }}）</span>
-          <span class="text-xs text-slate-400">{{ futureOpen ? '收起 ▴' : '展开 ▾' }}</span>
+          <span class="flex items-center gap-2">
+            <AppIcon name="calendarFuture" :size="16" class="text-slate-400" />
+            未来任务
+            <span class="text-[11px] font-normal px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500">{{ futureTasks.length }}</span>
+          </span>
+          <span class="text-xs text-slate-400 flex items-center gap-1">
+            {{ futureOpen ? '收起' : '展开' }}
+            <AppIcon :name="futureOpen ? 'chevron-up' : 'chevron-down'" :size="13" />
+          </span>
         </button>
         <div v-if="futureOpen" class="mt-1.5 space-y-2">
           <TaskCard

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api, type AuditLog } from '@/api/client'
+import AppIcon from '@/components/AppIcon.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 
 const mobileActions = inject<{ title: string } | null>('mobile-actions', null)
@@ -156,7 +157,12 @@ onUnmounted(() => {
   <div class="p-4 sm:p-6 max-w-5xl mx-auto">
     <div class="flex items-center justify-between">
       <div>
-        <h1 class="hidden lg:block text-xl font-bold text-slate-800">📋 操作日志</h1>
+        <div class="hidden lg:flex items-center gap-2.5">
+          <span class="w-9 h-9 rounded-xl bg-white border border-line shadow-card text-brand flex items-center justify-center shrink-0">
+            <AppIcon name="clipboard" :size="18" />
+          </span>
+          <h1 class="text-xl font-bold text-slate-800">操作日志</h1>
+        </div>
         <div class="text-xs text-slate-400 mt-0.5">
           记录所有用户操作与邮件行为（时间 / 用户 / IP / 行为 / 状态）
         </div>
@@ -200,11 +206,12 @@ onUnmounted(() => {
       <div class="bg-white rounded-xl shadow-sm border border-slate-100 p-4">
         <div class="text-xs text-slate-500 mb-1">清空我的日志记录</div>
         <button
-          class="px-3 py-1.5 rounded-lg text-xs text-red-500 border border-red-200 hover:bg-red-50 disabled:opacity-60"
+          class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-red-500 border border-red-200 hover:bg-red-50 disabled:opacity-60"
           :disabled="cleaning"
           @click="clearAllOpen = true"
         >
-          {{ cleaning ? '操作中…' : '🗑 清空我的日志' }}
+          <AppIcon name="trash" :size="13" class="shrink-0" />
+          {{ cleaning ? '操作中…' : '清空我的日志' }}
         </button>
         <div class="mt-1 text-[11px] text-slate-400">仅清空当前登录账号自己的日志，不影响其他用户；清空前的记录会归档备份</div>
       </div>
@@ -238,7 +245,7 @@ onUnmounted(() => {
           @change="applyFilter"
         >
           <option value="">全部</option>
-          <option value="1">🚨 仅安全</option>
+          <option value="1">仅安全</option>
           <option value="0">仅非安全</option>
         </select>
       </div>
@@ -281,8 +288,11 @@ onUnmounted(() => {
               <div class="flex items-center gap-1.5">
                 <span
                   v-if="log.is_security === 1 || log.is_high_risk === 1"
-                  class="inline-block px-1.5 py-0.5 rounded text-[11px] font-bold bg-red-50 text-red-500 border border-red-200 shrink-0"
-                >🚨 安全</span>
+                  class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium bg-red-50 text-red-500 border border-red-200 shrink-0"
+                >
+                  <AppIcon name="shield" :size="11" class="shrink-0" />
+                  安全
+                </span>
                 <span>{{ log.action }}</span>
               </div>
               <div v-if="log.detail" class="mt-0.5 text-[11px] text-slate-400 break-all">{{ log.detail }}</div>

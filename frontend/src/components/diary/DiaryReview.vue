@@ -2,14 +2,17 @@
   <div class="fixed inset-0 z-[65] bg-slate-100 flex flex-col">
     <!-- 回顾顶栏：返回今天 = 退出回顾 -->
     <header class="h-12 shrink-0 bg-white border-b border-slate-100 flex items-center gap-1 px-2 md:px-4 z-[60]">
-      <span class="text-xl shrink-0">📚</span>
+      <span class="w-8 h-8 rounded-lg bg-brand/10 text-brand flex items-center justify-center shrink-0">
+        <AppIcon name="book" :size="17" />
+      </span>
       <span class="font-bold whitespace-nowrap text-slate-800">日记回顾</span>
       <div class="flex-1" />
       <button
         class="px-2 md:px-3 py-1.5 rounded-lg text-xs md:text-sm text-slate-600 hover:bg-slate-100 whitespace-nowrap"
         @click="$emit('close')"
       >
-        ← 返回今天
+        <AppIcon name="arrow-left" :size="14" class="shrink-0" />
+        返回今天
       </button>
     </header>
 
@@ -44,9 +47,11 @@
     <!-- 只读时间线：按天分组，图片可点开、音频可播放，无输入框 -->
     <div class="flex-1 overflow-y-auto overflow-x-hidden bg-[#f0f2f5] px-2 py-3">
       <div v-if="reviewLoading" class="text-center text-xs text-slate-400 py-12">正在加载回顾数据…</div>
-      <div v-else-if="searched && !diary.reviewDays.length" class="text-center text-slate-400 text-sm py-14 leading-relaxed">
-        <div class="text-3xl mb-2">🔍</div>
-        该时间段内没有日记记录
+      <div v-else-if="searched && !diary.reviewDays.length" class="py-16 flex flex-col items-center text-center">
+        <span class="w-14 h-14 rounded-2xl bg-white border border-line shadow-card flex items-center justify-center text-slate-300">
+          <AppIcon name="search" :size="26" />
+        </span>
+        <div class="mt-3 text-sm text-slate-500">该时间段内没有日记记录</div>
       </div>
       <template v-else>
         <template v-for="day in diary.reviewDays" :key="day.dateKey">
@@ -72,6 +77,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import AppIcon from '@/components/AppIcon.vue'
 import DiaryMessageBubble from './DiaryMessageBubble.vue'
 import DiaryImageGroup from './DiaryImageGroup.vue'
 import { useDiaryStore } from '@/stores/diary'

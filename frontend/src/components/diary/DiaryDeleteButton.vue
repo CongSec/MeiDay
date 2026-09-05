@@ -11,10 +11,12 @@
   >
     <button
       v-if="!open"
-      class="w-[22px] h-[22px] rounded-full bg-white border border-slate-200 shadow-md text-slate-400 hover:text-red-500 hover:border-red-200 hover:bg-red-50 flex items-center justify-center text-[13px] leading-none opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition"
+      class="w-[22px] h-[22px] rounded-full bg-white border border-slate-200 shadow-md text-slate-400 hover:text-red-500 hover:border-red-200 hover:bg-red-50 flex items-center justify-center opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition"
       title="删除这条消息"
       @click.stop="open = true"
-    >×</button>
+    >
+      <AppIcon name="close" :size="11" />
+    </button>
 
     <div v-if="open" class="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/30 px-4" @click.stop>
       <div class="diary-del-root rounded-2xl bg-white shadow-2xl p-4 w-64">
@@ -31,6 +33,7 @@
 
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
+import AppIcon from '@/components/AppIcon.vue'
 
 const props = defineProps<{ position?: 'left' | 'right'; floating?: boolean }>()
 const emit = defineEmits<{ confirm: [] }>()

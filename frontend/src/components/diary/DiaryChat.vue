@@ -8,9 +8,11 @@
     <!-- 时间线聊天区：进入默认今天+空白；从日历点选某天只加载那一天 -->
     <div ref="scrollEl" class="flex-1 overflow-y-auto overflow-x-hidden bg-slate-100 px-2 py-3">
       <!-- 未加载任何天（默认今天，空白聊天框，不自动读历史） -->
-      <div v-if="!dayLoaded" class="text-center text-slate-400 text-sm py-14 leading-relaxed">
-        <div class="text-3xl mb-2">🕊️</div>
-        点日历中的日期可查看那天/更早的历史。
+      <div v-if="!dayLoaded" class="py-16 flex flex-col items-center text-center">
+        <span class="w-14 h-14 rounded-2xl bg-white border border-line shadow-card flex items-center justify-center text-slate-300">
+          <AppIcon name="chat" :size="26" />
+        </span>
+        <div class="mt-3 text-sm text-slate-500">点日历中的日期可查看那天/更早的历史</div>
       </div>
 
       <!-- 已加载但当天无记录 -->
@@ -57,17 +59,19 @@
       </div>
       <div class="flex items-end gap-1.5">
         <button
-          class="w-9 h-9 rounded-lg hover:bg-slate-100 text-xl flex items-center justify-center shrink-0"
+          class="w-9 h-9 rounded-lg hover:bg-slate-100 text-slate-500 flex items-center justify-center shrink-0"
           title="发送文件"
           @click="fileInput?.click()"
-        >📎</button>
+        >
+          <AppIcon name="paperclip" :size="18" />
+        </button>
         <button
-          class="w-9 h-9 rounded-lg text-xl flex items-center justify-center shrink-0"
-          :class="recording ? 'text-red-500 bg-red-50 animate-pulse' : 'hover:bg-slate-100'"
+          class="w-9 h-9 rounded-lg flex items-center justify-center shrink-0"
+          :class="recording ? 'text-red-500 bg-red-50 animate-pulse' : 'text-slate-500 hover:bg-slate-100'"
           :title="recording ? '点击停止并发送' : '语音输入'"
           @click="toggleRecord"
         >
-          {{ recording ? '⏹' : '🎙️' }}
+          <AppIcon :name="recording ? 'stop' : 'mic'" :size="18" />
         </button>
         <textarea
           ref="textInput"
@@ -88,7 +92,7 @@
       </div>
       <div v-if="recording" class="flex items-center gap-2 px-1 text-xs text-red-500">
         <span class="inline-block w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-        正在录音 {{ recSeconds }}s，点击 🎙️ 停止并发送
+        正在录音 {{ recSeconds }}s，点击停止并发送
       </div>
       <!-- 后台文件/语音上传进度：多文件并行，处理中显示占位，上传阶段显示百分比；不阻塞文字输入 -->
       <div v-if="diary.uploads.length" class="flex flex-col gap-1 px-1 text-xs text-brand">
@@ -108,6 +112,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import AppIcon from '@/components/AppIcon.vue'
 import DiaryMessageBubble from './DiaryMessageBubble.vue'
 import DiaryImageGroup from './DiaryImageGroup.vue'
 import { useDiaryStore } from '@/stores/diary'
