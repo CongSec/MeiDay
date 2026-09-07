@@ -125,3 +125,7 @@ coverage/
 .envrc
 .direnv/
 frontend/apk/
+
+# ===== 临时调试脚本 =====
+_tmp_pw/
+

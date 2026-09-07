@@ -320,9 +320,13 @@ async function onImported(list: Task[]) {
           </button>
         </div>
       </header>
+      <!-- main 必须是定位上下文：任务卡里 sr-only 复选输入框是 position:absolute，
+           若最近定位祖先为文档（ICB），它们会逃出 main 的 overflow 裁切、撑高
+           documentElement 使窗口可滚动；点击底部复选框时浏览器滚动整个窗口，导致
+           白屏/错位。relative 让这些输入框以 main 为包含块并被其裁切。 -->
       <main
         ref="mainEl"
-        class="flex-1 overflow-y-auto"
+        class="relative flex-1 overflow-y-auto"
         :class="refreshState === 'pulling' ? '' : 'transition-transform duration-200'"
         :style="mainStyle"
       >
