@@ -26,6 +26,12 @@ export function formatRepeat(rule?: RepeatRule | null): string {
     }
     case 'legalWorkday':
       return '每个法定工作日'
+    case 'dates': {
+      const ds = [...(rule.dates ?? [])].sort()
+      if (!ds.length) return '指定日期'
+      const shown = ds.slice(0, 3).map((d) => d.slice(5)).join('、')
+      return ds.length > 3 ? `指定日期 · ${shown} 等 ${ds.length} 天` : `指定日期 · ${shown}`
+    }
   }
 }
 
@@ -87,6 +93,10 @@ export function nextRepeatDate(rule: RepeatRule, anchor: string): string | null 
     }
     case 'legalWorkday':
       return nextLegalWorkday(anchor)
+    case 'dates': {
+      const ds = (rule.dates ?? []).filter((d) => d > anchor).sort()
+      return ds.length ? ds[0] : null
+    }
   }
 }
 
@@ -130,6 +140,8 @@ export function isRepeatDay(rule: RepeatRule, start: string, today: string): boo
     }
     case 'legalWorkday':
       return isLegalWorkday(today)
+    case 'dates':
+      return (rule.dates ?? []).includes(today)
   }
 }
 
@@ -142,6 +154,10 @@ export function isNewStyleRepeat(rule?: RepeatRule | null): boolean {
  *  与 nextRepeatDate 相比，本函数相位固定于 anchor（不随 today 漂移），用于编辑已有任务时计算下一次提醒/出现。 */
 export function currentOrNextOccurrence(rule: RepeatRule, anchor: string, today: string): string {
   if (!anchor || today < anchor) return anchor || today
+  if (rule.type === 'dates') {
+    const ds = (rule.dates ?? []).filter((d) => d >= today).sort()
+    return ds.length ? ds[0] : today
+  }
   if (isRepeatDay(rule, anchor, today)) return today
   let d = today
   // 最大间隔：daily n 天 / weekly ≤7n+6 / monthly ≤~31n 天（n<=365 时约 1.1 万）/ 法定工作日 ≤2 天；
@@ -164,6 +180,7 @@ export function buildReminderPayload(task: Task): RepeatRule | undefined {
   const payload: RepeatRule = { type: rule.type, interval: Math.max(1, rule.interval || 1) }
   if (rule.weekdays?.length) payload.weekdays = [...rule.weekdays]
   if (rule.monthDay) payload.monthDay = rule.monthDay
+  if (rule.dates?.length) payload.dates = [...rule.dates]
   if (rule.endAfter) payload.endAfter = rule.endAfter
   return payload
 }
@@ -196,7 +213,14 @@ export function buildRepeatOccurrence(task: Task, today: string): { template: Ta
   if (!rule) return null
   let anchorKey: string
   let date: string | null
-  if (rule.start) {
+  if (rule.type === 'dates') {
+    // 指定日期：只取列表中严格晚于今天的下一个日期；无剩余日期返回 null（链条自然结束，不再生成模板）
+    const physical = task.reminderTime || task.endTime || task.startTime
+    anchorKey = physical ? dateKeyOf(physical) : (rule.start ?? today)
+    const after = addDaysKey(today, 1)
+    const nextDates = (rule.dates ?? []).filter((d) => d >= after).sort()
+    date = nextDates.length ? nextDates[0] : null
+  } else if (rule.start) {
     // 新模型：以 rule.start 为相位锚点，下一次出现 = 严格晚于 today 的重复日，
     // 避免提醒时间陈旧（未完成跨过多个重复日）导致在重复日完成时生成 dueDate==today 的重复任务。
     const physical = task.reminderTime || task.endTime || task.startTime

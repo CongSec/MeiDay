@@ -24,9 +24,9 @@ export interface Subtask {
 }
 
 // 列表含 'workday' 仅为兼容 OSS 旧数据；新数据不再使用（与「每个法定工作日」合并，选项已移除）
-export type RepeatType = 'daily' | 'weekly' | 'workday' | 'monthly' | 'legalWorkday'
+export type RepeatType = 'daily' | 'weekly' | 'workday' | 'monthly' | 'legalWorkday' | 'dates'
 
-export const REPEAT_TYPES: RepeatType[] = ['daily', 'weekly', 'monthly', 'legalWorkday']
+export const REPEAT_TYPES: RepeatType[] = ['daily', 'weekly', 'monthly', 'legalWorkday', 'dates']
 
 /** 任务重复规则：重复生成的下一次任务，所有属性（名称/描述/时间/子任务/附件）保持一致，仅日期按周期顺延 */
 export interface RepeatRule {
@@ -39,6 +39,8 @@ export interface RepeatRule {
   monthDay?: number
   /** 可选：重复到此日期（含）为止，之后不再生成 */
   endAfter?: string
+  /** 指定日期重复：在这些特定日期（YYYY-MM-DD，升序去重）各出现一次，不循环 */
+  dates?: string[]
   /** 新模型标记：首次出现日（YYYY-MM-DD），作为每周/每月重复的相位锚点；老重复数据无此字段，自动走旧逻辑 */
   start?: string
 }

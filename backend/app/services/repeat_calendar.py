@@ -153,6 +153,11 @@ def next_repeat_date(rule: dict, anchor: str) -> str | None:
         return d
     if rtype == "legalWorkday":
         return next_legal_workday(anchor)
+    if rtype == "dates":
+        # 指定日期：取列表中严格晚于 anchor 的最小日期；无则返回 None（链条结束）
+        ds = sorted({str(d) for d in (rule.get("dates") or [])})
+        nxt = next((d for d in ds if d > anchor), None)
+        return nxt
     return None
 
 

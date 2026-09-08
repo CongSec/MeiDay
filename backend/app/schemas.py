@@ -225,7 +225,7 @@ class CredentialsRequest(BaseModel):
 # ---------- 重复任务提醒规则（V-001）----------
 
 # 合法重复类型（与前端 repeat.ts / TaskModal.vue 保持一致）
-REPEAT_TYPES = ("daily", "weekly", "workday", "monthly", "legalWorkday")
+REPEAT_TYPES = ("daily", "weekly", "workday", "monthly", "legalWorkday", "dates")
 # interval 上限：与前端输入框 max=365 对齐；超大 interval 会让
 # repeat_calendar.next_repeat_date 的 weekly 分支循环约 7n 次（CPU 放大 / DoS）。
 REPEAT_INTERVAL_MAX = 365
@@ -300,6 +300,23 @@ class ReminderTask(BaseModel):
                 raise ValueError("每月日期必须是整数")
             if not (1 <= month_day <= 31):
                 raise ValueError("每月日期需在 1-31 之间")
+        dates = v.get("dates")
+        if dates is not None:
+            if not isinstance(dates, list) or not dates:
+                raise ValueError("指定日期重复需至少选择一个日期")
+            if len(dates) > 365:
+                raise ValueError("指定日期不能超过 365 个")
+            seen = set()
+            for d in dates:
+                if not isinstance(d, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", d):
+                    raise ValueError("指定日期格式须为 YYYY-MM-DD")
+                try:
+                    datetime.strptime(d, "%Y-%m-%d")
+                except ValueError:
+                    raise ValueError("指定日期无效")
+                seen.add(d)
+            if len(seen) != len(dates):
+                raise ValueError("指定日期不能重复")
         end_after = v.get("endAfter")
         if end_after is not None:
             if not isinstance(end_after, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", end_after):
@@ -315,6 +332,8 @@ class ReminderTask(BaseModel):
             out["weekdays"] = sorted(seen)
         if month_day is not None:
             out["monthDay"] = month_day
+        if dates is not None:
+            out["dates"] = sorted(seen)
         return out
 
 

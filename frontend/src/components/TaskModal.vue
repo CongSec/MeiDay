@@ -64,6 +64,10 @@ const repeatInterval = ref(1)
 const repeatWeekdays = ref<number[]>([])
 const repeatMonthDay = ref(1)
 const repeatEndAfter = ref('')
+/** 指定日期重复：勾选的多个特定日期（YYYY-MM-DD，升序去重，每个日期各出现一次） */
+const repeatDates = ref<string[]>([])
+/** 日期多选器的临时输入（点「添加」进入 repeatDates） */
+const repeatDateInput = ref('')
 watch(
   () => props.open,
   (v) => {
@@ -90,7 +94,8 @@ function sameRepeatShape(a: RepeatRule, b: RepeatRule): boolean {
     a.type === b.type &&
     a.interval === b.interval &&
     JSON.stringify(a.weekdays ?? []) === JSON.stringify(b.weekdays ?? []) &&
-    (a.monthDay ?? 0) === (b.monthDay ?? 0)
+    (a.monthDay ?? 0) === (b.monthDay ?? 0) &&
+    JSON.stringify(a.dates ?? []) === JSON.stringify(b.dates ?? [])
   )
 }
 
@@ -136,6 +141,8 @@ const previewMeta = ref<AttachmentMeta | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
 /** 描述文本框引用：内容变多时自动增高 */
 const descriptionRef = ref<HTMLTextAreaElement | null>(null)
+/** 名称输入框引用：新建任务/子任务时自动聚焦 */
+const nameInputRef = ref<HTMLInputElement | null>(null)
 
 /** 描述文本框随内容自动增高（上限 200px，超出出现滚动条） */
 function autoResizeDescription() {
@@ -178,6 +185,8 @@ watch(
     repeatMonthDay.value = r?.monthDay ?? (start.value ? new Date(start.value).getDate() : 1)
     monthDayTouched.value = !!r?.monthDay
     repeatEndAfter.value = r?.endAfter ?? ''
+    repeatDates.value = r?.dates ? [...r.dates].sort() : []
+    repeatDateInput.value = ''
     err.value = ''
     uploadErr.value = ''
     localTaskId.value = t?.id ?? crypto.randomUUID()
@@ -188,6 +197,9 @@ watch(
     savedFlag.value = false
     previewMeta.value = null
     void nextTick(autoResizeDescription)
+    // 新建任务/子任务：光标默认聚焦到名称输入框；编辑已有任务时不自动聚焦
+    const isCreating = isSub ? !s : !t
+    if (isCreating) void nextTick(() => nameInputRef.value?.focus())
   },
 )
 
@@ -328,6 +340,7 @@ const REPEAT_TYPE_LABELS: Record<Exclude<RepeatType, 'workday'>, string> = {
   weekly: '每周',
   monthly: '每月',
   legalWorkday: '每个法定工作日',
+  dates: '指定日期',
 }
 function repeatTypeLabel(t: RepeatType) {
   if (t === 'workday') return REPEAT_TYPE_LABELS.legalWorkday
@@ -342,6 +355,18 @@ function toggleWeekday(wd: number) {
   const i = repeatWeekdays.value.indexOf(wd)
   if (i >= 0) repeatWeekdays.value.splice(i, 1)
   else repeatWeekdays.value.push(wd)
+}
+
+/** 指定日期：把输入框日期加入列表（升序去重） */
+function addRepeatDate() {
+  const d = repeatDateInput.value
+  if (!d) return
+  if (!repeatDates.value.includes(d)) repeatDates.value = [...repeatDates.value, d].sort()
+  repeatDateInput.value = ''
+}
+/** 指定日期：从列表移除某天 */
+function removeRepeatDate(d: string) {
+  repeatDates.value = repeatDates.value.filter((x) => x !== d)
 }
 
 /** BUG-30: 校验开始/截止/提醒时间的先后关系，返回错误文案或 null */
@@ -437,7 +462,16 @@ async function submit() {
     if (repeatType.value === 'monthly') {
       repeat.monthDay = Math.min(31, Math.max(1, Math.floor(repeatMonthDay.value || 1)))
     }
-    if (repeatEndAfter.value) repeat.endAfter = repeatEndAfter.value
+    if (repeatType.value === 'dates') {
+      const ds = [...new Set(repeatDates.value)].sort()
+      if (!ds.length) {
+        err.value = '请至少选择一个重复日期'
+        return
+      }
+      repeat.dates = ds
+    }
+    // 指定日期由日期列表自行界定，不叠加结束日期
+    if (repeatEndAfter.value && repeatType.value !== 'dates') repeat.endAfter = repeatEndAfter.value
     if (isNewModel) {
       const today = todayKey()
       // 编辑时重复规则形状未变则保留原 start（相位锚点），避免每次保存重置周期相位
@@ -527,6 +561,7 @@ onUnmounted(() => {
         <div>
           <label class="text-xs text-slate-500 block mb-0.5">名称 *</label>
           <input
+            ref="nameInputRef"
             v-model="name"
             maxlength="200"
             class="w-full border rounded-lg px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-brand/50"
@@ -595,9 +630,34 @@ onUnmounted(() => {
                 @input="monthDayTouched = true"
               />
             </div>
-            <div>
+            <div v-if="repeatType !== 'dates'">
               <label class="text-[11px] text-slate-500 block mb-0.5">结束日期</label>
               <input v-model="repeatEndAfter" type="date" class="w-full border rounded-lg px-2 py-1.5 text-sm" />
+            </div>
+            <div v-if="repeatType === 'dates'" class="col-span-2">
+              <label class="text-[11px] text-slate-500 block mb-0.5">指定日期（每个日期各出现一次，只出现一次）</label>
+              <div class="flex items-center gap-2">
+                <input v-model="repeatDateInput" type="date" :min="todayKey()" class="w-full min-w-0 border rounded-lg px-2 py-1.5 text-sm" />
+                <button
+                  type="button"
+                  class="shrink-0 px-3 py-1.5 rounded-lg text-xs text-white bg-brand hover:bg-brand-dark disabled:opacity-50"
+                  :disabled="!repeatDateInput"
+                  @click="addRepeatDate"
+                >
+                  添加
+                </button>
+              </div>
+              <div v-if="repeatDates.length" class="mt-2 flex flex-wrap gap-1.5">
+                <span
+                  v-for="d in repeatDates"
+                  :key="d"
+                  class="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-600"
+                >
+                  {{ d }}
+                  <button type="button" class="text-slate-300 hover:text-red-500" title="移除该日期" @click="removeRepeatDate(d)">×</button>
+                </span>
+              </div>
+              <p v-else class="mt-1 text-[11px] text-slate-400">请至少添加一个日期</p>
             </div>
             <div v-if="repeatType === 'weekly'" class="col-span-2 flex flex-wrap items-center gap-1">
               <span class="text-[11px] text-slate-500 mr-1">星期</span>
