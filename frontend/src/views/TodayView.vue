@@ -115,27 +115,27 @@ const dragList = ref<Task[]>([])
 /** 统一拖拽参数（触屏 fallback 拖拽更丝滑） */
 const dragOptions = getDragOptions({ wholeCard: true })
 
-/** 按引用对齐 dragList：仅在「结构变化」或「任务对象引用变化（如同步拉到新版本）」
- *  时才重建数组；原地内容更新（如完成子任务仅改 status/updatedAt，对象引用不变）
- *  保持原数组与对象引用，避免点击完成时整表替换数组触发 VueDraggable 渲染异常/白屏/闪烁。 */
-function reconcileDragList(target: Task[]) {
-  const cur = dragList.value
-  // 引用与顺序均未变 → 无任何结构/内容身份变化，直接跳过（TaskCard 已通过响应式自行更新）
-  if (cur.length === target.length && cur.every((t, i) => t === target[i])) return
-  // 最小变更：保留「同一对象引用」的既有项（原地内容更新如完成子任务只改 status/updatedAt，
-  // 对象引用不变，由 TaskCard 响应式自行反映，避免整表替换数组触发 VueDraggable 白屏/闪烁）；
-  // 同 id 出现新对象且 updatedAt 更新（如同步拉到远端新版本）时采用新对象，避免显示陈旧内容。
-  const curById = new Map(cur.map((t) => [t.id, t] as const))
-  const merged = target.map((t) => {
-    const old = curById.get(t.id)
-    if (!old || old === t || (t.updatedAt && t.updatedAt !== old.updatedAt)) return t
-    return old
-  })
-  if (merged.length === cur.length && merged.every((t, i) => t === cur[i])) return
-  dragList.value = merged
-}
+/**
+ * 今日可见任务的结构指纹（id:status:updatedAt）：
+ * 只跟踪影响列表结构的字段（增删 / 完成状态 / 可见性 / 内容更新时间），
+ * 避免 deep watch 在任意任务字段变化（如编辑子任务）时深遍历整个列表并全量重建；
+ * 任务内容的渲染由 TaskCard 直接响应任务对象的变化，无需重建 dragList。
+ */
+const visibleKey = computed(() => {
+  let key = ''
+  for (const t of tasks.all) {
+    if (isTaskVisibleToday(t, today.value)) key += `${t.id}:${t.status}:${t.updatedAt}\n`
+  }
+  return key
+})
 
-watch(() => sorted.value, (list) => reconcileDragList(list), { immediate: true })
+watch(
+  [visibleKey, () => tasks.todayOrder],
+  () => {
+    dragList.value = sorted.value
+  },
+  { immediate: true },
+)
 
 function onDragStart() {
   setDragging(true)
