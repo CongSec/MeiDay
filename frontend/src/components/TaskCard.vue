@@ -109,7 +109,7 @@ function onAddSubtask() {
             class="font-medium text-sm"
             :class="task.status === 'completed' ? 'line-through text-slate-400' : 'text-slate-800'"
           >
-            {{ task.name }}
+            {{ task.name || '未命名任务' }}
           </span>
           <span
             v-if="future"

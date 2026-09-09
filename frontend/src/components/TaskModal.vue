@@ -251,10 +251,9 @@ function askDelete() {
 const MAX_ATTACH_SIZE = 50 * 1024 * 1024 // 单个附件最大 50MB
 const MAX_ATTACH_COUNT = 10 // 每个任务最多 10 个附件
 
-function onPickFiles(e: Event) {
-  const input = e.target as HTMLInputElement
-  const files = Array.from(input.files ?? [])
-  if (!files.length) return
+/** 校验并加入后台上传队列（文件选择 / 描述框粘贴图片共用）；成功入队返回 true，失败返回 false */
+function uploadFiles(files: File[]): boolean {
+  if (!files.length) return false
   uploadErr.value = ''
   try {
     const creds = auth.creds
@@ -282,10 +281,36 @@ function onPickFiles(e: Event) {
       })),
     )
     refreshUploading()
+    return true
   } catch (err) {
     uploadErr.value = (err as Error).message || '上传失败'
-  } finally {
-    input.value = ''
+    return false
+  }
+}
+
+function onPickFiles(e: Event) {
+  const input = e.target as HTMLInputElement
+  const files = Array.from(input.files ?? [])
+  if (files.length) uploadFiles(files)
+  input.value = ''
+}
+
+/** 描述框粘贴：若剪贴板含图片，直接上传到附件（不把图片当文本插入描述） */
+function onPasteDescription(e: ClipboardEvent) {
+  const items = e.clipboardData?.items
+  if (!items) return
+  const imgs: File[] = []
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i]
+    if (it.kind === 'file' && it.type.startsWith('image/')) {
+      const f = it.getAsFile()
+      if (f) imgs.push(f)
+    }
+  }
+  if (!imgs.length) return
+  if (uploadFiles(imgs)) {
+    e.preventDefault()
+    ui.toast(`已将 ${imgs.length} 张图片添加到附件`)
   }
 }
 
@@ -388,10 +413,6 @@ async function submit() {
   // 快照本次保存时“已上传完成”的附件 id：尚未传完的不在保存 JSON 中，由后台队列写回
   const savedMetaIds = new Set(attachments.value.map((a) => a.id))
   if (props.subtaskMode) {
-    if (!name.value.trim()) {
-      err.value = '请输入子任务名称'
-      return
-    }
     const timeErr = validateTimes(start.value, end.value, reminder.value)
     if (timeErr) {
       err.value = timeErr
@@ -430,10 +451,6 @@ async function submit() {
     } finally {
       saving.value = false
     }
-    return
-  }
-  if (!name.value.trim()) {
-    err.value = '请输入任务名称'
     return
   }
   if (!projectId.value) {
@@ -578,6 +595,7 @@ onUnmounted(() => {
             class="w-full border rounded-lg px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-brand/50 resize-none max-h-[200px] overflow-y-auto"
             placeholder="可选"
             @input="autoResizeDescription"
+            @paste="onPasteDescription"
           />
         </div>
         <div class="grid grid-cols-2 gap-2">

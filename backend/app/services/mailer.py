@@ -27,14 +27,18 @@ def _esc(value: str) -> str:
     return html.escape(value or "", quote=True)
 
 
+def _task_name(task: dict) -> str:
+    name = " ".join((task.get("name") or "").splitlines()).strip()
+    return name or "未命名任务"
+
+
 def _subject(task: dict) -> str:
-    name = " ".join((task["name"] or "").splitlines()).strip()
-    return f"【MeiDay 提醒】{name}"
+    return f"【MeiDay 提醒】{_task_name(task)}"
 
 
 def _html(task: dict) -> str:
     return HTML_TEMPLATE.format(
-        name=_esc(task["name"]),
+        name=_esc(_task_name(task)),
         description=_esc(task.get("description") or ""),
         start_time=_esc(task.get("start_time") or "-"),
         end_time=_esc(task.get("end_time") or "-"),
@@ -48,7 +52,7 @@ async def send_reminder_email(smtp_user: str, smtp_pass: str, to: str, task: dic
     msg["To"] = to
     msg["Subject"] = _subject(task)
     msg.set_content(
-        f"任务：{task['name']}\n描述：{task.get('description') or ''}\n"
+        f"任务：{_task_name(task)}\n描述：{task.get('description') or ''}\n"
         f"起止：{task.get('start_time') or '-'} ~ {task.get('end_time') or '-'}\n"
         f"提醒时间：{task['reminder_time']}"
     )

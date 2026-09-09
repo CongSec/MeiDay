@@ -633,7 +633,7 @@ async function confirmDelete() {
           >
             <div class="flex-1 min-w-0">
               <div class="flex items-center gap-2">
-                <span class="text-sm font-medium text-slate-700 truncate">{{ t.name }}</span>
+                <span class="text-sm font-medium text-slate-700 truncate">{{ t.name || '未命名任务' }}</span>
                 <span
                   class="text-[11px] px-1.5 py-0.5 rounded-full shrink-0"
                   :class="t.status === 'deleted' ? 'bg-red-50 text-red-500' : 'bg-slate-100 text-slate-500'"
