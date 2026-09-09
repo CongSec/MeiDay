@@ -143,6 +143,9 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const descriptionRef = ref<HTMLTextAreaElement | null>(null)
 /** 名称输入框引用：新建任务/子任务时自动聚焦 */
 const nameInputRef = ref<HTMLInputElement | null>(null)
+/** 拖放高亮：拖文件到弹窗时提示可上传附件 */
+const isDragOver = ref(false)
+let dragDepth = 0
 
 /** 描述文本框随内容自动增高（上限 200px，超出出现滚动条） */
 function autoResizeDescription() {
@@ -295,8 +298,8 @@ function onPickFiles(e: Event) {
   input.value = ''
 }
 
-/** 描述框粘贴：若剪贴板含图片，直接上传到附件（不把图片当文本插入描述） */
-function onPasteDescription(e: ClipboardEvent) {
+/** 粘贴图片到附件：名称框 / 描述框共用；剪贴板含图片时直接上传（不插入文本），否则走默认粘贴 */
+function pasteImagesToAttachments(e: ClipboardEvent) {
   const items = e.clipboardData?.items
   if (!items) return
   const imgs: File[] = []
@@ -312,6 +315,23 @@ function onPasteDescription(e: ClipboardEvent) {
     e.preventDefault()
     ui.toast(`已将 ${imgs.length} 张图片添加到附件`)
   }
+}
+
+/** 拖文件到弹窗：松开时把文件上传到附件（与文件选择共用校验与上传队列） */
+function onDragEnter() {
+  dragDepth++
+  isDragOver.value = true
+}
+function onDragLeave() {
+  dragDepth = Math.max(0, dragDepth - 1)
+  if (dragDepth === 0) isDragOver.value = false
+}
+function onDropFiles(e: DragEvent) {
+  dragDepth = 0
+  isDragOver.value = false
+  const files = Array.from(e.dataTransfer?.files ?? [])
+  if (!files.length) return
+  if (uploadFiles(files)) ui.toast(`已将 ${files.length} 个文件添加到附件`)
 }
 
 /** 后台队列状态变化：把完成的上传加入附件展示列表；失败在未保存前显示行内错误 */
@@ -570,7 +590,15 @@ onUnmounted(() => {
     title="点击空白处取消编辑"
     @click.self="cancel"
   >
-    <div class="modal-panel rounded-2xl p-4 w-full max-w-xl max-h-[96dvh] overflow-y-auto animate-modal-pop">
+    <div
+      class="modal-panel rounded-2xl p-4 w-full max-w-xl max-h-[96dvh] overflow-y-auto animate-modal-pop transition-shadow"
+      :class="isDragOver ? 'ring-2 ring-brand/70 shadow-xl' : ''"
+      title="可将文件拖入此处添加为附件"
+      @dragenter.prevent="onDragEnter"
+      @dragover.prevent
+      @dragleave="onDragLeave"
+      @drop.prevent="onDropFiles"
+    >
       <div class="text-base font-semibold">
         {{ subtaskMode ? (subtask ? '编辑子任务' : '添加子任务') : task ? '编辑任务' : '新建任务' }}
       </div>
@@ -583,6 +611,7 @@ onUnmounted(() => {
             maxlength="200"
             class="w-full border rounded-lg px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-brand/50"
             placeholder="任务名称"
+            @paste="pasteImagesToAttachments"
           />
         </div>
         <div>
@@ -595,7 +624,7 @@ onUnmounted(() => {
             class="w-full border rounded-lg px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-brand/50 resize-none max-h-[200px] overflow-y-auto"
             placeholder="可选"
             @input="autoResizeDescription"
-            @paste="onPasteDescription"
+            @paste="pasteImagesToAttachments"
           />
         </div>
         <div class="grid grid-cols-2 gap-2">
