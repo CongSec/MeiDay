@@ -195,6 +195,7 @@ export function shiftTaskTimes(task: Task, days: number): Task {
     reminderTime: shift(task.reminderTime),
     subtasks: (task.subtasks ?? []).map((s) => ({
       ...s,
+      completed: false,
       startTime: s.startTime ? addDays(s.startTime, days) : '',
       endTime: s.endTime ? addDays(s.endTime, days) : '',
       reminderTime: shift(s.reminderTime),
@@ -258,6 +259,7 @@ export function buildRepeatOccurrence(task: Task, today: string): { template: Ta
     reminderTime: task.reminderTime ? addDays(task.reminderTime, offset) : null,
     subtasks: (task.subtasks ?? []).map((s) => ({
       ...s,
+      completed: false,
       id: crypto.randomUUID(),
       createdAt: now,
       updatedAt: now,
