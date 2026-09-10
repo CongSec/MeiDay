@@ -39,6 +39,10 @@ const accessOrder: string[] = []
 /** 逐出互斥：防止并发 touch 触发多次逐出循环 */
 let evicting = false
 let syncReminderTimer: number | undefined
+/** 到期物化互斥队列：轮询同步、跨天定时器、打开项目等多个入口可能同时触发物化；
+ *  若并发读取同一批到期模板，会把同一个重复任务重复生成两份。串行化后每个调用
+ *  都基于上一轮完成后的最新状态执行（已到期的模板已被移除，自然不会重复生成）。 */
+let materializeChain: Promise<unknown> = Promise.resolve()
 /** 项目加载的 in-flight Promise：ProjectView 的 onMounted 与路由 watch 会同时调用
  *  loadProject，复用同一个请求避免打开项目时重复下载该项目的 tasks/repeats 数据包。 */
 const loadingProjectPromises = new Map<string, Promise<void>>()
@@ -946,6 +950,15 @@ export const useTasksStore = defineStore('tasks', {
      * 在加载 / 同步 / 跨天检测时调用，不在普通编辑 _persist 里调用。
      */
     async materializeRepeats(projectId?: string) {
+      // 串行调度：轮询同步 / 跨天定时器 / 打开项目可能并发触发物化，同一批到期模板被并发
+      // 读取会重复生成两份任务。串行后第二个调用基于第一个已完成的状态执行（到期模板已被
+      // 移除），不会重复物化；队列内单个调用失败只影响该调用，不阻断后续物化。
+      const run = materializeChain.then(() => this._materializeRepeats(projectId))
+      materializeChain = run.catch(() => undefined)
+      return run
+    },
+    /** 实际的到期物化逻辑（由 materializeRepeats 串行调度后执行，避免并发重复生成） */
+    async _materializeRepeats(projectId?: string) {
       const auth = useAuthStore()
       const today = todayKey()
       const pids = projectId ? [projectId] : Object.keys(this.repeats)
@@ -993,10 +1006,13 @@ export const useTasksStore = defineStore('tasks', {
             continue
           }
           // dueDate == today：物化为可见任务
+          // 沿用 master.template.id 作为任务 id：同一重复模板（同一到期日）在多端/多次触发时
+          // 生成的任务 id 一致，配合下方 list.some(id) 检查与跨端 mergeTasks（按 id 合并），
+          // 可避免把同一个重复任务重复生成两份。id 仍为 buildRepeatOccurrence 生成的 UUID。
           const template = shiftTaskTimes(master.template, diffDaysKey(master.dueDate, dueDate))
           toAdd.push({
             ...template,
-            id: crypto.randomUUID(),
+            id: master.template.id,
             status: 'pending',
             isReminded: false,
             createdAt: nowIso(),
