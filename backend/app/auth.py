@@ -1,4 +1,3 @@
-import base64
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -20,19 +19,6 @@ ph = PasswordHasher()
 
 def _now() -> datetime:
     return datetime.now(TZ)
-
-
-def verify_password(password: str, hashed: str) -> bool:
-    try:
-        ph.verify(hashed, password)
-        return True
-    except Exception:
-        return False
-
-
-def sha256_b64(s: str) -> str:
-    """SHA-256(password) 摘要的 base64（客户端与服务端一致的登录校验子，不可逆）。"""
-    return base64.b64encode(hashlib.sha256(s.encode("utf-8")).digest()).decode("ascii")
 
 
 def hash_verifier(verifier: str) -> str:

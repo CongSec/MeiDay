@@ -45,8 +45,6 @@ logging.getLogger().addHandler(_file_handler)
 # 这些路径由路由自行写日志（以便带上更细的信息），中间件跳过避免重复
 _SKIP_PATHS = {
     "/api/login",
-    # 旧账号一次性迁移登录：路由自行写审计日志，中间件跳过避免重复
-    "/api/login/legacy",
     # 注册由 register 路由以新用户名写入（归属该用户自己），中间件跳过避免空用户重复记录
     "/api/register",
     "/api/health",

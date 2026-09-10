@@ -183,8 +183,8 @@ def _migrate_users_v2(conn: sqlite3.Connection) -> None:
     """安全改造：去掉 users.email 列；新增 auth_version / failed_attempts / last_failed_at / locked_until。
 
     - email 从未用于登录或通知（通知收件人走 smtp_creds.notify_email），直接删除；
-    - 历史账号 argon2 存的是明文密码哈希（legacy），auth_version 置 0，
-      首次登录时经一次性 /api/login/legacy 迁移到 verifier 校验方案；
+    - 历史账号 argon2 存的是明文密码哈希（legacy），auth_version 置 0；
+      该迁移为测试期兼容旧密码格式的历史遗留，正式环境已无此类账号；
     - 新库 SCHEMA 默认 auth_version=1（新注册直接用 verifier）。
     """
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()]

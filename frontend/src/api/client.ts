@@ -167,7 +167,7 @@ async function request<T>(
   const { retried = false, restoreOn401 = true } = opts ?? {}
   // 本地会话过期（7 天未活动）：直接视为未认证，清理本地态并跳登录。
   // 让 isTokenExpiredLocal/tokenAgeMs 真正生效，避免“本地已过期仍发请求”（BUG-36）。
-  // tokenOverride 是内部重登（login/legacyLogin 携带旧 token 判定“后台静默重登”），
+  // tokenOverride 是内部重登（login 携带旧 token 判定“后台静默重登”），
   // 跳过本地过期检查，否则会拿过期 token 递归触发恢复逻辑。
   if (!tokenOverride && isTokenExpiredLocal()) {
     clearToken()
@@ -281,10 +281,6 @@ export const api = {
     // restoreOn401:false —— 登录请求本身的 401 是“登录失败”（密码错/锁定），
     // 不触发自动恢复，避免拿记住的密码无限重登（递归）与重复计数导致账号锁定
     return request<LoginResponse>('POST', '/api/login', body, token, { restoreOn401: false })
-  },
-  /** 旧账号一次性迁移登录：仅 auth_version=0 的历史账号首次登录时发送一次明文密码 */
-  legacyLogin(body: { username: string; password: string }, token?: string) {
-    return request<LoginResponse>('POST', '/api/login/legacy', body, token, { restoreOn401: false })
   },
   logout() {
     return request<{ ok: true }>('POST', '/api/logout')

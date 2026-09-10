@@ -92,19 +92,6 @@ class LoginRequest(BaseModel):
         return v
 
 
-class LegacyLoginRequest(BaseModel):
-    """旧账号一次性迁移登录：历史账号（auth_version=0）首次登录时，
-    为了把存储从 argon2(明文密码) 升级为 argon2(SHA-256(password))，
-    需发送一次明文密码（仅此一次、仅旧账号），之后全部走 verifier。"""
-    username: str
-    password: str
-
-    @field_validator("username", mode="before")
-    @classmethod
-    def _username(cls, v):
-        return _strip(v)
-
-
 class LoginResponse(BaseModel):
     sessionToken: str
     encrypted_creds: Optional[str]

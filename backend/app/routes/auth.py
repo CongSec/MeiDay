@@ -21,9 +21,7 @@ from ..auth import (
     is_account_locked,
     register_failed_attempt,
     remaining_lock_seconds,
-    sha256_b64,
     username_from_token,
-    verify_password,
     verify_verifier,
 )
 from ..captcha import verify as verify_captcha
@@ -31,7 +29,6 @@ from ..db import get_conn
 from ..services.notifier import notify_security_event
 from ..schemas import (
     ChangePasswordRequest,
-    LegacyLoginRequest,
     LoginRequest,
     LoginResponse,
     MeResponse,
@@ -116,15 +113,14 @@ def register(body: RegisterRequest, request: Request = None):
 
 def _build_login_response(
     username: str, row, token: str, request: Request,
-    action: str = "login", path: str = "/api/login",
 ) -> LoginResponse:
-    """构造成功登录响应。旧账号迁移登录可传独立 action/path 以便审计区分。
+    """构造成功登录响应。
 
     安全通知（登录成功）邮件由路由在响应后异步发送，不再弹窗提示；
-    登录成功/登录迁移的日志统一自动附上"安全"标签（is_security=True）。
+    登录成功日志统一自动附上"安全"标签（is_security=True）。
     """
     log_action(
-        action, username=username, method="POST", path=path,
+        "login", username=username, method="POST", path="/api/login",
         status=200, ip=_ip(request), user_agent=_ua(request),
         is_security=True,
     )
@@ -165,13 +161,6 @@ async def login(
         _spawn_security_notification(username, "login_failed", ip, ua)
         mins = max(1, int(remaining_lock_seconds(row) / 60) + (1 if remaining_lock_seconds(row) % 60 else 0))
         raise HTTPException(status_code=423, detail=f"密码错误次数过多，账号已锁定，请约 {mins} 分钟后再试")
-    # 旧账号（auth_version=0）：存储为 argon2(明文密码)，无法用 verifier 校验，
-    # 返回 428 让前端用用户刚输入的原始密码走一次性 /api/login/legacy 迁移。
-    if row["auth_version"] == 0:
-        raise HTTPException(
-            status_code=428,
-            detail="账号需要升级密码校验方式，请重试",
-        )
     if not verify_verifier(body.passwordHash, row["argon2_hash"]):
         locked_now = register_failed_attempt(username)
         log_action(
@@ -209,82 +198,6 @@ async def login(
     return _build_login_response(username, row, token, request)
 
 
-@router.post("/login/legacy", response_model=LoginResponse)
-async def legacy_login(
-    body: LegacyLoginRequest,
-    request: Request,
-    authorization: Optional[str] = Header(None, alias="Authorization"),
-):
-    """旧账号一次性迁移登录：历史账号 argon2 存的是明文密码哈希，
-    无法用 verifier 校验。此端点接收一次明文密码完成校验，并立即把存储
-    升级为 argon2(SHA-256(password))（auth_version 置 1），此后只走 verifier。
-    登录成功/失败的安全邮件通知与 /api/login 一致（响应后异步发送）。
-    """
-    username = body.username.strip()
-    ip = _ip(request)
-    ua = _ua(request)
-    with get_conn() as conn:
-        row = conn.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
-    # BUG-03: 锁定期间必须拒绝（与 /login 一致），不能绕过锁定
-    if row is not None and is_account_locked(row):
-        log_action(
-            "login_locked", username=username, method="POST", path="/api/login/legacy",
-            status=423, ip=ip, user_agent=ua,
-            detail=f"🔒 账号因连续密码错误已被临时锁定，剩余 {remaining_lock_seconds(row)} 秒",
-            is_security=True,
-        )
-        _spawn_security_notification(username, "login_failed", ip, ua)
-        mins = max(1, int(remaining_lock_seconds(row) / 60) + (1 if remaining_lock_seconds(row) % 60 else 0))
-        raise HTTPException(status_code=423, detail=f"密码错误次数过多，账号已锁定，请约 {mins} 分钟后再试")
-    if not row or not verify_password(body.password, row["argon2_hash"]):
-        if row is not None:
-            locked_now = register_failed_attempt(username)
-            if locked_now:
-                log_action(
-                    "login_failed", username=username, method="POST", path="/api/login/legacy",
-                    status=423, ip=ip, user_agent=ua,
-                    detail=f"⚠️ 密码登录失败（重点关注）：来自 {ip or '未知IP'}，已触发账号临时锁定",
-                    is_security=True,
-                )
-                _spawn_security_notification(username, "login_failed", ip, ua)
-                raise HTTPException(status_code=423, detail="密码错误次数过多，账号已锁定 30 分钟")
-        log_action(
-            "login_failed", username=username, method="POST", path="/api/login/legacy",
-            status=401, ip=ip, user_agent=ua,
-            detail=f"⚠️ 密码登录失败（重点关注）：用户名或密码错误，来自 {ip or '未知IP'}",
-            is_security=True,
-        )
-        if row is not None:
-            _spawn_security_notification(username, "login_failed", ip, ua)
-        raise HTTPException(status_code=401, detail="用户名或密码错误")
-    # 迁移到 verifier 方案：argon2(SHA-256(password))
-    verifier = sha256_b64(body.password)
-    with get_conn() as conn:
-        conn.execute(
-            "UPDATE users SET argon2_hash=?, auth_version=1 WHERE username=?",
-            (hash_verifier(verifier), username),
-        )
-        row = conn.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
-    clear_failed_attempts(username)
-    # 与 /login 一致：携带本账号有效会话 token 的后台重登复用原会话，
-    # 避免刷新/重启静默重登新建会话把其它设备挤下线
-    is_background_relogin = False
-    token: Optional[str] = None
-    if authorization and authorization.startswith("Bearer "):
-        bearer = authorization[len("Bearer "):].strip()
-        if username_from_token(bearer) == username:
-            is_background_relogin = True
-            token = reuse_session(username, bearer) or create_session(username)
-    if token is None:
-        token = create_session(username)
-    if not is_background_relogin:
-        _spawn_security_notification(username, "login_success", ip, ua)
-    return _build_login_response(
-        username, row, token, request,
-        action="登录迁移", path="/api/login/legacy",
-    )
-
-
 @router.post("/change-password")
 def change_password(
     body: ChangePasswordRequest,
@@ -295,7 +208,7 @@ def change_password(
 
     - 只接收 SHA-256(password) 校验子，明文密码不出浏览器、不出服务器内存；
     - 原密码错误时计入防爆破失败计数（达到阈值锁定 30 分钟），并记录安全日志；
-    - 已登录账号必然已完成 legacy 迁移（auth_version=1），此处仅作防御性校验；
+    - 已登录账号 auth_version 均为 1（正式环境已无 legacy 账号），此处仅作防御性校验；
     - 修改成功后记录"修改密码"安全日志（不含任何密码/密钥明文）。
     """
     ip = _ip(request)
@@ -318,8 +231,8 @@ def change_password(
         mins = max(1, int(remaining_lock_seconds(row) / 60) + (1 if remaining_lock_seconds(row) % 60 else 0))
         raise HTTPException(status_code=423, detail=f"密码错误次数过多，账号已锁定，请约 {mins} 分钟后再试")
     if row["auth_version"] == 0:
-        # 防御性分支：正常情况下登录后即为 1；若为 0 则提示先登录完成升级
-        raise HTTPException(status_code=400, detail="账号尚未完成密码校验升级，请退出后重新登录一次")
+        # 防御性分支：正式环境无 auth_version=0 的 legacy 账号；若出现说明数据异常
+        raise HTTPException(status_code=400, detail="账号认证数据异常，请联系管理员处理")
     if not verify_verifier(body.oldPasswordHash, row["argon2_hash"]):
         locked_now = register_failed_attempt(username)
         log_action(

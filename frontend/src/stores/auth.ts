@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { api } from '@/api/client'
-import { ApiError, clearSavedPassword, clearSavedUsername, clearToken, getSavedPassword, getSavedUsername, getToken, savePassword, saveUsername, setToken, setUnauthorizedRestoreHook } from '@/api/client'
-import type { LoginResponse, SmtpPlain } from '@/api/client'
+import { clearSavedPassword, clearSavedUsername, clearToken, getSavedPassword, getSavedUsername, getToken, savePassword, saveUsername, setToken, setUnauthorizedRestoreHook } from '@/api/client'
+import type { SmtpPlain } from '@/api/client'
 import { idbClearUserCache } from '@/utils/idb'
 import { flushPendingSyncReports } from '@/utils/syncReport'
 import { useUiStore } from './ui'
@@ -22,20 +22,10 @@ export const useAuthStore = defineStore('auth', {
     isLoggedIn: (s) => !!s.token,
   },
   actions: {
-    /** 登录只发送 SHA-256(password) 校验子（不可逆密文）。旧账号（428）自动走一次性明文迁移。 */
+    /** 登录只发送 SHA-256(password) 校验子（不可逆密文），明文密码不出浏览器 */
     async login(username: string, password: string, remember = true) {
       const verifier = await passwordVerifier(password)
-      let r: LoginResponse
-      try {
-        r = await api.login({ username, passwordHash: verifier })
-      } catch (e) {
-        // 历史账号（auth_version=0）无法用校验子登录，需发送一次明文密码升级校验方案
-        if (e instanceof ApiError && e.status === 428) {
-          r = await api.legacyLogin({ username, password })
-        } else {
-          throw e
-        }
-      }
+      const r = await api.login({ username, passwordHash: verifier })
       this.token = r.sessionToken
       setToken(r.sessionToken)
       this.userKey = await deriveUserKey(password, username)
@@ -83,18 +73,9 @@ export const useAuthStore = defineStore('auth', {
       if (!pw) return false
       try {
         const verifier = await passwordVerifier(pw)
-        let r: LoginResponse
-        try {
-          // 携带当前有效 token 重登（自动解锁场景）：后端据此判定为同一会话的
-          // 静默恢复，不再触发 login_success 邮件，避免每次刷新都轰炸邮箱。
-          r = await api.login({ username: this.username, passwordHash: verifier }, this.token || undefined)
-        } catch (e) {
-          if (e instanceof ApiError && e.status === 428) {
-            r = await api.legacyLogin({ username: this.username, password: pw }, this.token || undefined)
-          } else {
-            throw e
-          }
-        }
+        // 携带当前有效 token 重登（自动解锁场景）：后端据此判定为同一会话的
+        // 静默恢复，不再触发 login_success 邮件，避免每次刷新都轰炸邮箱。
+        const r = await api.login({ username: this.username, passwordHash: verifier }, this.token || undefined)
         this.token = r.sessionToken
         setToken(r.sessionToken)
         this.userKey = await deriveUserKey(pw, this.username)
