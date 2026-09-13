@@ -13,7 +13,6 @@ import { releaseAllDiaryFileUrls, releaseDiaryFileUrl } from '@/utils/diaryBlobC
 import {
   keepIdleLockAlive, setDiaryIdleClearHandler, startIdleLock, stopIdleLock,
 } from '@/composables/useIdleLock'
-import { maybeCompressImage } from '@/utils/diaryImageCompress'
 import { nowIso, todayKey } from '@/utils/time'
 import type { DiaryBatch, DiaryMessage } from '@/types'
 import { logAudit, safeDetail } from '@/utils/audit'
@@ -299,7 +298,7 @@ export const useDiaryStore = defineStore('diary', {
 
     /** 后台上传文件/语音：立即加入上传列表返回，不阻塞界面；
      *  多文件受限并发加密/上传（避免抢带宽），各自完成后追加消息并按写队列落盘。
-     *  超大图片会自动压缩后再上传，显著加快移动端上传速度。 */
+     *  文件按原样上传，不做压缩。 */
     async sendFile(
       file: File,
       type: 'file' | 'audio' = 'file',
@@ -314,14 +313,7 @@ export const useDiaryStore = defineStore('diary', {
       this.uploads.push(state)
       await uploadSemaphore.acquire()
       try {
-        // 大图自动压缩（有损 JPEG，长边 ≤1920），体积常可缩小 5~10 倍
-        let uploadFile: File = file
-        if (type === 'file' && file.type.startsWith('image/')) {
-          uploadFile = await maybeCompressImage(file)
-          const cur = this.uploads.find((u) => u.id === fileId)
-          if (cur) cur.name = uploadFile.name
-        }
-        const data = new Uint8Array(await uploadFile.arrayBuffer())
+        const data = new Uint8Array(await file.arrayBuffer())
         await uploadDiaryFile(ossClient, this.username, dek, fileId, data, (p) => {
           const cur = this.uploads.find((u) => u.id === fileId)
           if (cur) cur.percent = Math.round(p * 100)
@@ -332,9 +324,9 @@ export const useDiaryStore = defineStore('diary', {
           type,
           file: {
             fileId,
-            name: uploadFile.name,
-            size: uploadFile.size,
-            mime: uploadFile.type || 'application/octet-stream',
+            name: displayName,
+            size: file.size,
+            mime: file.type || 'application/octet-stream',
             ...(opts?.duration !== undefined ? { duration: opts.duration } : {}),
           },
           createdAt: nowIso(),

@@ -14,7 +14,7 @@ import { isDragging } from '@/utils/drag'
 import { useSync } from '@/composables/useSync'
 import { startSyncPoll, stopSyncPoll } from '@/composables/useSyncPoll'
 import { ensureLegalCalendar } from '@/utils/legalWorkday'
-import { UNCATEGORIZED, type Task } from '@/types'
+import type { Task } from '@/types'
 
 const auth = useAuthStore()
 const projects = useProjectsStore()
@@ -251,8 +251,8 @@ onMounted(async () => {
 
 async function bootstrap() {
   await projects.load()
-  // 未分类任务（today.json）一并恢复缓存，侧栏角标/今日计数在进入今日视图前也准确
-  await tasks.loadFromIdb([...projects.projects.map((p) => p.id), UNCATEGORIZED])
+  // 恢复全部真实项目缓存，侧栏角标/今日计数在进入今日视图前也准确
+  await tasks.loadFromIdb([...projects.projects.map((p) => p.id)])
   // 今日任务跨项目顺序表：先从本地缓存恢复（不访问 OSS），再交由同步轮询刷新
   await tasks.loadTodayOrder()
   // 登录/自动解锁完成后启动同步协调轮询（幂等）

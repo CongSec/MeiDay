@@ -67,7 +67,8 @@ export interface Task {
   repeat?: RepeatRule
 }
 
-/** 未分类任务的项目 id：存于独立文件 today.json，今日视图展示 */
+/** 未分类分组的项目 id：仅回收站「无分类」分组使用（today_trash.json / today_repeats.json / today_order.json）。
+ *  已不再有未分类活跃任务（today.json 存储已下线），所有新任务强制归属真实项目。 */
 export const UNCATEGORIZED = ''
 
 export interface Project {

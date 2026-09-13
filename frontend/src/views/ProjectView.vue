@@ -10,6 +10,8 @@ import TaskCard from '@/components/TaskCard.vue'
 import TaskModal from '@/components/TaskModal.vue'
 import ProjectModal from '@/components/ProjectModal.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import { todayKey } from '@/utils/time'
+import { isRepeatTaskActiveOn } from '@/utils/todayFilter'
 import AppIcon from '@/components/AppIcon.vue'
 import type { Subtask, Task } from '@/types'
 import { useSync } from '@/composables/useSync'
@@ -32,7 +34,7 @@ const trashProjectOpen = ref(false)
 const projectId = computed(() => String(route.params.id))
 const project = computed(() => projects.byId(projectId.value))
 
-const pending = computed(() => (tasks.tasks[projectId.value] ?? []).filter((t) => t.status === 'pending'))
+const pending = computed(() => (tasks.tasks[projectId.value] ?? []).filter((t) => t.status === 'pending' && isRepeatTaskActiveOn(t, todayKey())))
 // BUG-13: 已完成任务保留在项目页折叠区，不再“完成即消失”
 const completed = computed(() => (tasks.tasks[projectId.value] ?? []).filter((t) => t.status === 'completed'))
 const showCompleted = ref(false)

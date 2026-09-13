@@ -66,8 +66,10 @@ const repeatMonthDay = ref(1)
 const repeatEndAfter = ref('')
 /** 指定日期重复：勾选的多个特定日期（YYYY-MM-DD，升序去重，每个日期各出现一次） */
 const repeatDates = ref<string[]>([])
-/** 日期多选器的临时输入（点「添加」进入 repeatDates） */
-const repeatDateInput = ref('')
+/** 月历多选器：当前查看的年月（0 基月） */
+const repeatDateView = ref({ y: new Date().getFullYear(), m: new Date().getMonth() })
+/** 月历多选器：本次勾选、待「添加选中」一次性提交的日期集合 */
+const repeatDateSelection = ref<Set<string>>(new Set())
 watch(
   () => props.open,
   (v) => {
@@ -189,7 +191,9 @@ watch(
     monthDayTouched.value = !!r?.monthDay
     repeatEndAfter.value = r?.endAfter ?? ''
     repeatDates.value = r?.dates ? [...r.dates].sort() : []
-    repeatDateInput.value = ''
+    repeatDateSelection.value = new Set()
+    const _now = new Date()
+    repeatDateView.value = { y: _now.getFullYear(), m: _now.getMonth() }
     err.value = ''
     uploadErr.value = ''
     localTaskId.value = t?.id ?? crypto.randomUUID()
@@ -402,16 +406,71 @@ function toggleWeekday(wd: number) {
   else repeatWeekdays.value.push(wd)
 }
 
-/** 指定日期：把输入框日期加入列表（升序去重） */
-function addRepeatDate() {
-  const d = repeatDateInput.value
-  if (!d) return
-  if (!repeatDates.value.includes(d)) repeatDates.value = [...repeatDates.value, d].sort()
-  repeatDateInput.value = ''
+/** 指定日期：月历 42 格（周日起始），含上月/本月/下月补位格 */
+const repeatCalendarCells = computed(() => {
+  const { y, m } = repeatDateView.value
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const first = new Date(y, m, 1)
+  const startOffset = first.getDay()
+  const cells: string[] = []
+  for (let i = 0; i < 42; i++) {
+    const dt = new Date(y, m, 1 - startOffset + i)
+    cells.push(`${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}`)
+  }
+  return cells
+})
+/** 指定日期：当前查看的月份键（YYYY-MM） */
+const repeatDateMonthKey = computed(() => {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${repeatDateView.value.y}-${pad(repeatDateView.value.m + 1)}`
+})
+/** 指定日期：某格是否属于当前查看的月份 */
+function repeatDateInMonth(d: string): boolean {
+  return d.startsWith(repeatDateMonthKey.value)
+}
+/** 指定日期：某天是否在本次勾选集合中 */
+function repeatDateIsSelected(d: string): boolean {
+  return repeatDateSelection.value.has(d)
+}
+/** 指定日期：某天是否已确认加入列表 */
+function repeatDateIsConfirmed(d: string): boolean {
+  return repeatDates.value.includes(d)
+}
+/** 指定日期：月历格子的样式类 */
+function repeatDateCellClass(d: string): string {
+  if (!repeatDateInMonth(d)) return 'invisible'
+  if (d < todayKey()) return 'text-slate-300 opacity-40'
+  if (repeatDateIsSelected(d) || repeatDateIsConfirmed(d)) {
+    return 'bg-amber-100 border-amber-300 text-amber-800 font-medium'
+  }
+  return 'text-slate-600 border-slate-200 hover:bg-amber-50 hover:border-amber-300'
+}
+/** 指定日期：勾选/取消月历中的某天（待「添加选中」一次性提交） */
+function toggleRepeatDate(d: string) {
+  const s = new Set(repeatDateSelection.value)
+  if (s.has(d)) s.delete(d)
+  else s.add(d)
+  repeatDateSelection.value = s
+}
+/** 指定日期：把本次勾选的全部日期一次性加入列表（升序去重） */
+function addRepeatDates() {
+  if (!repeatDateSelection.value.size) return
+  const merged = [...new Set([...repeatDates.value, ...repeatDateSelection.value])].sort()
+  repeatDates.value = merged
+  repeatDateSelection.value = new Set()
 }
 /** 指定日期：从列表移除某天 */
 function removeRepeatDate(d: string) {
   repeatDates.value = repeatDates.value.filter((x) => x !== d)
+}
+/** 月历翻页（跨年自动进位/借位） */
+function repeatDatePrevMonth() {
+  const { y, m } = repeatDateView.value
+  repeatDateView.value = m === 0 ? { y: y - 1, m: 11 } : { y, m: m - 1 }
+}
+function repeatDateNextMonth() {
+  const { y, m } = repeatDateView.value
+  repeatDateView.value = m === 11 ? { y: y + 1, m: 0 } : { y, m: m + 1 }
 }
 
 /** BUG-30: 校验开始/截止/提醒时间的先后关系，返回错误文案或 null */
@@ -682,26 +741,50 @@ onUnmounted(() => {
               <input v-model="repeatEndAfter" type="date" class="w-full border rounded-lg px-2 py-1.5 text-sm" />
             </div>
             <div v-if="repeatType === 'dates'" class="col-span-2">
-              <label class="text-[11px] text-slate-500 block mb-0.5">指定日期（每个日期各出现一次，只出现一次）</label>
-              <div class="flex items-center gap-2">
-                <input v-model="repeatDateInput" type="date" :min="todayKey()" class="w-full min-w-0 border rounded-lg px-2 py-1.5 text-sm" />
+              <label class="text-[11px] text-slate-500 block mb-0.5">指定日期（可勾选多个日期，点「添加选中」一次性保存）</label>
+              <!-- 月历多选：勾选多个日期后一次性加入并保存 -->
+              <div class="rounded-lg border border-slate-200 bg-slate-50/60 p-2">
+                <div class="flex items-center justify-between mb-1.5">
+                  <button type="button" class="w-7 h-7 rounded-md text-slate-500 hover:bg-slate-200 text-sm leading-none" title="上一月" @click="repeatDatePrevMonth">‹</button>
+                  <span class="text-xs font-medium text-slate-700">{{ repeatDateView.y }} 年 {{ repeatDateView.m + 1 }} 月</span>
+                  <button type="button" class="w-7 h-7 rounded-md text-slate-500 hover:bg-slate-200 text-sm leading-none" title="下一月" @click="repeatDateNextMonth">›</button>
+                </div>
+                <div class="grid grid-cols-7 gap-0.5 text-center">
+                  <span v-for="wd in WEEKDAY_SHORT" :key="wd" class="text-[10px] text-slate-400 py-0.5">{{ wd }}</span>
+                  <button
+                    v-for="(d, i) in repeatCalendarCells"
+                    :key="i"
+                    type="button"
+                    class="h-7 rounded-md text-[11px] border transition disabled:cursor-not-allowed"
+                    :class="repeatDateCellClass(d)"
+                    :disabled="d < todayKey()"
+                    :title="d"
+                    @click="toggleRepeatDate(d)"
+                  >
+                    {{ Number(d.slice(8, 10)) }}
+                  </button>
+                </div>
+              </div>
+              <div class="mt-2 flex items-center justify-between gap-2">
+                <span v-if="repeatDateSelection.size" class="text-[11px] text-amber-600 font-medium">已勾选 {{ repeatDateSelection.size }} 天</span>
+                <span v-else class="text-[11px] text-slate-400">勾选多个日期后，点「添加选中」一次性保存</span>
                 <button
                   type="button"
                   class="shrink-0 px-3 py-1.5 rounded-lg text-xs text-white bg-brand hover:bg-brand-dark disabled:opacity-50"
-                  :disabled="!repeatDateInput"
-                  @click="addRepeatDate"
+                  :disabled="!repeatDateSelection.size"
+                  @click="addRepeatDates"
                 >
-                  添加
+                  添加选中{{ repeatDateSelection.size ? `（${repeatDateSelection.size}）` : '' }}
                 </button>
               </div>
               <div v-if="repeatDates.length" class="mt-2 flex flex-wrap gap-1.5">
                 <span
                   v-for="d in repeatDates"
                   :key="d"
-                  class="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-600"
+                  class="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800"
                 >
                   {{ d }}
-                  <button type="button" class="text-slate-300 hover:text-red-500" title="移除该日期" @click="removeRepeatDate(d)">×</button>
+                  <button type="button" class="text-amber-400 hover:text-red-500" title="移除该日期" @click="removeRepeatDate(d)">×</button>
                 </span>
               </div>
               <p v-else class="mt-1 text-[11px] text-slate-400">请至少添加一个日期</p>

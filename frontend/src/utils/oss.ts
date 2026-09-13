@@ -307,6 +307,9 @@ export const paths = {
   meta: (username: string, projectId: string) => `users/${username}/projects/${projectId}/meta.json`,
   tasks: (username: string, projectId: string) => `users/${username}/projects/${projectId}/tasks.json`,
   trash: (username: string, projectId: string) => `users/${username}/projects/${projectId}/trash.json`,
+  /** 回收站按月分片：trash/{YYYY-MM}.json（性能优化，日常只碰当月小文件；旧 trash.json 为迁移源） */
+  trashShard: (username: string, projectId: string, month: string) => `users/${username}/projects/${projectId}/trash/${month}.json`,
+  trashShardPrefix: (username: string, projectId: string) => `users/${username}/projects/${projectId}/trash/`,
   repeats: (username: string, projectId: string) => `users/${username}/projects/${projectId}/repeats.json`,
   /** 隐私日记命名空间（独立于任务数据）：所有对象均为密文 */
   diary: (username: string) => `users/${username}/diary/`,

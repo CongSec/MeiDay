@@ -8,14 +8,14 @@
         <!-- 单条删除：默认隐藏，悬停显示在消息框左侧（不占用消息框宽度）；回顾只读时不显示 -->
         <DiaryDeleteButton v-if="!readonly" floating @confirm="$emit('delete', message.id)" />
 
-        <!-- 文本：微信「我」风格，品牌色气泡 -->
+        <!-- 文本：微信「我」风格，绿色气泡 -->
         <div v-if="message.type === 'text'" class="relative">
           <div
-            class="rounded-2xl rounded-tr-sm bg-brand text-white shadow px-3.5 py-2.5 text-[15px] leading-relaxed break-words"
+            class="rounded-2xl rounded-tr-sm bg-[#95EC69] text-slate-900 shadow px-3.5 py-2.5 text-[15px] leading-relaxed break-words"
           >
             <span
               v-if="message.appended"
-              class="mr-1.5 inline-block align-middle leading-none text-[10px] font-medium text-white/90 bg-white/20 border border-white/25 rounded px-1 py-px"
+              class="mr-1.5 inline-block align-middle leading-none text-[10px] font-medium text-green-700 bg-white/70 border border-green-600/30 rounded px-1 py-px"
             >追加</span>
             <span class="whitespace-pre-wrap break-words">{{ (message.text ?? '').trim() }}</span>
           </div>
@@ -59,7 +59,7 @@
           </div>
           <div class="relative">
             <div class="rounded-2xl rounded-tr-sm bg-white shadow px-3 py-2.5 flex items-center gap-2">
-              <span class="w-9 h-9 rounded-lg bg-brand/10 text-brand flex items-center justify-center shrink-0">
+              <span class="w-9 h-9 rounded-lg bg-green-400/20 text-green-600 flex items-center justify-center shrink-0">
                 <AppIcon name="mic" :size="18" />
               </span>
               <audio :src="url || undefined" controls preload="metadata" class="h-9 w-52 max-w-[180px]" />
@@ -81,7 +81,7 @@
               rel="noopener"
               class="flex items-center gap-3 rounded-2xl rounded-tr-sm bg-white shadow px-3.5 py-3 hover:bg-slate-50"
             >
-              <span class="w-9 h-9 rounded-lg bg-brand/10 text-brand flex items-center justify-center shrink-0">
+              <span class="w-9 h-9 rounded-lg bg-green-400/20 text-green-600 flex items-center justify-center shrink-0">
                 <AppIcon name="document" :size="18" />
               </span>
               <span class="min-w-0">

@@ -29,9 +29,12 @@ function isCandidateVisibleOn(c: TodayCandidate, date: string): boolean {
   const startDay = c.startTime ? dateKeyOf(c.startTime) : null
   const endDay = c.endTime ? dateKeyOf(c.endTime) : null
   const remindOnDate = !!c.reminderTime && dateKeyOf(c.reminderTime) === date
-  if (startDay === null && endDay === null) return remindOnDate
+  // 提醒时间已过（今天早些时候 / 过去某天）：未完成任务当天仍显示，直到完成为止
+  // （子任务与主任务共用同一核心逻辑，子任务提醒已过同样会把任务拉回今日视图）
+  const remindPassed = !!c.reminderTime && dateKeyOf(c.reminderTime) < date
+  if (startDay === null && endDay === null) return remindOnDate || remindPassed
   const inRange = (startDay === null || date >= startDay) && (endDay === null || date <= endDay)
-  return inRange || remindOnDate
+  return inRange || remindOnDate || remindPassed
 }
 
 /** 子任务是否会在某天被今日视图显示（子任务无重复规则）。
@@ -120,4 +123,14 @@ export function collectFutureVisibleTasks(
       return true
     })
     .sort((a, b) => (a.date || '').localeCompare(b.date || ''))
+}
+
+/** 重复任务在 date 当天是否「活跃」（首次出现日已到且当天是重复日）：
+ *  项目视图用它过滤——未到首次出现日 / 非重复日的重复任务不在项目列表显示，
+ *  只进今日视图的「未来任务」区；普通任务与老模型重复任务（无 rule.start）恒为 true。 */
+export function isRepeatTaskActiveOn(t: Task, date: string): boolean {
+  const rule = t.repeat
+  if (!rule || !isNewStyleRepeat(rule) || !rule.start) return true
+  if (rule.endAfter && date > rule.endAfter) return false
+  return date >= rule.start && isRepeatDay(rule, rule.start, date)
 }

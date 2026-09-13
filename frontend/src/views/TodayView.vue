@@ -13,7 +13,7 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import AppIcon from '@/components/AppIcon.vue'
 import { dateKeyOf, nowIso, toLocalInput } from '@/utils/time'
 import { collectFutureVisibleTasks, isTaskVisibleToday } from '@/utils/todayFilter'
-import { UNCATEGORIZED, type Subtask, type Task } from '@/types'
+import type { Subtask, Task } from '@/types'
 import { useSync } from '@/composables/useSync'
 import { useNow } from '@/composables/useNow'
 
@@ -45,17 +45,17 @@ onMounted(async () => {
     mobileActions.title = MOBILE_TITLE
   }
   if (!projects.loaded) await projects.load()
-  // 先从本地 IDB 恢复缓存（不访问 OSS）判断哪些项目今日有任务；未分类(today.json)一并纳入。
+  // 先从本地 IDB 恢复缓存（不访问 OSS）判断哪些项目今日有任务。
   // 本地缓存不完整（全新设备/首次进入）时，无法判断哪些项目今日有任务：必须全量加载
   // 所有项目的任务文件（渐进分批），否则今日视图首次进入为空，只有手动点开项目才拉取
   // 数据（跨设备新增的今日任务也会一直不出现）。
-  // 已有完整缓存时只刷「今日相关」项目 + 未分类，避免重复进入时全量下载几百个项目的
+  // 已有完整缓存时只刷「今日相关」项目，避免重复进入时全量下载几百个项目的
   // tasks/trash/repeats 数据包（OSS 请求/内存风暴）。
-  const allIds = [...projects.projects.map((p) => p.id), UNCATEGORIZED]
+  const allIds = [...projects.projects.map((p) => p.id)]
   const cachedIds = await tasks.loadFromIdb(allIds)
   const fullyCached = allIds.every((id) => cachedIds.includes(id))
   const todayIds = tasks.todayRelevantProjectIds(allIds)
-  const toLoad = fullyCached ? [...new Set([UNCATEGORIZED, ...todayIds])] : allIds
+  const toLoad = fullyCached ? [...new Set([...todayIds])] : allIds
   await tasks.loadAllProgressive(toLoad)
 })
 onUnmounted(() => {
@@ -269,127 +269,133 @@ async function confirmDelete() {
 </script>
 
 <template>
-  <div class="p-4 sm:p-6 max-w-3xl mx-auto">
-    <div v-if="!auth.hasCreds" class="py-16 text-center">
-      <div class="mx-auto w-16 h-16 rounded-2xl bg-white border border-line shadow-card flex items-center justify-center text-slate-300"><AppIcon name="box" :size="30" /></div>
-      <div class="mt-4 text-base font-medium text-slate-700">还没有配置存储和邮箱</div>
-      <div class="mt-1 text-sm text-slate-400">配置后即可开始使用 OSS 存储与离线邮箱提醒</div>
-      <button
-        class="mt-6 px-5 py-2.5 rounded-lg bg-brand text-white text-sm font-medium hover:bg-brand-dark"
-        @click="router.push('/settings')"
-      >
-        去配置
-      </button>
-    </div>
-
-    <template v-else>
-      <!-- 顶部信息带：日期标题 + 同步（桌面端，新建任务统一在右下角悬浮按钮） -->
-      <div class="hidden lg:flex items-center justify-between">
-        <div class="flex items-center gap-3">
-          <span class="w-10 h-10 rounded-xl bg-white border border-line shadow-card flex items-center justify-center text-brand">
-            <AppIcon name="calendar" :size="20" />
-          </span>
-          <div>
-            <h1 class="text-xl font-bold text-slate-800 leading-tight">今日任务</h1>
-            <div class="text-xs text-slate-400 mt-0.5">{{ today }}</div>
+  <div class="relative min-h-full p-4 sm:p-6">
+    <!-- 全宽暖色渐变背景层：铺满整个内容区（含侧边留白），任务框外也自然延续，避免“截断” -->
+    <div class="absolute inset-0 bg-gradient-to-b from-amber-100/70 via-amber-50/40 to-amber-50/10 pointer-events-none" aria-hidden="true"></div>
+    <div class="relative max-w-3xl mx-auto">
+      <div v-if="!auth.hasCreds" class="py-16 text-center">
+        <div class="mx-auto w-16 h-16 rounded-2xl bg-white border border-line shadow-card flex items-center justify-center text-slate-300"><AppIcon name="box" :size="30" /></div>
+        <div class="mt-4 text-base font-medium text-slate-700">还没有配置存储和邮箱</div>
+        <div class="mt-1 text-sm text-slate-400">配置后即可开始使用 OSS 存储与离线邮箱提醒</div>
+        <button
+          class="mt-6 px-5 py-2.5 rounded-lg bg-brand text-white text-sm font-medium hover:bg-brand-dark"
+          @click="router.push('/settings')"
+        >
+          去配置
+        </button>
+      </div>
+  
+      <template v-else>
+        <!-- 顶部信息带：日期标题 + 同步（桌面端，新建任务统一在右下角悬浮按钮） -->
+        <div class="hidden lg:flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <span class="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-400 to-orange-500 shadow-card flex items-center justify-center text-white">
+              <AppIcon name="calendar" :size="20" />
+            </span>
+            <div>
+              <h1 class="text-xl font-bold text-slate-800 leading-tight">今日任务</h1>
+              <div class="text-xs text-slate-400 mt-0.5">{{ today }}</div>
+            </div>
+          </div>
+          <button
+            class="w-9 h-9 flex items-center justify-center rounded-lg border border-line bg-white text-slate-500 hover:bg-surface-2 active:bg-slate-200 disabled:opacity-50 btn-press"
+            title="同步刷新"
+            :disabled="syncing"
+            @click="syncNow"
+          >
+            <AppIcon name="refresh" :size="16" :class="syncing ? 'animate-spin' : ''" />
+          </button>
+        </div>
+  
+        <!-- 今日任务进度条：完成 / 未完成百分比 -->
+        <div class="mt-2 lg:mt-3 flex items-center gap-2">
+          <div class="flex-1 h-1.5 rounded-full bg-amber-100 overflow-hidden">
+            <div
+              class="h-full rounded-full transition-all duration-300 bg-gradient-to-r from-amber-400 to-orange-500"
+              :style="{ width: todayPct + '%' }"
+            />
+          </div>
+          <span class="text-[11px] text-amber-600 tabular-nums shrink-0 font-medium">{{ todayDone }}/{{ filtered.length }} {{ todayPct }}%</span>
+        </div>
+  
+        <div class="mt-4">
+          <VueDraggable v-model="dragList" v-bind="dragOptions" item-key="id" class="space-y-2" @start="onDragStart" @end="onDragEnd">
+            <TaskCard
+              v-for="t in dragList"
+              :key="t.id"
+              :task="t"
+              :project="projectOf(t.projectId)"
+              warm
+              @edit="openEdit"
+              @toggle="onToggle"
+              @add-subtask="onAddSubtask"
+              @edit-subtask="onEditSubtask"
+              @toggle-subtask="onToggleSubtask"
+              @remove-subtask="onRemoveSubtask"
+              @delete="onDelete"
+            />
+          </VueDraggable>
+          <div v-if="!dragList.length" class="py-16 flex flex-col items-center text-center">
+            <span class="w-14 h-14 rounded-2xl bg-gradient-to-br from-amber-100 to-orange-100 border border-amber-200 flex items-center justify-center text-amber-500">
+              <AppIcon name="calendar" :size="26" />
+            </span>
+            <div class="mt-3 text-sm font-medium text-slate-500">今天没有任务</div>
+            <div class="mt-1 text-xs text-slate-400">点击右下角圆形按钮，开始今天的第一项任务</div>
           </div>
         </div>
-        <button
-          class="w-9 h-9 flex items-center justify-center rounded-lg border border-line bg-white text-slate-500 hover:bg-surface-2 active:bg-slate-200 disabled:opacity-50 btn-press"
-          title="同步刷新"
-          :disabled="syncing"
-          @click="syncNow"
-        >
-          <AppIcon name="refresh" :size="16" :class="syncing ? 'animate-spin' : ''" />
-        </button>
-      </div>
-
-      <!-- 今日任务进度条：完成 / 未完成百分比 -->
-      <div class="mt-2 lg:mt-3 flex items-center gap-2">
-        <div class="flex-1 h-1.5 rounded-full bg-slate-100 overflow-hidden">
-          <div
-            class="h-full rounded-full transition-all duration-300 bg-brand"
-            :style="{ width: todayPct + '%' }"
-          />
+  
+        <!-- 未来任务：可折叠分组（默认收起），放在已完成下方；只显示未来 30 天内会被今日视图显示的、且今天未在今日任务视图显示的任务 -->
+        <div v-if="futureTasks.length" class="mt-5 border-t border-amber-100 pt-3">
+          <button
+            class="w-full flex items-center justify-between py-1.5 text-sm font-medium text-amber-700 hover:text-amber-800 btn-press"
+            @click="futureOpen = !futureOpen"
+          >
+            <span class="flex items-center gap-2">
+              <AppIcon name="calendarFuture" :size="16" class="text-amber-500" />
+              未来任务
+              <span class="text-[11px] font-normal px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-600">{{ futureTasks.length }}</span>
+            </span>
+            <span class="text-xs text-amber-500/80 flex items-center gap-1">
+              {{ futureOpen ? '收起' : '展开' }}
+              <AppIcon :name="futureOpen ? 'chevron-up' : 'chevron-down'" :size="13" />
+            </span>
+          </button>
+          <div v-if="futureOpen" class="mt-1.5 space-y-2">
+            <TaskCard
+              v-for="ft in futureTasks"
+              :key="ft.task.id"
+              :task="ft.task"
+              :project="projectOf(ft.task.projectId)"
+              future
+              warm
+              @edit="openEdit"
+              @delete="onFutureDelete"
+            />
+          </div>
         </div>
-        <span class="text-[11px] text-slate-400 tabular-nums shrink-0">{{ todayDone }}/{{ filtered.length }} {{ todayPct }}%</span>
-      </div>
-
-      <div class="mt-4">
-        <VueDraggable v-model="dragList" v-bind="dragOptions" item-key="id" class="space-y-2" @start="onDragStart" @end="onDragEnd">
-          <TaskCard
-            v-for="t in dragList"
-            :key="t.id"
-            :task="t"
-            :project="projectOf(t.projectId)"
-            @edit="openEdit"
-            @toggle="onToggle"
-            @add-subtask="onAddSubtask"
-            @edit-subtask="onEditSubtask"
-            @toggle-subtask="onToggleSubtask"
-            @remove-subtask="onRemoveSubtask"
-            @delete="onDelete"
-          />
-        </VueDraggable>
-        <div v-if="!dragList.length" class="py-16 flex flex-col items-center text-center">
-          <span class="w-14 h-14 rounded-2xl bg-white border border-line shadow-card flex items-center justify-center text-slate-300">
-            <AppIcon name="calendar" :size="26" />
-          </span>
-          <div class="mt-3 text-sm font-medium text-slate-500">今天没有任务</div>
-          <div class="mt-1 text-xs text-slate-400">点击右下角圆形按钮，开始今天的第一项任务</div>
-        </div>
-      </div>
-
-      <!-- 未来任务：可折叠分组（默认收起），放在已完成下方；只显示未来 30 天内会被今日视图显示的、且今天未在今日任务视图显示的任务 -->
-      <div v-if="futureTasks.length" class="mt-5 border-t border-slate-100 pt-3">
-        <button
-          class="w-full flex items-center justify-between py-1.5 text-sm font-medium text-slate-500 hover:text-slate-700 btn-press"
-          @click="futureOpen = !futureOpen"
-        >
-          <span class="flex items-center gap-2">
-            <AppIcon name="calendarFuture" :size="16" class="text-slate-400" />
-            未来任务
-            <span class="text-[11px] font-normal px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500">{{ futureTasks.length }}</span>
-          </span>
-          <span class="text-xs text-slate-400 flex items-center gap-1">
-            {{ futureOpen ? '收起' : '展开' }}
-            <AppIcon :name="futureOpen ? 'chevron-up' : 'chevron-down'" :size="13" />
-          </span>
-        </button>
-        <div v-if="futureOpen" class="mt-1.5 space-y-2">
-          <TaskCard
-            v-for="ft in futureTasks"
-            :key="ft.task.id"
-            :task="ft.task"
-            :project="projectOf(ft.task.projectId)"
-            future
-            @edit="openEdit"
-            @delete="onFutureDelete"
-          />
-        </div>
-      </div>
-    </template>
-
-    <TaskModal
-      v-model:open="modalOpen"
-      :task="editing"
-      :initial-start="defaultStart"
-      :subtask-mode="!!subtaskParent"
-      :subtask="editingSubtask"
-      :parent-task="subtaskParent"
-      :template-master-id="templateMasterId"
-      @saved="onSaved"
-      @saved-subtask="onSavedSubtask"
-      @delete="onDelete"
-    />
-
-    <ConfirmDialog
-      :open="!!deleteTarget"
-      title="移入回收站"
-      message="确定将该任务移入回收站吗？可在回收站恢复。"
-      confirm-text="移入回收站"
-      @confirm="confirmDelete"
-      @cancel="deleteTarget = null"
-    />
+      </template>
+  
+      <TaskModal
+        v-model:open="modalOpen"
+        :task="editing"
+        :initial-start="defaultStart"
+        :subtask-mode="!!subtaskParent"
+        :subtask="editingSubtask"
+        :parent-task="subtaskParent"
+        :template-master-id="templateMasterId"
+        @saved="onSaved"
+        @saved-subtask="onSavedSubtask"
+        @delete="onDelete"
+      />
+  
+      <ConfirmDialog
+        :open="!!deleteTarget"
+        title="移入回收站"
+        message="确定将该任务移入回收站吗？可在回收站恢复。"
+        confirm-text="移入回收站"
+        @confirm="confirmDelete"
+        @cancel="deleteTarget = null"
+      />
+    </div>
   </div>
 </template>

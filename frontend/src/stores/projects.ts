@@ -360,13 +360,13 @@ export const useProjectsStore = defineStore('projects', {
       }
       if (existing) {
         // 重名：不新建项目，把该项目的任务（含回收站）合并进同名现有项目，避免出现重名项目
-        tasks.mergeProjectInto(id, existing.id)
+        await tasks.mergeProjectInto(id, existing.id)
         this.deletedProjects = (this.deletedProjects ?? []).filter((x) => x.id !== id)
       } else {
         // 正常恢复：原 id 原样放回活跃列表，任务从回收站还原为活跃
         this.projects.push({ id: dp.id, name: dp.name, color: dp.color, icon: dp.icon })
         this.deletedProjects = (this.deletedProjects ?? []).filter((x) => x.id !== id)
-        tasks.restoreProjectTasks(id)
+        await tasks.restoreProjectTasks(id)
       }
 
       const saves: Promise<boolean>[] = [

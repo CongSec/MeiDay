@@ -11,12 +11,18 @@ import { deleteAttachments, downloadAttachment } from '@/utils/attachments'
 import { createOssClient } from '@/utils/oss'
 import { formatTodayTitle, nowIso, todayKey } from '@/utils/time'
 import { logAudit } from '@/utils/audit'
-import { UNCATEGORIZED, type AttachmentMeta, type DeletedProject, type Task } from '@/types'
+import { UNCATEGORIZED, type AttachmentMeta, type DeletedProject, type Project, type Task } from '@/types'
 
 const auth = useAuthStore()
 const projects = useProjectsStore()
 const tasks = useTasksStore()
 const ui = useUiStore()
+
+/** 回收站同时支持活跃项目与已删除项目：导出/展示时都必须能取到项目名称 */
+function projectById(id: string): Project | DeletedProject | undefined {
+  if (!id || id === UNCATEGORIZED) return undefined
+  return projects.byId(id) ?? (projects.deletedProjects ?? []).find((x) => x.id === id)
+}
 
 const mobileActions = inject<{ title: string } | null>('mobile-actions', null)
 
@@ -50,6 +56,13 @@ function isExpanded(key: string) {
 const loading = ref<Record<string, boolean>>({})
 const loadError = ref<Record<string, boolean>>({})
 
+/** 每个项目默认展示的回收站记录条数（最近 100 条）；更早记录通过「加载更早」追加 */
+const TRASH_VISIBLE = 100
+/** 每个项目当前已展示的条数上限 */
+const visibleLimit = ref<Record<string, number>>({})
+/** 「加载更早」进行中（按项目） */
+const loadingMore = ref<Record<string, boolean>>({})
+
 /** 展开项目时只打开当前项目的数据包：仅加载该项目回收站文件，其余保持未加载 */
 async function openGroup(key: string) {
   if (tasks.trashLoaded.includes(key) || loading.value[key]) return
@@ -75,6 +88,27 @@ function toggleGroup(key: string) {
     void openGroup(key)
   } else {
     tasks.unpinViewProject(key)
+  }
+}
+
+/** 「加载更早」：先把已加载但未展示的记录就地展示更多；展示完后再拉取更早分片 */
+async function loadMoreGroup(key: string) {
+  if (loadingMore.value[key]) return
+  const arr = tasks.trash[key] ?? []
+  const limit = visibleLimit.value[key] ?? TRASH_VISIBLE
+  if (arr.length > limit) {
+    visibleLimit.value = { ...visibleLimit.value, [key]: limit + TRASH_VISIBLE }
+    return
+  }
+  loadingMore.value = { ...loadingMore.value, [key]: true }
+  try {
+    const got = await tasks.loadMoreTrash(key)
+    visibleLimit.value = { ...visibleLimit.value, [key]: limit + TRASH_VISIBLE }
+    if (!got) ui.toast('已加载全部回收站记录')
+  } catch (e) {
+    ui.toast((e as Error).message || '加载更早记录失败，请检查网络或 OSS 配置', 'error')
+  } finally {
+    loadingMore.value = { ...loadingMore.value, [key]: false }
   }
 }
 
@@ -105,6 +139,8 @@ watch(
     scanLatest.value = {}
     scanHasUncategorized.value = false
     page.value = 1
+    visibleLimit.value = {}
+    loadingMore.value = {}
     if (c) {
       loadExpanded()
       await loadTrashBase()
@@ -131,6 +167,8 @@ async function scanTrash() {
     }
     scanned.value = true
     page.value = 1
+    visibleLimit.value = {}
+    loadingMore.value = {}
     collapseAll()
     ui.toast('回收站已扫描')
     logAudit('扫描回收站', `发现 ${scanIds.value.length} 个项目的回收站文件`)
@@ -150,6 +188,8 @@ interface TrashGroup {
   tasks: Task[]
   /** 该项目的回收站文件是否已加载 */
   loaded: boolean
+  /** 是否还有更早记录可加载（已加载但未展示 / OSS 上还有更早分片） */
+  hasMore: boolean
   /** 排序键：回收站最新变动时间（ISO），用于项目名倒序；缺失时为空 */
   updatedAt: string
 }
@@ -168,6 +208,8 @@ const projectGroups = computed<TrashGroup[]>(() => {
     if (seen.has(key)) return
     seen.add(key)
     const arr = (tasks.trash[key] ?? []).slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    // 默认只展示最近 100 条；更早的通过「加载更早」追加
+    const limit = visibleLimit.value[key] ?? TRASH_VISIBLE
     // 排序键：优先扫描到的回收站文件最新变动时间；已删除项目回退到删除时间；
     // 再回退到本地已加载任务的最新时间；全无则为空（排最后，按名称正序）
     const updatedAt =
@@ -179,8 +221,9 @@ const projectGroups = computed<TrashGroup[]>(() => {
       label,
       deleted,
       deletedProject,
-      tasks: arr,
+      tasks: arr.slice(0, limit),
       loaded: tasks.trashLoaded.includes(key),
+      hasMore: arr.length > limit || !!tasks.trashHasMore[key],
       updatedAt,
     })
   }
@@ -271,7 +314,7 @@ const clearOpen = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 
 /** 收集全部回收站数据（含项目名）：加载所有项目的回收站文件，返回便于导出/清空的结构 */
-async function collectAllTrash(): Promise<{ projectId: string; name: string; tasks: Task[] }[]> {
+async function collectAllTrash(): Promise<{ projectId: string; name: string; tasks: Task[]; project?: Project | DeletedProject }[]> {
   if (!projects.loaded) await projects.load()
   const res = await tasks.listTrashProjects()
   const pids = new Set<string>(res.ids)
@@ -279,7 +322,7 @@ async function collectAllTrash(): Promise<{ projectId: string; name: string; tas
   for (const pid of Object.keys(tasks.trash)) if ((tasks.trash[pid]?.length ?? 0) > 0) pids.add(pid)
   if (!res.listed) for (const p of projects.projects) pids.add(p.id)
   pids.add(UNCATEGORIZED)
-  const out: { projectId: string; name: string; tasks: Task[] }[] = []
+  const out: { projectId: string; name: string; tasks: Task[]; project?: Project | DeletedProject }[] = []
   for (const pid of pids) {
     if (!tasks.trashLoaded.includes(pid)) {
       try {
@@ -288,12 +331,24 @@ async function collectAllTrash(): Promise<{ projectId: string; name: string; tas
         continue
       }
     }
+    // 导出/清空需要完整数据：把更早分片也全部拉进内存（防御性上限 600 个月）
+    let guard = 0
+    while (tasks.trashHasMore[pid] && guard < 600) {
+      try {
+        if (!(await tasks.loadMoreTrash(pid))) break
+      } catch {
+        break
+      }
+      guard += 1
+    }
     const arr = tasks.trash[pid] ?? []
     if (!arr.length) continue
+    const meta = projectById(pid)
     out.push({
       projectId: pid,
-      name: pid === UNCATEGORIZED ? '无分类' : projects.byId(pid)?.name || `未知项目（${pid.slice(0, 8)}…）`,
+      name: pid === UNCATEGORIZED ? '无分类' : meta?.name || `未知项目（${pid.slice(0, 8)}…）`,
       tasks: arr,
+      project: pid === UNCATEGORIZED || !meta ? undefined : { ...meta },
     })
   }
   return out
@@ -412,11 +467,38 @@ async function onImportFile(e: Event) {
     let touched = 0
     let attOk = 0
     let attFailed = 0
+    let profileChanged = false
     for (const p of data.projects) {
       const pid = typeof p?.projectId === 'string' && p.projectId ? p.projectId : UNCATEGORIZED
       if (!Array.isArray(p.tasks)) continue
       const list = (p.tasks as Task[]).filter((t) => t && t.id)
       if (!list.length) continue
+      // 项目名称随备份一起导入：缺失时注册为已删除项目，回收站可显示原名并支持整项目恢复
+      if (pid !== UNCATEGORIZED && !projects.byId(pid)) {
+        const meta = (p as { project?: Project | DeletedProject })?.project
+        const exportedName = typeof p.name === 'string' && p.name.trim() ? p.name.trim() : ''
+        const useName =
+          meta?.name ||
+          (exportedName && !exportedName.startsWith('未知项目（') ? exportedName : '') ||
+          '已删除项目'
+        const existing = (projects.deletedProjects ?? []).find((x) => x.id === pid)
+        if (!existing) {
+          projects.deletedProjects = [
+            ...(projects.deletedProjects ?? []),
+            {
+              id: pid,
+              name: useName,
+              color: meta?.color || '#3b82f6',
+              icon: meta?.icon || '📁',
+              deletedAt: (meta as DeletedProject | undefined)?.deletedAt || nowIso(),
+            },
+          ]
+          profileChanged = true
+        } else if (useName !== '已删除项目' && existing.name !== useName) {
+          existing.name = useName
+          profileChanged = true
+        }
+      }
       // 附件：按原 key 把 zip 中的二进制上传回用户 OSS（保持任务 JSON 无需改写）
       if (auth.creds) {
         const metas = collectAttachments(list)
@@ -443,6 +525,7 @@ async function onImportFile(e: Event) {
         count += list.length
       }
     }
+    if (profileChanged && touched > 0) await projects.saveNow()
     if (count > 0) {
       ui.toast(
         attOk || attFailed
@@ -471,19 +554,23 @@ async function clearTrash() {
     }
     let cleared = 0
     let deletedAtts = 0
+    const clearedPids = new Set<string>()
     for (const p of all) {
       const atts = collectAttachments(p.tasks)
-      tasks.trash[p.projectId] = []
-      const ok = await tasks.saveTrashNow(p.projectId)
-      if (ok) {
-        cleared += p.tasks.length
-        // 落盘成功后再清理附件二进制，避免保存失败导致元数据指向已删除文件
-        if (atts.length && auth.creds) {
-          await deleteAttachments(auth.creds, atts)
-          deletedAtts += atts.length
-        }
+      // 删除物理分片文件（含旧版 trash.json / today_trash.json），项目名随之从扫描结果消失
+      await tasks.purgeTrashFiles(p.projectId)
+      cleared += p.tasks.length
+      clearedPids.add(p.projectId)
+      // 清空后再清理附件二进制，避免元数据指向已删除文件
+      if (atts.length && auth.creds) {
+        await deleteAttachments(auth.creds, atts)
+        deletedAtts += atts.length
       }
     }
+    // 本地扫描结果同步移除被清空的项目
+    scanIds.value = scanIds.value.filter((pid) => !clearedPids.has(pid))
+    for (const pid of clearedPids) delete scanLatest.value[pid]
+    if (clearedPids.has(UNCATEGORIZED)) scanHasUncategorized.value = false
     ui.toast(`已清空回收站（${cleared} 条，清理附件 ${deletedAtts} 个）`)
     logAudit('清空回收站', `${cleared} 条，附件 ${deletedAtts} 个`)
   } catch (e) {
@@ -494,7 +581,7 @@ async function clearTrash() {
   }
 }
 
-const projectOf = (id: string) => (id ? projects.byId(id) : undefined)
+const projectOf = (id: string) => projectById(id)
 
 async function restore(t: Task) {
   if (busy.value) return
@@ -659,7 +746,16 @@ async function confirmDelete() {
               永久删除
             </button>
           </div>
-          <div v-if="!loadError[g.key] && !g.tasks.length" class="text-xs text-slate-400 px-0.5">
+          <button
+            v-if="g.hasMore"
+            class="mt-1 w-full py-2 rounded-lg text-xs text-brand border border-brand/30 hover:bg-brand/5 disabled:opacity-60 disabled:cursor-not-allowed"
+            :disabled="loadingMore[g.key]"
+            @click="loadMoreGroup(g.key)"
+          >
+            <AppIcon name="chevron-down" :size="13" class="inline-block -mt-0.5 mr-1" />
+            {{ loadingMore[g.key] ? '加载中…' : '加载更早' }}
+          </button>
+          <div v-if="!loadError[g.key] && !g.tasks.length && !g.hasMore" class="text-xs text-slate-400 px-0.5">
             {{ g.deleted ? '该项目没有任务' : '该项目回收站为空' }}
           </div>
         </template>

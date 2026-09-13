@@ -6,7 +6,6 @@ import { useTasksStore } from '@/stores/tasks'
 import { useStatsStore } from '@/stores/stats'
 import { idbGet, idbPut } from '@/utils/idb'
 import { flushPendingSyncReports } from '@/utils/syncReport'
-import { UNCATEGORIZED } from '@/types'
 
 /**
  * 同步协调轮询：每隔固定间隔向中心服务器查询"总版本号 + 变更列表"，
@@ -53,15 +52,15 @@ async function fullSync(): Promise<boolean> {
   await stats.load()
   // 今日任务跨项目顺序表：独立小文件，随全量同步一并刷新
   await tasks.loadTodayOrder()
-  const projectIds = [...projects.projects.map((p) => p.id), UNCATEGORIZED]
+  const projectIds = [...projects.projects.map((p) => p.id)]
   // 本地缓存不完整（全新设备/首登/缓存被清）时无法判断哪些项目今日有任务：
   // 必须全量同步所有项目，否则即使服务端要求全量，今日视图/侧栏角标仍是空的，
-  // 直到手动点开项目才拉取数据。已有完整缓存时只刷「今日相关」项目 + 未分类，
+  // 直到手动点开项目才拉取数据。已有完整缓存时只刷「今日相关」项目，
   // 避免每次全量同步都下载所有项目（几百个项目时数据包/内存开销巨大）。
   const cachedIds = await tasks.loadFromIdb(projectIds)
   const fullyCached = projectIds.every((id) => cachedIds.includes(id))
   const ids = fullyCached
-    ? [...new Set([UNCATEGORIZED, ...tasks.todayRelevantProjectIds(projectIds)])]
+    ? [...new Set([...tasks.todayRelevantProjectIds(projectIds)])]
     : projectIds
   const failed = await tasks.syncAll(ids)
   return failed === 0
@@ -89,7 +88,7 @@ async function pullChanges(changes: SyncStateItem[]): Promise<boolean> {
           break
         }
         case 'trash': {
-          if (c.project_id) await tasks.loadTrash(c.project_id)
+          if (c.project_id) await tasks.loadTrash(c.project_id, true)
           break
         }
         case 'repeats': {
@@ -149,7 +148,7 @@ async function pollOnce(): Promise<boolean> {
       // 直到手动点开项目才从 OSS 拉取数据。加载成功后才对齐版本游标。
       const projects = useProjectsStore()
       const tasks = useTasksStore()
-      await tasks.loadAllProgressive([...projects.projects.map((p) => p.id), UNCATEGORIZED])
+      await tasks.loadAllProgressive([...projects.projects.map((p) => p.id)])
       await tasks.loadTodayOrder()
       cursor = state.version
     }

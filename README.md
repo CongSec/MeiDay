@@ -26,7 +26,7 @@ OSS Endpoint:datatest.congsec.cn
 
 ### 前后端分离/数据隔离
 
-任务数据不进服务器；后端即使被攻破也只能看到密文和哈希；OSS 对象按 `users/<username>/` 隔离，删除先进回收站，不自动清理。
+任务数据不进服务器；前端在存储桶中,攻击者无任何修改途径,断绝js被篡改修改密码的可能性,后端即使被攻破也只能看到密文和哈希；OSS 对象按 users/<username>/ 隔离，删除先进回收站，不自动清理。
 
 ![image](https://assets.b3logfile.com/siyuan/1714493573033/assets/image-20260829024746-zi5zb1e.png)
 

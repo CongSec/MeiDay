@@ -46,20 +46,44 @@ let materializeChain: Promise<unknown> = Promise.resolve()
 /** 项目加载的 in-flight Promise：ProjectView 的 onMounted 与路由 watch 会同时调用
  *  loadProject，复用同一个请求避免打开项目时重复下载该项目的 tasks/repeats 数据包。 */
 const loadingProjectPromises = new Map<string, Promise<void>>()
-/** 未分类任务存 today.json，分类任务存 projects/{pid}/tasks.json */
+/** 任务文件固定存 projects/{pid}/tasks.json（未分类活跃任务存储 today.json 已下线，所有任务强制归属真实项目） */
 function tasksFilePath(username: string, projectId: string): string {
-  return projectId === UNCATEGORIZED ? paths.today(username) : paths.tasks(username, projectId)
+  return paths.tasks(username, projectId)
 }
-/** 未分类回收站存 today_trash.json，分类回收站存 projects/{pid}/trash.json */
-function trashFilePath(username: string, projectId: string): string {
-  return projectId === UNCATEGORIZED ? paths.todayTrash(username) : paths.trash(username, projectId)
+/** 未分类回收站存 today_trash.json（单文件不分片）；真实项目回收站按月分片存 trash/{YYYY-MM}.json */
+function trashFilePath(username: string, projectId: string, month?: string): string {
+  return projectId === UNCATEGORIZED
+    ? paths.todayTrash(username)
+    : month
+      ? paths.trashShard(username, projectId, month)
+      : paths.trash(username, projectId)
 }
-/** IDB 缓存键：任务/回收站均按 用户名 + 项目ID 命名，避免跨账号残留脏数据 */
+/** IDB 缓存键：任务按 用户名 + 项目ID 命名，避免跨账号残留脏数据 */
 function taskCacheKey(username: string, projectId: string): string {
   return `tasks:${username}:${projectId}`
 }
-function trashCacheKey(username: string, projectId: string): string {
-  return `trash:${username}:${projectId}`
+/** 回收站 IDB 缓存键：真实项目带月份后缀（trash:user:pid:YYYY-MM），未分类沿用单键 */
+function trashCacheKey(username: string, projectId: string, month?: string): string {
+  return `trash:${username}:${projectId}${month ? `:${month}` : ''}`
+}
+/** 任务所属回收站分片月份：按 updatedAt 所在月（YYYY-MM）确定归属，写入后不挪片 */
+function monthOfTask(t: Task): string {
+  const m = dateKeyOf(t.updatedAt || '').slice(0, 7)
+  return m && m.length === 7 ? m : monthOfNow()
+}
+function monthOfNow(): string {
+  return dateKeyOf(nowIso()).slice(0, 7)
+}
+/** 上一个自然月（2026-01 -> 2025-12） */
+function prevMonth(month: string): string {
+  const [y, m] = month.split('-').map(Number)
+  const d = new Date(Date.UTC(y, m - 2, 1))
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}`
+}
+/** 回收站分片在 trashLoaded 中的标记键：pid:YYYY-MM */
+function trashShardKey(projectId: string, month: string): string {
+  return `${projectId}:${month}`
 }
 /** 重复模板存放路径（与任务文件一致：未分类 -> today_repeats.json） */
 function repeatsFilePath(username: string, projectId: string): string {
@@ -157,16 +181,21 @@ function filterStaleAcrossProjects(
     (t) => !others.some((o) => o.id === t.id && (o.updatedAt || '').localeCompare(t.updatedAt || '') > 0),
   )
 }
-/** 拉取远端回收站文件；文件不存在时视为空，网络/权限错误向上抛。
- *  带 ETag 条件 GET：远端未变化返回 304 时直接复用本地缓存，避免每次同步都全量
- *  下载 trash.json（回收站随任务归档不断变大，登录/轮询时全量拉取非常浪费）。 */
-async function fetchRemoteTrash(client: OssClient, username: string, projectId: string): Promise<Task[]> {
-  const etagKey = `etag:${username}:${projectId}:trash`
-  const cacheKey = trashCacheKey(username, projectId)
+/** 拉取远端单个回收站文件（真实项目某月分片 / 未分类单文件）；文件不存在时视为空，网络/权限错误向上抛。
+ *  带 ETag 条件 GET：远端未变化返回 304 时直接复用本地缓存，避免每次同步都全量下载
+ *  （回收站按月分片后日常只碰当月 + 上月两个小文件）。 */
+async function fetchRemoteTrashShard(
+  client: OssClient,
+  username: string,
+  projectId: string,
+  month?: string,
+): Promise<Task[]> {
+  const etagKey = `etag:${username}:${projectId}:trash${month ? `:${month}` : ''}`
+  const cacheKey = trashCacheKey(username, projectId, month)
   const etag = await idbGet<string>('kv', etagKey)
   try {
     const res = await client.get(
-      trashFilePath(username, projectId),
+      trashFilePath(username, projectId, month),
       etag ? { headers: { 'If-None-Match': etag } } : undefined,
     )
     if (res.res.status === 304) {
@@ -197,6 +226,97 @@ async function fetchRemoteTrash(client: OssClient, username: string, projectId: 
     }
     throw e
   }
+}
+
+/** 回收站墓碑合并窗口：未分类拉单文件；真实项目拉当月 + 上月分片合并（日常只碰两个小文件），
+ *  更早分片不参与登录/轮询的全量同步，避免回收站历史增长拖慢日常操作。 */
+async function fetchRemoteTrash(client: OssClient, username: string, projectId: string): Promise<Task[]> {
+  if (projectId === UNCATEGORIZED) return fetchRemoteTrashShard(client, username, projectId)
+  const cur = monthOfNow()
+  const prev = prevMonth(cur)
+  const [a, b] = await Promise.all([
+    fetchRemoteTrashShard(client, username, projectId, cur),
+    fetchRemoteTrashShard(client, username, projectId, prev),
+  ])
+  return mergeUnique(a, b)
+}
+
+/** 旧版 projects/{pid}/trash.json 迁移：检测到旧文件且 trash/ 目录内无分片时，按 updatedAt 拆月写入分片，
+ *  全部成功后才删除旧文件；失败/网络异常保留旧文件下次重试。迁移完成标记存 IDB，避免每次打开重复检查。 */
+async function migrateLegacyTrash(client: OssClient, username: string, projectId: string): Promise<void> {
+  const flagKey = `trashMigrated:${username}:${projectId}`
+  // 未分类回收站只有 today_trash.json，不存在旧版 projects//trash.json，跳过旧回收站迁移
+  if (projectId === UNCATEGORIZED) return
+  if (await idbGet<boolean>('kv', flagKey)) return
+  let oldList: Task[] | null = null
+  try {
+    const res = await client.get(paths.trash(username, projectId))
+    if (res.res.status !== 404) {
+      oldList = JSON.parse(res.content.toString()) as Task[]
+      normalizeTasks(oldList)
+    }
+  } catch (e) {
+    const err = e as { code?: string | number; status?: number }
+    if (err.status === 404 || err.code === 'NoSuchKey') {
+      // 旧文件不存在：直接标记完成
+    } else {
+      return // 网络/权限错误：本次跳过，下次再试
+    }
+  }
+  if (oldList === null || !oldList.length) {
+    // 旧文件不存在（或为空残留）：顺手删除空文件后标记完成
+    if (oldList) await client.delete(paths.trash(username, projectId)).catch(() => {})
+    await idbPut('kv', flagKey, true)
+    return
+  }
+  // 按 updatedAt 拆月，把旧文件内容合并进对应分片（分片已存在则合并，避免覆盖新数据）
+  const byMonth = new Map<string, Task[]>()
+  for (const t of oldList) {
+    const m = monthOfTask(t)
+    if (!byMonth.has(m)) byMonth.set(m, [])
+    byMonth.get(m)!.push(t)
+  }
+  for (const [m, tasks] of byMonth) {
+    const remote = await fetchRemoteTrashShard(client, username, projectId, m).catch(() => [] as Task[])
+    const merged = mergeUnique(remote, tasks)
+    const putRes = await client.put(paths.trashShard(username, projectId, m), JSON.stringify(merged))
+    const etag = versionToken(putRes.res.headers as Record<string, unknown>, merged) ?? ''
+    if (etag) await idbPut('kv', `etag:${username}:${projectId}:trash:${m}`, etag)
+    await idbPut('trash', trashCacheKey(username, projectId, m), merged)
+  }
+  await client.delete(paths.trash(username, projectId))
+  await idbPut('kv', flagKey, true)
+}
+
+/** 按月分组回收站任务（YYYY-MM -> tasks） */
+function groupTrashByMonth(list: Task[]): Map<string, Task[]> {
+  const byMonth = new Map<string, Task[]>()
+  for (const t of list) {
+    const m = monthOfTask(t)
+    if (!byMonth.has(m)) byMonth.set(m, [])
+    byMonth.get(m)!.push(t)
+  }
+  return byMonth
+}
+
+/** 枚举某项目 trash/ 目录下已存在的分片月份（升序）；目录不存在返回 [] */
+async function listTrashShardMonths(client: OssClient, username: string, projectId: string): Promise<string[]> {
+  const months = new Set<string>()
+  let marker: string | undefined
+  do {
+    const query: Record<string, string | number> = {
+      prefix: paths.trashShardPrefix(username, projectId),
+      'max-keys': 1000,
+    }
+    if (marker) query.marker = marker
+    const res = await client.list(query as never, {} as never)
+    for (const obj of res.objects ?? []) {
+      const m = /\/trash\/(\d{4}-\d{2})\.json$/.exec(obj.name)
+      if (m) months.add(m[1])
+    }
+    marker = res.isTruncated && res.nextMarker ? res.nextMarker : undefined
+  } while (marker)
+  return [...months].sort()
 }
 function mergeUnique(base: Task[], incoming: Task[]): Task[] {
   const seen = new Set(base.map((t) => t.id))
@@ -232,6 +352,12 @@ export const useTasksStore = defineStore('tasks', {
     repeats: {} as Record<string, RepeatMaster[]>,
     loadedProjects: [] as string[],
     trashLoaded: [] as string[],
+    /** 各项目已合并进内存的回收站分片月份（升序，YYYY-MM；未分类不记录） */
+    trashLoadedMonths: {} as Record<string, string[]>,
+    /** 各项目 OSS 上检测到的回收站分片月份（来自扫描或按需枚举） */
+    trashShardMonths: {} as Record<string, string[]>,
+    /** 各项目是否还有更早分片可加载（驱动「加载更早」按钮显隐） */
+    trashHasMore: {} as Record<string, boolean>,
     repeatsLoaded: [] as string[],
     /** 今日任务跨项目拖拽顺序表（任务 id 全局有序；展示时按「今日可见 + 仍存在」过滤） */
     todayOrder: [] as string[],
@@ -262,6 +388,7 @@ export const useTasksStore = defineStore('tasks', {
   },
   actions: {
     async loadProject(projectId: string) {
+      if (projectId === UNCATEGORIZED) return
       this.touchProject(projectId)
       const auth = useAuthStore()
       if (this.loadedProjects.includes(projectId)) return
@@ -472,33 +599,58 @@ export const useTasksStore = defineStore('tasks', {
       delete this.repeats[projectId]
       this.loadedProjects = this.loadedProjects.filter((x) => x !== projectId)
       this.trashLoaded = this.trashLoaded.filter((x) => x !== projectId)
+      delete this.trashLoadedMonths[projectId]
+      delete this.trashShardMonths[projectId]
+      delete this.trashHasMore[projectId]
       this.repeatsLoaded = this.repeatsLoaded.filter((x) => x !== projectId)
     },
-    /** 拉取回收站任务（独立文件，按需加载） */
-    async loadTrash(projectId: string) {
+    /** 拉取回收站任务（按月分片，按需加载）。
+     *  默认只加载「当月 + 上月」窗口（真实项目）或单文件（未分类），更早记录由「加载更早」按需拉取。
+     *  force=true 用于轮询同步收到 trash 变更时强制刷新最近窗口。 */
+    async loadTrash(projectId: string, force = false) {
       this.touchProject(projectId)
       const auth = useAuthStore()
-      if (this.trashLoaded.includes(projectId)) return
+      if (this.trashLoaded.includes(projectId) && !force) return
       const cached = await idbGet<Task[]>('trash', trashCacheKey(auth.username, projectId))
       if (cached) {
         normalizeTasks(cached)
         this.trash[projectId] = cached
+        if (projectId !== UNCATEGORIZED) {
+          // 缓存里可能含此前「加载更早」拉到的旧月份，一并标记为已加载
+          const months = new Set(cached.map((t) => monthOfTask(t)))
+          this.trashLoadedMonths[projectId] = [...months].sort()
+        }
       }
-      if (!auth.creds) return
+      if (!auth.creds) {
+        if (!this.trashLoaded.includes(projectId)) this.trashLoaded.push(projectId)
+        return
+      }
       try {
         const client = await createOssClient(auth.creds)
-        const etag = await idbGet<string>('kv', `etag:${auth.username}:${projectId}:trash`)
-        const res = await client.get(
-          trashFilePath(auth.username, projectId),
-          etag ? { headers: { 'If-None-Match': etag } } : undefined,
-        )
-        if (res.res.status !== 304) {
-                  const remote = JSON.parse(res.content.toString()) as Task[]
-          normalizeTasks(remote)
-          this.trash[projectId] = remote
-          await idbPut('trash', trashCacheKey(auth.username, projectId), remote)
-          const newEtag = versionToken(res.res.headers as Record<string, unknown>, res.content) ?? ''
-          if (newEtag) await idbPut('kv', `etag:${auth.username}:${projectId}:trash`, newEtag)
+        // 旧版 projects/{pid}/trash.json 先迁移到按月分片（幂等，只做一次）
+        await migrateLegacyTrash(client, auth.username, projectId)
+        const remote = await fetchRemoteTrash(client, auth.username, projectId)
+        if (remote.length) {
+          this.trash[projectId] = mergeUnique(this.trash[projectId] ?? [], remote)
+          await idbPut('trash', trashCacheKey(auth.username, projectId), this.trash[projectId])
+        }
+        if (projectId !== UNCATEGORIZED) {
+          // 刷新分片月份索引：确保未先扫描时「加载更早」按钮也能按需出现
+          try {
+            this.trashShardMonths[projectId] = await listTrashShardMonths(client, auth.username, projectId)
+          } catch {
+            /* 枚举失败保留已有索引 */
+          }
+          const cur = monthOfNow()
+          const prev = prevMonth(cur)
+          const months = new Set((this.trash[projectId] ?? []).map((t) => monthOfTask(t)))
+          // 当月/上月即使为空也标记为已加载窗口，避免 saveTrash 每次重复拉远端
+          months.add(cur)
+          months.add(prev)
+          this.trashLoadedMonths[projectId] = [...months].sort()
+          this.trashHasMore[projectId] = (this.trashShardMonths[projectId] ?? []).some((m) => !months.has(m))
+        } else {
+          this.trashHasMore[projectId] = false
         }
       } catch (e) {
         const err = e as { code?: string | number; status?: number }
@@ -509,12 +661,70 @@ export const useTasksStore = defineStore('tasks', {
           // 服务端回收站文件已不存在：本地回收站缓存作废
           this.trash[projectId] = []
           await idbDel('trash', trashCacheKey(auth.username, projectId))
-          await idbDel('kv', `etag:${auth.username}:${projectId}:trash`)
+          this.trashLoadedMonths[projectId] = []
+          this.trashHasMore[projectId] = false
         } else {
           throw new Error(await enrichOssError(e))
         }
       }
-      this.trashLoaded.push(projectId)
+      if (!this.trashLoaded.includes(projectId)) this.trashLoaded.push(projectId)
+    },
+    /** 「加载更早」：按需拉取更早月份的回收站分片并合并进内存（一次拉一个更早月份），
+     *  返回是否拉到新记录；没有更多分片时置 trashHasMore=false。 */
+    async loadMoreTrash(projectId: string): Promise<boolean> {
+      const auth = useAuthStore()
+      if (projectId === UNCATEGORIZED || !auth.creds || !auth.username) return false
+      const client = await createOssClient(auth.creds)
+      const shards = await listTrashShardMonths(client, auth.username, projectId)
+      this.trashShardMonths[projectId] = shards
+      const loaded = new Set(this.trashLoadedMonths[projectId] ?? [])
+      const notLoaded = shards.filter((m) => !loaded.has(m)).sort()
+      if (!notLoaded.length) {
+        this.trashHasMore[projectId] = false
+        return false
+      }
+      // 优先补拉「比已加载窗口更早」且最接近的一个月；跨月后出现的新月份也一并补拉
+      const oldestLoaded = loaded.size ? [...loaded].sort()[0] : undefined
+      const older = oldestLoaded === undefined ? [] : notLoaded.filter((m) => m < oldestLoaded)
+      const next = older.length ? older[older.length - 1] : notLoaded[notLoaded.length - 1]
+      const remote = await fetchRemoteTrashShard(client, auth.username, projectId, next)
+      if (remote.length) {
+        this.trash[projectId] = mergeUnique(this.trash[projectId] ?? [], remote)
+        await idbPut('trash', trashCacheKey(auth.username, projectId), this.trash[projectId])
+      }
+      const updated = [...loaded, next].sort()
+      this.trashLoadedMonths[projectId] = updated
+      this.trashHasMore[projectId] = shards.some((m) => !updated.includes(m))
+      return remote.length > 0
+    },
+    /** 彻底删除某项目全部回收站文件（分片 + 旧版 trash.json / 未分类 today_trash.json），
+     *  并清空内存与 IDB 缓存。用于「清空回收站」与整项目恢复，删除后该项目不再出现在回收站扫描结果中。 */
+    async purgeTrashFiles(projectId: string): Promise<void> {
+      const auth = useAuthStore()
+      if (!auth.creds || !auth.username) return
+      const client = await createOssClient(auth.creds)
+      if (projectId === UNCATEGORIZED) {
+        await client.delete(paths.todayTrash(auth.username)).catch(() => {})
+      } else {
+        let months: string[] = []
+        try {
+          months = await listTrashShardMonths(client, auth.username, projectId)
+        } catch {
+          // 枚举失败时兜底删除已加载月份，尽力而为
+          months = [...(this.trashLoadedMonths[projectId] ?? [])]
+        }
+        for (const m of months) {
+          await client.delete(trashFilePath(auth.username, projectId, m)).catch(() => {})
+          await idbDel('trash', trashCacheKey(auth.username, projectId, m))
+          await idbDel('kv', `etag:${auth.username}:${projectId}:trash:${m}`)
+        }
+        await client.delete(paths.trash(auth.username, projectId)).catch(() => {})
+      }
+      this.trash[projectId] = []
+      await idbDel('trash', trashCacheKey(auth.username, projectId))
+      this.trashLoadedMonths[projectId] = []
+      this.trashShardMonths[projectId] = []
+      this.trashHasMore[projectId] = false
     },
     /** 回收站扫描：仅枚举哪些项目存在回收站文件（不下载任何文件内容），
      *  展开某个项目时再按需 loadTrash 打开对应文件，避免一次性拉取全部数据包。
@@ -531,6 +741,8 @@ export const useTasksStore = defineStore('tasks', {
       const latestByProject: Record<string, string> = {}
       let hasUncategorized = false
       let listed = true
+      // 每次全量扫描重建分片月份索引，避免上一次扫描的残留
+      this.trashShardMonths = {}
       if (auth.creds && auth.username) {
         try {
           const client = await createOssClient(auth.creds)
@@ -545,14 +757,28 @@ export const useTasksStore = defineStore('tasks', {
             if (marker) query.marker = marker
             const res = await client.list(query as never, {} as never)
             for (const obj of res.objects ?? []) {
-              if (obj.name.endsWith('/trash.json')) {
-                const seg = obj.name.split('/')
+              const name = obj.name
+              if (name.endsWith('/trash.json')) {
+                const seg = name.split('/')
                 const pid = seg[seg.length - 2]
                 ids.add(pid)
                 if (obj.lastModified) latestByProject[pid] = String(obj.lastModified)
-              } else if (obj.name.endsWith('/today_trash.json')) {
+              } else if (name.endsWith('/today_trash.json')) {
                 hasUncategorized = true
                 if (obj.lastModified) latestByProject[UNCATEGORIZED] = String(obj.lastModified)
+              } else {
+                // 按月分片：trash/{YYYY-MM}.json
+                const m = /\/trash\/(\d{4}-\d{2})\.json$/.exec(name)
+                if (m) {
+                  const seg = name.split('/')
+                  const pid = seg[seg.length - 3]
+                  ids.add(pid)
+                  const month = m[1]
+                  if (obj.lastModified && (!latestByProject[pid] || String(obj.lastModified) > latestByProject[pid])) {
+                    latestByProject[pid] = String(obj.lastModified)
+                  }
+                  this.trashShardMonths[pid] = [...new Set([...(this.trashShardMonths[pid] ?? []), month])].sort()
+                }
               }
             }
             marker = res.isTruncated && res.nextMarker ? res.nextMarker : undefined
@@ -568,6 +794,7 @@ export const useTasksStore = defineStore('tasks', {
      *  有本地改动（含尚未落盘的防抖修改）时写回合并结果，CAS 兜底冲突。
      *  供轮询增量同步与 syncAll 复用；远端文件不存在时静默保留本地数据。 */
     async syncProject(projectId: string) {
+      if (projectId === UNCATEGORIZED) return
       this.touchProject(projectId)
       const auth = useAuthStore()
       if (!auth.creds || !auth.username) return
@@ -667,6 +894,7 @@ export const useTasksStore = defineStore('tasks', {
       }
     },
     async saveProject(projectId: string, snapshot?: Task[]): Promise<boolean> {
+      if (projectId === UNCATEGORIZED) return false
       savingNow.add(projectId)
       try {
       const auth = useAuthStore()
@@ -736,6 +964,37 @@ export const useTasksStore = defineStore('tasks', {
         savingNow.delete(projectId)
       }
     },
+    /** 写单个回收站文件（真实项目某月分片 / 未分类单文件）：CAS 条件写入 + 冲突合并。
+     *  返回 { ok, merged }：merged 为冲突合并后实际写入（或即将写入）的任务列表。 */
+    async _saveTrashShard(
+      client: OssClient,
+      username: string,
+      projectId: string,
+      month: string | undefined,
+      list: Task[],
+    ): Promise<{ ok: boolean; merged: Task[] }> {
+      const key = trashFilePath(username, projectId, month)
+      const etagKey = `etag:${username}:${projectId}:trash${month ? `:${month}` : ''}`
+      const cacheKey = trashCacheKey(username, projectId, month)
+      let knownEtag = await idbGet<string>('kv', etagKey)
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const result = await compareAndSwapPut<Task[]>(client, key, list, knownEtag)
+        if (result.ok) {
+          if (result.etag) await idbPut('kv', etagKey, result.etag)
+          await idbPut('trash', cacheKey, list)
+          return { ok: true, merged: list }
+        }
+        if (result.remote) {
+          const remoteList = [...(result.remote as Task[])]
+          normalizeTasks(remoteList)
+          list = mergeTasks(list, remoteList)
+          knownEtag = result.remoteEtag ?? undefined
+        } else {
+          knownEtag = undefined
+        }
+      }
+      return { ok: false, merged: list }
+    },
     async saveTrash(projectId: string, snapshot?: Task[]): Promise<boolean> {
       savingNow.add(projectId)
       try {
@@ -743,41 +1002,71 @@ export const useTasksStore = defineStore('tasks', {
       if (!auth.creds || !auth.username) return false
       const client = await createOssClient(auth.creds)
       let list = (snapshot ?? this.trash[projectId] ?? []).slice()
-      const key = trashFilePath(auth.username, projectId)
-      const etagKey = `etag:${auth.username}:${projectId}:trash`
-      let knownEtag = await idbGet<string>('kv', etagKey)
-      try {
-      // CAS 写入 + 冲突合并：最多重试 3 次，防止多端同时编辑回收站互相覆盖
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const result = await compareAndSwapPut<Task[]>(client, key, list, knownEtag)
-        if (result.ok) {
-          if (result.etag) await idbPut('kv', etagKey, result.etag)
-          await idbPut('trash', trashCacheKey(auth.username, projectId), list)
-            queueSyncChange(auth.username, 'trash', projectId)
-          if (attempt > 0) useUiStore().toast('检测到其他设备同时修改回收站，已自动合并', 'ok')
-          return true
+      // 未分类回收站：单文件直写（不分片）
+      if (projectId === UNCATEGORIZED) {
+        const r = await this._saveTrashShard(client, auth.username, projectId, undefined, list)
+        if (!r.ok) {
+          useUiStore().toast('保存回收站失败：检测到其他设备持续修改，请稍后重试', 'error')
+          return false
         }
-        if (result.remote) {
-          const remoteList = [...(result.remote as Task[])]
-          normalizeTasks(remoteList)
-          list = mergeTasks(list, remoteList)
-          knownEtag = result.remoteEtag ?? undefined
-          if (!snapshot) {
-            this.trash[projectId] = list
-            await idbPut('trash', trashCacheKey(auth.username, projectId), list)
+        await idbPut('trash', trashCacheKey(auth.username, projectId), list)
+        queueSyncChange(auth.username, 'trash', projectId)
+        return true
+      }
+      // 真实项目：按月分片写入，只碰「内存中已有任务的月份 + 已加载窗口」，
+      // 未加载的旧分片不读不写，避免回收站历史增长拖慢日常保存。
+      const byMonth = groupTrashByMonth(list)
+      const loadedSet = new Set(this.trashLoadedMonths[projectId] ?? [])
+      // 内存里出现未加载月份（跨月新删除 / 导入旧记录等）：先拉远端该月分片合并，
+      // 避免只写内存里的几条而覆盖掉只存在于远端的同月数据。
+      for (const m of byMonth.keys()) {
+        if (loadedSet.has(m)) continue
+        try {
+          const remote = await fetchRemoteTrashShard(client, auth.username, projectId, m)
+          if (remote.length) {
+            const merged = mergeUnique(remote, byMonth.get(m) ?? [])
+            byMonth.set(m, merged)
+            this.trash[projectId] = mergeUnique(this.trash[projectId] ?? [], merged)
+          }
+        } catch {
+          /* 拉取失败按内存内容写（该月未加载，属边缘场景，不阻塞保存） */
+        }
+        loadedSet.add(m)
+      }
+      this.trashLoadedMonths[projectId] = [...loadedSet].sort()
+      // 需要处理的月份 = 内存含有的月份 ∪ 已加载窗口（已加载但变空 => 删除分片文件）
+      const months = new Set<string>([...byMonth.keys(), ...loadedSet])
+      let ok = true
+      for (const m of [...months].sort()) {
+        const tasks = byMonth.get(m) ?? []
+        if (tasks.length) {
+          const r = await this._saveTrashShard(client, auth.username, projectId, m, tasks)
+          ok = ok && r.ok
+          // 冲突合并带回远端数据：同步进内存，保证 IDB 合并缓存与 UI 一致
+          if (r.ok && r.merged.length !== tasks.length) {
+            this.trash[projectId] = mergeUnique(this.trash[projectId] ?? [], r.merged)
           }
         } else {
-          knownEtag = undefined
+          // 已加载月份清空：删除分片文件（忽略 404），项目名随之从回收站扫描结果消失
+          await client.delete(trashFilePath(auth.username, projectId, m)).catch(() => {})
+          await idbDel('trash', trashCacheKey(auth.username, projectId, m))
+          await idbDel('kv', `etag:${auth.username}:${projectId}:trash:${m}`)
         }
       }
-      useUiStore().toast('保存回收站失败：检测到其他设备持续修改，请稍后重试', 'error')
-      return false
+      if (!ok) {
+        useUiStore().toast('保存回收站失败：检测到其他设备持续修改，请稍后重试', 'error')
+        return false
+      }
+      // 更新合并 IDB 缓存（UI / 下次 loadTrash 直接读取）
+      await idbPut('trash', trashCacheKey(auth.username, projectId), this.trash[projectId] ?? list)
+      queueSyncChange(auth.username, 'trash', projectId)
+      return true
       } catch (e) {
         console.error('保存回收站到 OSS 失败', e)
         useUiStore().toast(`保存回收站失败：${describeOssError(e)}`, 'error')
         return false
       }
-      } finally {
+      finally {
         savingNow.delete(projectId)
       }
     },
@@ -1520,9 +1809,12 @@ export const useTasksStore = defineStore('tasks', {
       this._persist(projectId)
       this._persistTrash(projectId)
     },
-    /** 整项目恢复：把该项目回收站里的全部任务还原为活跃任务（状态置回 pending） */
-    restoreProjectTasks(projectId: string) {
+    /** 整项目恢复：把该项目回收站里的全部任务还原为活跃任务（状态置回 pending），
+     *  并删除该项目全部回收站分片文件（含旧版 trash.json），使其从回收站扫描结果中消失 */
+    async restoreProjectTasks(projectId: string) {
       const deleted = this.trash[projectId] ?? []
+      // 先删物理分片（含未加载的旧月份），再清内存，避免刷新后旧分片残留
+      await this.purgeTrashFiles(projectId)
       if (deleted.length) {
         const restored = deleted.map((t) => ({ ...t, status: t.status === 'completed' ? 'completed' as const : 'pending' as const, updatedAt: nowIso() }))
         // 恢复的重复任务由任务自己承担后续周期：删除其重复模板，避免与模板重复生成/重复提醒
@@ -1538,8 +1830,9 @@ export const useTasksStore = defineStore('tasks', {
         this._persistTrash(projectId, true)
       }
     },
-    /** 重名合并：把已删除项目的活跃+回收站任务并入同名现有项目（回收站任务还原为活跃），并清空旧项目数据 */
-    mergeProjectInto(fromId: string, toId: string) {
+    /** 重名合并：把已删除项目的活跃+回收站任务并入同名现有项目（回收站任务还原为活跃），
+     *  并删除旧项目全部回收站分片文件 */
+    async mergeProjectInto(fromId: string, toId: string) {
       const active = (this.tasks[fromId] ?? []).map((t) => ({ ...t, projectId: toId }))
       const deleted = (this.trash[fromId] ?? []).map((t) => ({
         ...t,
@@ -1550,6 +1843,7 @@ export const useTasksStore = defineStore('tasks', {
       this.tasks[toId] = sortActiveList(mergeUnique(this.tasks[toId] ?? [], [...active, ...deleted]))
       this.tasks[fromId] = []
       this.trash[fromId] = []
+      await this.purgeTrashFiles(fromId)
       // 重名合并：重复模板随项目一并合并到目标项目
       const fromMasters = this.repeats[fromId] ?? []
       if (fromMasters.length) {
@@ -1870,6 +2164,9 @@ export const useTasksStore = defineStore('tasks', {
       this.repeats = {}
       this.loadedProjects = []
       this.trashLoaded = []
+      this.trashLoadedMonths = {}
+      this.trashShardMonths = {}
+      this.trashHasMore = {}
       this.repeatsLoaded = []
       this.todayOrder = []
       // 清空固定集与 LRU 顺序，避免跨账号残留导致新账号项目无法逐出

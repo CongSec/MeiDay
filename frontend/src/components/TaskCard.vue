@@ -7,7 +7,7 @@ import { formatRepeat, isNewStyleRepeat, isRepeatDay } from '@/utils/repeat'
 import type { Project, Subtask, Task } from '@/types'
 import AppIcon from '@/components/AppIcon.vue'
 
-const props = defineProps<{ task: Task; project?: Project; future?: boolean }>()
+const props = defineProps<{ task: Task; project?: Project; future?: boolean; warm?: boolean }>()
 const emit = defineEmits<{
   edit: [Task]
   toggle: [string]
@@ -36,6 +36,9 @@ const overdue = computed(() => {
   return new Date(props.task.reminderTime).getTime() <= now.value
 })
 
+
+/** 今日任务视图的暖色主色调：true 时卡片使用琥珀/橙色系强调，项目页保持品牌蓝不变 */
+const warm = computed(() => !!props.warm)
 
 const hasSubtasks = computed(() => (props.task.subtasks?.length ?? 0) > 0)
 
@@ -75,8 +78,12 @@ function onAddSubtask() {
 
 <template>
   <div
-    class="task-card group bg-white rounded-xl shadow-card border border-line p-4 transition hover:shadow-lift hover:border-slate-200"
-    :class="[overdue ? 'border-l-4 border-l-red-500' : '', task.status === 'completed' ? 'opacity-70' : '']"
+    class="task-card group bg-white rounded-xl shadow-card border border-line p-4 transition hover:shadow-lift"
+    :class="[
+      warm ? 'hover:border-amber-300' : 'hover:border-slate-200',
+      overdue ? 'border-l-4 border-l-red-500' : '',
+      task.status === 'completed' ? 'opacity-70' : '',
+    ]"
     @click="emit('edit', task)"
   >
     <div class="flex items-start gap-3">
@@ -89,7 +96,9 @@ function onAddSubtask() {
         />
         <span
           class="w-5 h-5 rounded-md border flex items-center justify-center transition-all duration-150"
-          :class="task.status === 'completed' ? 'bg-brand border-brand text-white' : 'border-slate-300 bg-white text-transparent hover:border-brand hover:bg-brand/5'"
+          :class="task.status === 'completed'
+            ? (warm ? 'bg-amber-500 border-amber-500 text-white' : 'bg-brand border-brand text-white')
+            : (warm ? 'border-slate-300 bg-white text-transparent hover:border-amber-400 hover:bg-amber-500/5' : 'border-slate-300 bg-white text-transparent hover:border-brand hover:bg-brand/5')"
         >
           <AppIcon name="check" :size="13" :stroke-width="2.5" />
         </span>
@@ -131,12 +140,13 @@ function onAddSubtask() {
           <span v-if="task.reminderTime" class="inline-flex items-center gap-1">
             <AppIcon name="bell" :size="12" />{{ timeStr(task.reminderTime) }}
           </span>
-          <span v-if="task.repeat" class="inline-flex items-center gap-1 text-brand/90" :title="`重复任务：${formatRepeat(task.repeat)}`">
+          <span v-if="task.repeat" class="inline-flex items-center gap-1" :class="warm ? 'text-amber-600' : 'text-brand/90'" :title="`重复任务：${formatRepeat(task.repeat)}`">
             <AppIcon name="repeat" :size="12" />{{ formatRepeat(task.repeat) }}
           </span>
           <span
             v-if="(task.attachments?.length ?? 0) > 0"
-            class="inline-flex items-center gap-1 text-brand/80 cursor-pointer"
+            class="inline-flex items-center gap-1 cursor-pointer"
+            :class="warm ? 'text-amber-600' : 'text-brand/80'"
             :title="`${task.attachments.length} 个附件，点击打开查看/预览`"
             @click.stop="emit('edit', task)"
           >
@@ -146,7 +156,8 @@ function onAddSubtask() {
       </div>
       <button
         v-if="!future"
-        class="shrink-0 w-7 h-7 flex items-center justify-center rounded-lg border border-brand/30 text-brand hover:bg-brand/5 hover:border-brand/50 btn-press"
+        class="shrink-0 w-7 h-7 flex items-center justify-center rounded-lg border btn-press"
+        :class="warm ? 'border-amber-300 text-amber-600 hover:bg-amber-500/5 hover:border-amber-400' : 'border-brand/30 text-brand hover:bg-brand/5 hover:border-brand/50'"
         title="添加子任务"
         @click.stop="onAddSubtask"
       >
@@ -170,7 +181,7 @@ function onAddSubtask() {
       <div class="mt-1 h-1 rounded-full bg-slate-100 overflow-hidden">
         <div
           class="h-full rounded-full transition-all"
-          :class="subProgress.done === subProgress.total ? 'bg-emerald-500' : 'bg-brand'"
+          :class="subProgress.done === subProgress.total ? 'bg-emerald-500' : (warm ? 'bg-amber-500' : 'bg-brand')"
           :style="{ width: `${(subProgress.done / subProgress.total) * 100}%` }"
         />
       </div>
@@ -181,7 +192,8 @@ function onAddSubtask() {
       <div class="flex items-center justify-between mb-2">
         <span class="text-[11px] font-medium text-slate-400">子任务明细</span>
         <button
-          class="text-[11px] text-brand hover:bg-brand/5 px-2 py-0.5 rounded-md font-medium"
+          class="text-[11px] px-2 py-0.5 rounded-md font-medium"
+          :class="warm ? 'text-amber-600 hover:bg-amber-500/5' : 'text-brand hover:bg-brand/5'"
           title="添加子任务"
           @click="onAddSubtask"
         >
@@ -205,14 +217,16 @@ function onAddSubtask() {
               />
               <span
                 class="w-4 h-4 rounded border flex items-center justify-center transition-all duration-150"
-                :class="s.completed ? 'bg-brand border-brand text-white' : 'border-slate-300 bg-white text-transparent hover:border-brand'"
+                :class="s.completed
+                  ? (warm ? 'bg-amber-500 border-amber-500 text-white' : 'bg-brand border-brand text-white')
+                  : (warm ? 'border-slate-300 bg-white text-transparent hover:border-amber-400' : 'border-slate-300 bg-white text-transparent hover:border-brand')"
               >
                 <AppIcon name="check" :size="10" :stroke-width="2.5" />
               </span>
             </label>
             <span
               class="flex-1 min-w-0 text-[13px] cursor-pointer"
-              :class="s.completed ? 'line-through text-slate-400' : 'text-slate-700 hover:text-brand'"
+              :class="s.completed ? 'line-through text-slate-400' : (warm ? 'text-slate-700 hover:text-amber-600' : 'text-slate-700 hover:text-brand')"
               title="点击编辑子任务"
               @click="emit('editSubtask', task, s)"
             >
@@ -220,7 +234,8 @@ function onAddSubtask() {
             </span>
             <span
               v-if="(s.attachments?.length ?? 0) > 0"
-              class="shrink-0 text-[11px] text-brand/80 cursor-pointer inline-flex items-center gap-0.5"
+              class="shrink-0 text-[11px] cursor-pointer inline-flex items-center gap-0.5"
+              :class="warm ? 'text-amber-600' : 'text-brand/80'"
               :title="`${s.attachments.length} 个附件，点击查看/预览`"
               @click="emit('editSubtask', task, s)"
             >
@@ -228,7 +243,8 @@ function onAddSubtask() {
             </span>
             <span v-if="subOverdue(s)" class="text-red-500 shrink-0" title="已过提醒时间"><AppIcon name="bell" :size="13" /></span>
             <button
-              class="shrink-0 text-slate-300 hover:text-brand px-1.5 py-0.5 rounded-md hover:bg-brand/5"
+              class="shrink-0 text-slate-300 px-1.5 py-0.5 rounded-md"
+              :class="warm ? 'hover:text-amber-600 hover:bg-amber-500/5' : 'hover:text-brand hover:bg-brand/5'"
               title="编辑子任务"
               @click="emit('editSubtask', task, s)"
             >
