@@ -6,7 +6,7 @@ import { useStatsStore } from './stats'
 import { createOssClient, describeOssError, paths } from '@/utils/oss'
 import { applyDeletedTombstones, compareAndSwapPut, filterTasksForProject, mergeDeletedTombstones, mergeTasks, versionToken } from '@/utils/sync'
 import { enrichOssError } from '@/utils/ossDiag'
-import { idbGet, idbPut, idbDel } from '@/utils/idb'
+import { idbGet, idbPut, idbDel, idbClearTrashUserCache } from '@/utils/idb'
 import { debounce, type Debounced } from '@/utils/debounce'
 import { queueSyncChange } from '@/utils/syncReport'
 import { dateKeyOf, diffDaysKey, nowIso, todayKey } from '@/utils/time'
@@ -358,6 +358,8 @@ export const useTasksStore = defineStore('tasks', {
     trashShardMonths: {} as Record<string, string[]>,
     /** 各项目是否还有更早分片可加载（驱动「加载更早」按钮显隐） */
     trashHasMore: {} as Record<string, boolean>,
+    /** 已动态加载进内存的时间胶囊年份（多视图按需加载标记） */
+    trashLoadedYears: [] as number[],
     repeatsLoaded: [] as string[],
     /** 今日任务跨项目拖拽顺序表（任务 id 全局有序；展示时按「今日可见 + 仍存在」过滤） */
     todayOrder: [] as string[],
@@ -706,16 +708,25 @@ export const useTasksStore = defineStore('tasks', {
       this.trashHasMore[projectId] = shards.some((m) => !updated.includes(m))
       return remote.length > 0
     },
-    /** 扫描弹窗选择「加载今年数据」：只下载 year-01 至今各项目的回收站分片并合并进内存，
-     *  更早年份不碰（仍按需加载），保持按项目分组；调用方负责全部展开。
-     *  未分类是单文件（不分片），整文件加载。返回 { projects: 有今年数据的项目数, tasks: 拉到的任务数 }。 */
-    async loadTrashYearAll(year: number): Promise<{ projects: number; tasks: number }> {
+    /** 多视图「按需加载某一年份」：当前年加载 year-01 至今；往年加载整年（year-01 ~ year-12）。
+     *  多视图/扫描共用：切到某年时把该年份分片下载进内存并写 IDB，已加载年份直接返回已有计数不重复下载。
+     *  只下载本年数据，更早年份仍按需加载，避免一次拉取全部历史 JSON 导致内存过大。 */
+    async loadTrashYear(year: number): Promise<{ projects: number; tasks: number }> {
       const auth = useAuthStore()
-      let projectCount = 0
-      let taskCount = 0
-      if (!auth.creds || !auth.username) return { projects: projectCount, tasks: taskCount }
+      if (!auth.creds || !auth.username) return { projects: 0, tasks: 0 }
+      if (this.trashLoadedYears.includes(year)) {
+        const pids = Object.keys(this.trash)
+        return {
+          projects: pids.length,
+          tasks: pids.reduce((n, pid) => n + (this.trash[pid]?.length ?? 0), 0),
+        }
+      }
       const client = await createOssClient(auth.creds)
       const since = `${year}-01`
+      const isCurrent = year === new Date().getFullYear()
+      const until = isCurrent ? monthOfNow() : `${year}-12`
+      let projectCount = 0
+      let taskCount = 0
       // 扫描过的项目（已有分片索引）+ 本地已加载过胶囊数据的项目
       const pids = new Set<string>([
         ...Object.keys(this.trashShardMonths ?? {}),
@@ -732,16 +743,18 @@ export const useTasksStore = defineStore('tasks', {
           } else {
             allMonths = await listTrashShardMonths(client, auth.username, pid)
           }
-          months = allMonths.filter((m) => m >= since)
+          months = allMonths.filter((m) => m >= since && m <= until)
         } catch {
           allMonths = []
           months = []
         }
         if (!months.length) {
-          // 无今年分片（或无法枚举，如无 list 权限）：降级按「当月 + 上月」窗口加载，
-          // 保证项目名出现且「加载更早」按钮按需可用
-          await this.loadTrash(pid).catch(() => {})
-          if ((this.trash[pid]?.length ?? 0) > 0) projectCount++
+          // 无该年份分片（或无法枚举，如无 list 权限）：当前年份降级按「当月 + 上月」窗口加载，
+          // 保证今年数据尽量完整；往年无分片视为该年无数据，跳过
+          if (isCurrent) {
+            await this.loadTrash(pid).catch(() => {})
+            if ((this.trash[pid]?.length ?? 0) > 0) projectCount++
+          }
           continue
         }
         let changed = false
@@ -757,13 +770,13 @@ export const useTasksStore = defineStore('tasks', {
         const loaded = new Set(this.trashLoadedMonths[pid] ?? [])
         for (const m of months) loaded.add(m)
         this.trashLoadedMonths[pid] = [...loaded].sort()
-        // 保留完整分片索引并更新「加载更早」：今年之后还有更早分片时按钮按需出现
+        // 保留完整分片索引并更新「加载更早」：该年份之后还有更早分片时按钮按需出现
         this.trashShardMonths[pid] = allMonths
         this.trashHasMore[pid] = allMonths.some((m) => !loaded.has(m))
         if (!this.trashLoaded.includes(pid)) this.trashLoaded.push(pid)
         if (changed) projectCount++
       }
-      // 未分类：单文件整文件加载（不分片，无法只取今年）
+      // 未分类：单文件整文件加载（不分片，无法只取某年）
       try {
         const remoteU = await fetchRemoteTrashShard(client, auth.username, UNCATEGORIZED)
         if (remoteU.length) {
@@ -776,7 +789,32 @@ export const useTasksStore = defineStore('tasks', {
       }
       if (!this.trashLoaded.includes(UNCATEGORIZED)) this.trashLoaded.push(UNCATEGORIZED)
       projectCount++
+      this.trashLoadedYears.push(year)
       return { projects: projectCount, tasks: taskCount }
+    },
+    /** 扫描弹窗选择「加载今年数据」：只下载今年（year-01 至今）各项目的回收站分片并合并进内存，
+     *  更早年份不碰（仍按需加载），保持按项目分组；调用方负责全部展开。 */
+    async loadTrashYearAll(year: number): Promise<{ projects: number; tasks: number }> {
+      return this.loadTrashYear(year)
+    },
+    /** 退出时间胶囊页：释放时间胶囊占用的内存与本地 IDB 缓存（含多视图加载的年份数据）。
+     *  仅清理胶囊相关数据，不影响活跃任务/重复模板缓存；下次进入重新按需下载。 */
+    async releaseTrashMemory() {
+      // 先把未落盘的胶囊变更写盘，再清内存，避免丢数据
+      for (const fn of trashDebouncers.values()) {
+        fn.flush()
+        fn.cancel()
+      }
+      // 解除全部胶囊项目固定，交回 LRU 逐出（仅胶囊页挂载期间 pin 的是胶囊项目）
+      for (const pid of Object.keys(this.trash)) viewPins.delete(pid)
+      this.trash = {}
+      this.trashLoaded = []
+      this.trashLoadedMonths = {}
+      this.trashShardMonths = {}
+      this.trashHasMore = {}
+      this.trashLoadedYears = []
+      const auth = useAuthStore()
+      if (auth.username) await idbClearTrashUserCache(auth.username)
     },
     /** 彻底删除某项目全部回收站文件（分片 + 旧版 trash.json / 未分类 today_trash.json），
      *  并清空内存与 IDB 缓存。用于「清空回收站」与整项目恢复，删除后该项目不再出现在回收站扫描结果中。 */
@@ -2310,6 +2348,7 @@ export const useTasksStore = defineStore('tasks', {
       this.trashLoadedMonths = {}
       this.trashShardMonths = {}
       this.trashHasMore = {}
+      this.trashLoadedYears = []
       this.repeatsLoaded = []
       this.todayOrder = []
       // 清空固定集与 LRU 顺序，避免跨账号残留导致新账号项目无法逐出

@@ -8,6 +8,10 @@ import AppIcon from '@/components/AppIcon.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import TaskModal from '@/components/TaskModal.vue'
 import TrashTaskDetailModal from '@/components/TrashTaskDetailModal.vue'
+import TimeCapsuleCalendar from '@/components/TimeCapsuleCalendar.vue'
+import TimeCapsuleGantt from '@/components/TimeCapsuleGantt.vue'
+import TimeCapsuleHeatmap from '@/components/TimeCapsuleHeatmap.vue'
+import TimeCapsuleTrend from '@/components/TimeCapsuleTrend.vue'
 import type JSZip from 'jszip'
 import { deleteAttachments, downloadAttachment } from '@/utils/attachments'
 import { createOssClient } from '@/utils/oss'
@@ -83,6 +87,21 @@ const detailTask = ref<Task | null>(null)
 const editTask = ref<Task | null>(null)
 const editOpen = ref(false)
 
+/** 多视图：当前视图（列表为默认视图），多视图按需加载年份数据 */
+const viewMode = ref<'list' | 'calendar' | 'heatmap' | 'trend' | 'gantt'>('list')
+const VIEW_TABS: { key: typeof viewMode.value; label: string; icon: string }[] = [
+  { key: 'list', label: '列表', icon: 'menu' },
+  { key: 'calendar', label: '日历', icon: 'calendar' },
+  { key: 'heatmap', label: '热力图', icon: 'flame' },
+  { key: 'trend', label: '趋势', icon: 'chart' },
+  { key: 'gantt', label: '甘特图', icon: 'grid' },
+]
+/** 多视图当前查看的年份 / 月份（默认今年 / 当月） */
+const viewYear = ref(CURRENT_YEAR)
+const viewMonth = ref(CURRENT_YEAR + '-' + String(new Date().getMonth() + 1).padStart(2, '0'))
+/** 多视图按需加载年份进行中：显示「正在下载OSS数据并进行本地计算中......」 */
+const viewLoading = ref(false)
+
 /** 展开项目时只打开当前项目的数据包：仅加载该项目回收站文件，其余保持未加载 */
 async function openGroup(key: string) {
   if (tasks.trashLoaded.includes(key) || loading.value[key]) return
@@ -148,6 +167,8 @@ onUnmounted(() => {
   // 离开回收站：解除全部展开项目的固定，交回 LRU 逐出
   for (const k of Object.keys(expanded.value)) tasks.unpinViewProject(k)
   if (mobileActions && mobileActions.title === MOBILE_TITLE) mobileActions.title = ''
+  // 退出时间胶囊：释放内存与 IDB 缓存（含多视图加载的年份数据），下次进入重新按需下载
+  void tasks.releaseTrashMemory()
 })
 
 watch(
@@ -168,8 +189,13 @@ watch(
   },
 )
 
-/** 用户主动点击才扫描时间胶囊：只枚举哪些项目存在回收站文件（元数据），不下载任何文件内容 */
-async function scanTrash() {
+/** 进行中的扫描 Promise：手动扫描与多视图静默扫描并发时复用，避免重复扫描/读到半成品索引 */
+let scanInFlight: Promise<void> | null = null
+/** 扫描时间胶囊：只枚举哪些项目存在回收站文件（元数据），不下载任何文件内容。
+ *  默认扫描完成后弹「是否加载今年数据」确认框；多视图自动加载时传 { confirm: false } 静默扫描。 */
+async function scanTrash(options?: { confirm?: boolean }): Promise<void> {
+  if (scanInFlight) return scanInFlight
+  const p = (async () => {
   if (scanning.value) return
   scanning.value = true
   try {
@@ -190,12 +216,19 @@ async function scanTrash() {
     visibleLimit.value = {}
     loadingMore.value = {}
     logAudit('扫描时间胶囊', `发现 ${scanIds.value.length} 个项目的胶囊数据`)
-    // 扫描完成：提示用户是否加载今年数据
-    scanConfirmOpen.value = true
+    // 扫描完成：提示用户是否加载今年数据（多视图静默扫描不弹框）
+    if (options?.confirm !== false) scanConfirmOpen.value = true
   } catch (e) {
     ui.toast((e as Error).message || '时间胶囊扫描失败，请检查网络或 OSS 配置', 'error')
   } finally {
     scanning.value = false
+  }
+  })()
+  scanInFlight = p
+  try {
+    await p
+  } finally {
+    scanInFlight = null
   }
 }
 
@@ -228,6 +261,74 @@ async function loadYearAll() {
     loadingYearAll.value = false
     scanConfirmOpen.value = false
   }
+}
+
+/** 多视图：确保某年数据已加载（按需）。未扫描过则静默扫描（不弹确认框）；调用方负责 loading 态 */
+async function ensureViewYear(year: number) {
+  if (tasks.trashLoadedYears.includes(year)) return
+  if (!scanned.value) await scanTrash({ confirm: false })
+  if (tasks.trashLoadedYears.includes(year)) return
+  await tasks.loadTrashYear(year)
+}
+
+/** 切换多视图：非列表视图自动加载当前年数据（默认今年，更早年份按需加载） */
+async function switchView(mode: 'list' | 'calendar' | 'heatmap' | 'trend' | 'gantt') {
+  viewMode.value = mode
+  if (mode === 'list') return
+  const needsLoad = !tasks.trashLoadedYears.includes(viewYear.value)
+  if (needsLoad) viewLoading.value = true
+  try {
+    await ensureViewYear(viewYear.value)
+  } finally {
+    viewLoading.value = false
+  }
+}
+
+/** 热力图/趋势切换年份：先按需加载该年数据再展示 */
+async function onViewYearChange(year: number) {
+  if (year === viewYear.value) return
+  viewYear.value = year
+  viewMonth.value = year + '-' + viewMonth.value.slice(5, 7)
+  const needsLoad = !tasks.trashLoadedYears.includes(year)
+  if (needsLoad) viewLoading.value = true
+  try {
+    await ensureViewYear(year)
+  } finally {
+    viewLoading.value = false
+  }
+}
+
+/** 日历/甘特切换月份：跨年时按需加载新一年 */
+async function onViewMonthChange(month: string) {
+  viewMonth.value = month
+  const year = Number(month.slice(0, 4))
+  if (year === viewYear.value) return
+  viewYear.value = year
+  const needsLoad = !tasks.trashLoadedYears.includes(year)
+  if (needsLoad) viewLoading.value = true
+  try {
+    await ensureViewYear(year)
+  } finally {
+    viewLoading.value = false
+  }
+}
+
+/** 多视图：已完成胶囊任务（跨所有已加载年份；只统计 status=completed，按 updatedAt 归属日期） */
+const completedTrashTasks = computed(() =>
+  Object.values(tasks.trash).flat().filter((t) => t.status === 'completed'),
+)
+/** 甘特图「未完成」：胶囊外活跃待办（仅已加载项目的 pending 任务；deleted 不计入） */
+const ganttActiveTasks = computed(() => {
+  const out: Task[] = []
+  for (const arr of Object.values(tasks.tasks)) {
+    for (const t of arr) if (t.status === 'pending') out.push(t)
+  }
+  return out
+})
+/** 项目名（多视图组件展示用） */
+function projectNameOf(pid: string): string {
+  if (!pid || pid === UNCATEGORIZED) return '无分类'
+  return projectById(pid)?.name || '未知项目（' + pid.slice(0, 8) + '…）'
 }
 
 interface TrashGroup {
@@ -763,7 +864,7 @@ function onCapsuleSaved() {
         <button
           class="inline-flex items-center gap-1.5 shrink-0 px-3 py-1.5 rounded-lg text-xs border border-slate-200 hover:bg-slate-50 disabled:opacity-60"
           :disabled="scanning"
-          @click="scanTrash"
+          @click="scanTrash()"
         >
           <AppIcon name="search" :size="13" class="text-slate-500" />
           {{ scanning ? '扫描中…' : '扫描时间胶囊文件' }}
@@ -772,6 +873,23 @@ function onCapsuleSaved() {
       <input ref="fileInput" type="file" accept=".zip,.json,application/json,application/zip" class="hidden" @change="onImportFile" />
     </div>
 
+    <!-- 多视图切换：列表（默认）/ 日历 / 热力图 / 趋势 / 甘特图 -->
+    <div class="mt-3 flex flex-wrap items-center gap-1.5">
+      <button
+        v-for="tab in VIEW_TABS"
+        :key="tab.key"
+        class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors"
+        :class="viewMode === tab.key ? 'bg-brand text-white shadow-sm' : 'border border-slate-200 text-slate-600 hover:bg-slate-50'"
+        :disabled="viewLoading"
+        @click="switchView(tab.key)"
+      >
+        <AppIcon :name="tab.icon" :size="14" />
+        {{ tab.label }}
+      </button>
+    </div>
+
+    <!-- 列表视图：搜索 + 按项目分组（默认视图） -->
+    <div v-if="viewMode === 'list'">
     <!-- 搜索：项目名 + 已加载项目的任务名/内容 -->
     <div class="mt-4">
       <div class="relative">
@@ -928,6 +1046,48 @@ function onCapsuleSaved() {
           跳至
         </button>
       </span>
+    </div>
+    </div>
+
+    <!-- 多视图：日历 / 热力图 / 趋势 / 甘特图（按需加载年份数据） -->
+    <div v-else class="mt-4">
+      <div v-if="viewLoading" class="flex items-center justify-center gap-2 rounded-xl border border-line bg-white py-16 text-sm text-slate-500">
+        <AppIcon name="refresh" :size="16" class="animate-spin text-brand" />
+        正在下载OSS数据并进行本地计算中......
+      </div>
+      <template v-else>
+        <div class="mb-3 text-[11px] text-slate-400">默认先加载今年数据，查看更早年份/月份时再按需加载；已完成任务按完成时间（updatedAt）归属统计。</div>
+        <TimeCapsuleCalendar
+          v-if="viewMode === 'calendar'"
+          :tasks="completedTrashTasks"
+          :month="viewMonth"
+          :project-name="projectNameOf"
+          @change-month="onViewMonthChange"
+          @open-task="openDetail"
+        />
+        <TimeCapsuleHeatmap
+          v-else-if="viewMode === 'heatmap'"
+          :tasks="completedTrashTasks"
+          :year="viewYear"
+          @change-year="onViewYearChange"
+        />
+        <TimeCapsuleTrend
+          v-else-if="viewMode === 'trend'"
+          :tasks="completedTrashTasks"
+          :year="viewYear"
+          :years="tasks.trashLoadedYears"
+          @change-year="onViewYearChange"
+        />
+        <TimeCapsuleGantt
+          v-else-if="viewMode === 'gantt'"
+          :completed="completedTrashTasks"
+          :active="ganttActiveTasks"
+          :month="viewMonth"
+          :project-name="projectNameOf"
+          @change-month="onViewMonthChange"
+          @open-task="openDetail"
+        />
+      </template>
     </div>
 
     <!-- 扫描完成：是否加载全部数据 -->

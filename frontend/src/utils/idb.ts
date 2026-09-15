@@ -102,3 +102,29 @@ export async function idbClearUserCache(username: string): Promise<void> {
     tx.onerror = () => reject(tx.error)
   })
 }
+
+/** 清除指定用户的「时间胶囊（回收站）」全部本地缓存（trash 数据 + 对应 etag）。
+ *  退出时间胶囊页时调用：连同内存数据一并释放，下次进入重新从 OSS 下载。
+ *  只清 trash 相关键，不动任务/重复模板/档案缓存。 */
+export async function idbClearTrashUserCache(username: string): Promise<void> {
+  if (!username) return
+  const db = await openDb()
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(['trash', 'kv'], 'readwrite')
+    idbDeletePrefix(tx.objectStore('trash'), `trash:${username}:`)
+    // 只清 trash 相关 etag（etag:user:pid:trash[:month]），保留任务/重复模板的 etag
+    const kv = tx.objectStore('kv')
+    const req = kv.openCursor()
+    req.onsuccess = () => {
+      const cursor = req.result
+      if (!cursor) return
+      const key = cursor.key
+      if (typeof key === 'string' && key.startsWith(`etag:${username}:`) && key.includes(':trash')) {
+        cursor.delete()
+      }
+      cursor.continue()
+    }
+    tx.oncomplete = () => resolve()
+    tx.onerror = () => reject(tx.error)
+  })
+}
