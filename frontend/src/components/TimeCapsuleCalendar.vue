@@ -5,8 +5,9 @@
  * - 灰色：胶囊内已完成任务（status=completed，按 updatedAt 归属完成当天，按完成时间排序）
  * - 淡黄色：胶囊外未完成任务（有开始/提醒时间或重复规则；按提醒(优先)/开始时间归属当天并按该时间排序；
  *   重复任务枚举当前查看月份内所有发生日）
- * 跨天任务：不占普通任务格，而是以连续横条显示在每周格子的下方（与普通任务上下分层，互不重叠），
- * 横条高度与普通任务小块一致、任务名直接显示在横条内；重叠的跨天条上下堆叠，每条占一行。
+ * 跨天任务：任务小块显示在「归属当天」格子里（已完成=完成当天，未完成=提醒/开始当天），
+ * 并保留从开始日（提醒优先）延伸到完成/截止日的横条；横条与小块的垂直行号对齐，
+ * 不再占用格子底部的独立区域。
  */
 import { computed } from 'vue'
 import type { Task } from '@/types'
@@ -60,7 +61,6 @@ function timeOfDay(iso: string): string {
 
 type ChipKind = 'done' | 'pending'
 
-/** 普通（单日）任务小块：显示在归属当天格子里 */
 interface Chip {
   task: Task
   kind: ChipKind
@@ -68,19 +68,21 @@ interface Chip {
   day: string
   /** 排序键：当天内的时刻（同一天可直接字典序比较） */
   sortKey: string
+  /** 跨天：起点日/终点日（含当天），null=单天 */
+  cross: { start: string; end: string } | null
 }
 
-/** 跨天任务横条：起点=提醒(优先)/开始日，终点=完成/截止日 */
+/** 跨天横条：与起点/终点所在月有交集才显示 */
 interface CrossBar {
   task: Task
   kind: ChipKind
   startKey: string
   endKey: string
-  /** 车道（上下分层行号）：在 laidOutBars 中分配 */
-  lane: number
+  /** 任务小块所在（锚点）日：已完成=完成日，未完成=开始日 */
+  anchorDay: string
 }
 
-/** 已完成任务（仅单日）：小块归属完成当天；跨天任务不在此列（走横条） */
+/** 已完成任务（含跨天）：小块归属完成当天 */
 const doneChips = computed<Chip[]>(() => {
   const out: Chip[] = []
   for (const t of props.tasks) {
@@ -90,13 +92,13 @@ const doneChips = computed<Chip[]>(() => {
     const endKey = dateKeyOf(end)
     if (endKey.slice(0, 7) !== props.month) continue
     const startKey = taskStart(t) ? dateKeyOf(taskStart(t)) : ''
-    if (startKey && startKey < endKey) continue // 跨天 → 横条
-    out.push({ task: t, kind: 'done', day: endKey, sortKey: end })
+    const cross = startKey && startKey < endKey ? { start: startKey, end: endKey } : null
+    out.push({ task: t, kind: 'done', day: endKey, sortKey: end, cross })
   }
   return out
 })
 
-/** 已完成跨天任务的横条：起点=提醒(优先)/开始日，终点=完成日；与本月有交集即显示 */
+/** 已完成跨天任务的横条：起点=提醒(优先)/开始日，终点=完成日；与本月有交集即显示（归属日不在本月时只显示横条） */
 const doneBars = computed<CrossBar[]>(() => {
   const out: CrossBar[] = []
   for (const t of props.tasks) {
@@ -105,12 +107,12 @@ const doneBars = computed<CrossBar[]>(() => {
     const endKey = taskEnd(t) ? dateKeyOf(taskEnd(t)) : ''
     if (!startKey || !endKey || startKey >= endKey) continue
     if (endKey < monthFirst.value || startKey > monthLast.value) continue
-    out.push({ task: t, kind: 'done', startKey, endKey, lane: 0 })
+    out.push({ task: t, kind: 'done', startKey, endKey, anchorDay: endKey })
   }
   return out
 })
 
-/** 胶囊外未完成任务（仅单日）：非重复任务按提醒(优先)/开始时间归属当天；重复任务枚举本月所有发生日；跨天任务不在此列 */
+/** 胶囊外未完成任务：非重复任务按提醒(优先)/开始时间归属当天；重复任务枚举本月所有发生日 */
 const pendingChips = computed<Chip[]>(() => {
   const out: Chip[] = []
   const pad = (n: number) => String(n).padStart(2, '0')
@@ -127,7 +129,13 @@ const pendingChips = computed<Chip[]>(() => {
         const key = `${props.month}-${pad(d)}`
         if (rule.endAfter && key > rule.endAfter) continue
         if (!isRepeatDay(rule, anchor, key)) continue
-        out.push({ task: t, kind: 'pending', day: key, sortKey: `${key}T${time || '00:00'}` })
+        out.push({
+          task: t,
+          kind: 'pending',
+          day: key,
+          sortKey: `${key}T${time || '00:00'}`,
+          cross: null,
+        })
       }
     } else {
       // 非重复：提醒(优先)/开始时间当天；有截止时间且跨天时连横条
@@ -135,8 +143,8 @@ const pendingChips = computed<Chip[]>(() => {
       const day = dateKeyOf(start)
       if (day.slice(0, 7) !== props.month) continue
       const endKey = t.endTime ? dateKeyOf(t.endTime) : ''
-      if (endKey && endKey > day) continue // 跨天 → 横条
-      out.push({ task: t, kind: 'pending', day, sortKey: start })
+      const cross = endKey && endKey > day ? { start: day, end: endKey } : null
+      out.push({ task: t, kind: 'pending', day, sortKey: start, cross })
     }
   }
   return out
@@ -145,13 +153,9 @@ const pendingChips = computed<Chip[]>(() => {
 /** 未完成跨天任务的横条：起点=提醒(优先)/开始日，终点=截止日 */
 const pendingBars = computed<CrossBar[]>(() => {
   const out: CrossBar[] = []
-  for (const t of props.pending) {
-    if (t.status !== 'pending' || t.repeat) continue
-    const startKey = taskStart(t) ? dateKeyOf(taskStart(t)) : ''
-    const endKey = t.endTime ? dateKeyOf(t.endTime) : ''
-    if (!startKey || !endKey || startKey >= endKey) continue
-    if (endKey < monthFirst.value || startKey > monthLast.value) continue
-    out.push({ task: t, kind: 'pending', startKey, endKey, lane: 0 })
+  for (const chip of pendingChips.value) {
+    if (!chip.cross) continue
+    out.push({ task: chip.task, kind: 'pending', startKey: chip.cross.start, endKey: chip.cross.end, anchorDay: chip.day })
   }
   return out
 })
@@ -168,30 +172,22 @@ const chipsByDay = computed(() => {
   return map
 })
 
-/** 全部跨天横条：按起点排序，并按与本月重叠的区间做贪心分层（每条占一行，互不重叠） */
-const laidOutBars = computed<CrossBar[]>(() => {
-  const bars = [...doneBars.value, ...pendingBars.value].sort(
-    (a, b) => a.startKey.localeCompare(b.startKey) || a.endKey.localeCompare(b.endKey),
-  )
-  const laneEnds: string[] = []
-  for (const bar of bars) {
-    const from = bar.startKey < monthFirst.value ? monthFirst.value : bar.startKey
-    const to = bar.endKey > monthLast.value ? monthLast.value : bar.endKey
-    if (from > to) continue
-    let lane = laneEnds.findIndex((end) => end < from)
-    if (lane === -1) {
-      lane = laneEnds.length
-      laneEnds.push(to)
-    } else {
-      laneEnds[lane] = to
-    }
-    bar.lane = lane
-  }
-  return bars
-})
+const allBars = computed<CrossBar[]>(() => [...doneBars.value, ...pendingBars.value])
 
-/** 跨天横条单行高度（px），每条占一行（含上下间距） */
-const LANE_H = 24
+/** 任务小块所在格子的行号（用于横条垂直对齐）；锚点不在本月时返回 0 */
+function chipRowOf(bar: CrossBar): number {
+  const chips = chipsByDay.value.get(bar.anchorDay)
+  if (!chips) return 0
+  const i = chips.findIndex((c) => c.task.id === bar.task.id)
+  return i >= 0 ? i : 0
+}
+
+/** 单行任务块高度（px，含间距），横条按此行号对齐 */
+const SLOT_H = 22
+/** 格子顶部到第一行任务块顶部的偏移（px） */
+const CELL_TOP = 26
+/** 格子最小高度（px） */
+const CELL_MIN_H = 104
 
 interface DayCell {
   key: string
@@ -203,15 +199,16 @@ interface BarSeg {
   bar: CrossBar
   startCol: number
   endCol: number
+  /** 横条所在行号（与锚点小块行号一致，保证跨行连续） */
+  topRow: number
 }
 interface WeekRow {
   cells: DayCell[]
   segments: BarSeg[]
-  /** 本行横条占用的最大车道（-1 = 无横条） */
-  maxLane: number
+  minH: number
 }
 
-/** 月历按周行组织；普通任务小块在上，跨天横条在下（上下分层），横条行末接行首连续显示 */
+/** 月历按周行组织；跨天横条切分到所在周行，垂直位置与小块的归属行号对齐 */
 const rows = computed<WeekRow[]>(() => {
   const rowCount = cellCount.value / 7
   const out: WeekRow[] = []
@@ -219,21 +216,29 @@ const rows = computed<WeekRow[]>(() => {
   const pad = (n: number) => String(n).padStart(2, '0')
   for (let r = 0; r < rowCount; r++) {
     const cells: DayCell[] = []
+    let maxChips = 0
     for (let c = 0; c < 7; c++) {
       const d = new Date(firstDate.getFullYear(), firstDate.getMonth(), firstDate.getDate() + r * 7 + c)
       const key = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
       const inMonth = d.getMonth() === monthIdx.value
-      cells.push({ key, day: d.getDate(), inMonth, chips: inMonth ? chipsByDay.value.get(key) ?? [] : [] })
+      const chips = inMonth ? chipsByDay.value.get(key) ?? [] : []
+      maxChips = Math.max(maxChips, chips.length)
+      cells.push({ key, day: d.getDate(), inMonth, chips })
     }
-    out.push({ cells, segments: [], maxLane: -1 })
+    out.push({
+      cells,
+      segments: [],
+      minH: Math.max(CELL_MIN_H, CELL_TOP + maxChips * SLOT_H),
+    })
   }
   // 把每条跨天横条切成各周行的段（行末接行首，视觉连续）；跨月任务按「与本月交集」截取起止日
-  for (const bar of laidOutBars.value) {
+  for (const bar of allBars.value) {
     const fromKey = bar.startKey < monthFirst.value ? monthFirst.value : bar.startKey
     const toKey = bar.endKey > monthLast.value ? monthLast.value : bar.endKey
     if (fromKey > toKey) continue
     const s = Number(fromKey.slice(8, 10))
     const e = Number(toKey.slice(8, 10))
+    const topRow = chipRowOf(bar)
     let day = s
     while (day <= e) {
       const idx = firstCol.value + (day - 1)
@@ -244,8 +249,9 @@ const rows = computed<WeekRow[]>(() => {
       const segEnd = Math.min(e, rowEnd)
       const startCol = firstCol.value + (segStart - 1) - r * 7
       const endCol = firstCol.value + (segEnd - 1) - r * 7
-      out[r].segments.push({ bar, startCol, endCol })
-      out[r].maxLane = Math.max(out[r].maxLane, bar.lane)
+      out[r].segments.push({ bar, startCol, endCol, topRow })
+      // 行高兜底：保证横条所在行号有足够空间
+      out[r].minH = Math.max(out[r].minH, CELL_TOP + (topRow + 1) * SLOT_H + 4)
       day = segEnd + 1
     }
   }
@@ -298,12 +304,12 @@ function changeMonth(delta: number) {
         v-for="(row, ri) in rows"
         :key="ri"
         class="relative flex border-b border-slate-100 last:border-b-0"
-        :style="{ paddingBottom: (row.maxLane + 1) * LANE_H + 'px' }"
+        :style="{ minHeight: row.minH + 'px' }"
       >
         <div
           v-for="cell in row.cells"
           :key="cell.key"
-          class="min-h-[104px] flex-1 border-r border-slate-100 p-1.5 last:border-r-0"
+          class="flex-1 border-r border-slate-100 p-1.5 last:border-r-0"
           :class="cell.inMonth ? 'bg-white' : 'bg-slate-50/70'"
         >
           <div class="flex items-center justify-between">
@@ -323,22 +329,20 @@ function changeMonth(delta: number) {
             </button>
           </div>
         </div>
-        <!-- 跨天横条：位于普通任务下方（上下分层不重叠），名称与横条同高，重叠条上下堆叠 -->
-        <button
+        <!-- 跨天横条：与小块的垂直行号对齐，从开始日延伸到完成/截止日 -->
+        <div
           v-for="(seg, si) in row.segments"
           :key="seg.bar.task.id + '-' + ri + '-' + si"
-          class="absolute z-10 flex h-[20px] cursor-pointer items-center overflow-hidden rounded px-1.5 text-left text-[10px]"
-          :class="seg.bar.kind === 'done' ? 'bg-slate-100 text-slate-600 hover:bg-slate-200' : 'bg-amber-200/90 text-amber-800 hover:bg-amber-300/90'"
+          class="absolute z-0 h-[20px] cursor-pointer rounded-full"
+          :class="seg.bar.kind === 'done' ? 'bg-slate-100 hover:bg-slate-200' : 'bg-amber-200/90 hover:bg-amber-300/90'"
           :style="{
             left: (seg.startCol / 7) * 100 + '%',
             width: ((seg.endCol - seg.startCol + 1) / 7) * 100 + '%',
-            bottom: seg.bar.lane * LANE_H + 'px',
+            top: CELL_TOP + seg.topRow * SLOT_H + 'px',
           }"
           :title="barTitle(seg.bar)"
           @click="emit('open-task', seg.bar.task)"
-        >
-          <span class="min-w-0 truncate">{{ seg.bar.task.name }}</span>
-        </button>
+        ></div>
       </div>
     </div>
   </div>

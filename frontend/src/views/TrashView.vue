@@ -390,9 +390,9 @@ function monthLabel(m: string): string {
   const [y, mo] = m.split('-')
   return `${y}年${Number(mo)}月`
 }
-/** 项目已展示的任务总数（项目名右侧计数） */
-function totalShown(g: TrashGroup): number {
-  return g.monthGroups.reduce((n, mg) => n + mg.tasks.length, 0)
+/** 项目时间胶囊任务总数（已载入内存，点击扫描全量加载后即真实总数） */
+function trashTotal(g: TrashGroup): number {
+  return tasks.trash[g.key]?.length ?? 0
 }
 
 /** 回收站按项目分组：展开时才加载该项目文件；统一按“回收站最新变动时间”倒序（新回收的排前面） */
@@ -995,7 +995,7 @@ function onSaved(task: Task) {
           <span class="text-sm font-medium text-slate-600 truncate">{{ g.label }}</span>
           <span v-if="g.deleted" class="shrink-0 text-[11px] text-slate-400">已删除项目</span>
           <span class="shrink-0 text-[11px] text-slate-400">
-            <template v-if="g.loaded">（{{ totalShown(g) }}）</template>
+            <template v-if="g.loaded">（{{ trashTotal(g) }}）</template>
             <template v-else-if="loading[g.key]">加载中…</template>
             <template v-else>（…）</template>
           </span>
@@ -1081,7 +1081,7 @@ function onSaved(task: Task) {
             <AppIcon name="chevron-down" :size="13" class="inline-block -mt-0.5 mr-1" />
             {{ loadingMore[g.key] ? '加载中…' : '加载更早月份' }}
           </button>
-          <div v-if="!loadError[g.key] && !totalShown(g) && !g.hasMore" class="text-xs text-slate-400 px-0.5">
+          <div v-if="!loadError[g.key] && !trashTotal(g) && !g.hasMore" class="text-xs text-slate-400 px-0.5">
             {{ g.deleted ? '该项目没有任务' : '该项目时间胶囊为空' }}
           </div>
         </template>
