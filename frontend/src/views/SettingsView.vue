@@ -326,13 +326,13 @@ async function save() {
       </div>
     </div>
     <div class="mt-4 bg-white rounded-xl shadow-sm border border-slate-100 p-4 space-y-2">
-      <div class="text-xs text-slate-400 px-1">回收站与操作日志入口</div>
+      <div class="text-xs text-slate-400 px-1">时间胶囊与操作日志入口</div>
       <button
         class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-slate-700 hover:bg-slate-50 border border-slate-200 text-left"
         @click="router.push('/trash')"
       >
         <AppIcon name="trash" :size="16" class="text-slate-400 shrink-0" />
-        <span>回收站</span>
+        <span>时间胶囊</span>
         <span class="ml-auto text-slate-400 text-xs shrink-0">恢复被删除的任务与项目</span>
         <AppIcon name="chevron-right" :size="14" class="text-slate-300 shrink-0" />
       </button>

@@ -264,7 +264,7 @@ async function confirmDelete() {
   // 确认按钮前端立即生效：关弹窗；保存结果由回显后的 toast 提示
   deleteTarget.value = null
   const ok = await tasks.deleteFutureTaskConfirmed(t.id)
-  if (ok) ui.toast('已移入回收站')
+  if (ok) ui.toast('已存入时间胶囊')
 }
 </script>
 
@@ -390,9 +390,9 @@ async function confirmDelete() {
   
       <ConfirmDialog
         :open="!!deleteTarget"
-        title="移入回收站"
-        message="确定将该任务移入回收站吗？可在回收站恢复。"
-        confirm-text="移入回收站"
+        title="存入时间胶囊"
+        message="确定将该任务存入时间胶囊吗？可在时间胶囊恢复。"
+        confirm-text="存入时间胶囊"
         @confirm="confirmDelete"
         @cancel="deleteTarget = null"
       />

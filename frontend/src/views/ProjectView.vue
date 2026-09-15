@@ -187,7 +187,7 @@ async function confirmTrashProject() {
   trashProjectOpen.value = false
   router.push('/today')
   const ok = await projects.deleteProject(p.id)
-  if (ok) ui.toast('项目已移入回收站，可在回收站恢复')
+  if (ok) ui.toast('项目已存入时间胶囊，可在时间胶囊恢复')
 }
 
 async function confirmDelete() {
@@ -196,7 +196,7 @@ async function confirmDelete() {
   // 确认按钮前端立即生效：关弹窗；保存结果由回显后的 toast 提示
   deleteTarget.value = null
   const ok = await tasks.softDeleteConfirmed(t.id)
-  if (ok) ui.toast('已移入回收站')
+  if (ok) ui.toast('已存入时间胶囊')
 }
 </script>
 
@@ -224,10 +224,10 @@ async function confirmDelete() {
           </button>
           <button
             class="text-xs text-slate-400 hover:text-red-500 flex items-center gap-1 btn-press"
-            title="移入回收站：项目及其任务进入回收站，可恢复整个项目"
+            title="存入时间胶囊：项目及其任务存入其中，可恢复整个项目"
             @click="askTrashProject"
           >
-            <AppIcon name="trash" :size="13" /> 移入回收站
+            <AppIcon name="trash" :size="13" /> 存入时间胶囊
           </button>
         </div>
         <button
@@ -247,10 +247,10 @@ async function confirmDelete() {
         </button>
         <button
           class="text-[11px] text-slate-400 hover:text-red-500 flex items-center gap-1"
-          title="移入回收站"
+          title="存入时间胶囊"
           @click="askTrashProject"
         >
-          <AppIcon name="trash" :size="12" /> 移入回收站
+          <AppIcon name="trash" :size="12" /> 存入时间胶囊
         </button>
       </div>
 
@@ -321,17 +321,17 @@ async function confirmDelete() {
     <ProjectModal v-model:open="projectModalOpen" :project-id="projectId" />
     <ConfirmDialog
       :open="!!deleteTarget"
-      title="移入回收站"
-      message="确定将该任务移入回收站吗？可在回收站恢复。"
-      confirm-text="移入回收站"
+      title="存入时间胶囊"
+      message="确定将该任务存入时间胶囊吗？可在时间胶囊恢复。"
+      confirm-text="存入时间胶囊"
       @confirm="confirmDelete"
       @cancel="deleteTarget = null"
     />
     <ConfirmDialog
       :open="trashProjectOpen"
-      title="移入回收站"
-      message="项目及其下所有任务将移入回收站，可在回收站「恢复整个项目」。确定移入回收站吗？"
-      confirm-text="移入回收站"
+      title="存入时间胶囊"
+      message="项目及其下所有任务将存入时间胶囊，可在时间胶囊「恢复整个项目」。确定存入时间胶囊吗？"
+      confirm-text="存入时间胶囊"
       :danger="true"
       @confirm="confirmTrashProject"
       @cancel="trashProjectOpen = false"

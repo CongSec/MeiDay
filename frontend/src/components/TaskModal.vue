@@ -26,6 +26,8 @@ const props = defineProps<{
   parentTask?: Task | null
   /** 非空时表示正在编辑“未来任务”里的重复出现模板：保存走 saveFutureOccurrenceConfirmed（masterId = 重复任务源任务 id） */
   templateMasterId?: string | null
+  /** 时间胶囊编辑模式：任务保持在胶囊内（状态不变），保存写回胶囊而不是活跃任务；保留完成/入舱时间 */
+  capsuleEdit?: boolean
 }>()
 const emit = defineEmits<{
   'update:open': [boolean]
@@ -47,6 +49,19 @@ function lastProjectId(): string {
 function rememberProject(id: string) {
   if (id) localStorage.setItem(lastProjectKey.value, id)
 }
+/** 所属项目下拉选项：时间胶囊编辑时任务可能属于已删除项目，需一并提供，避免无法保留原项目 */
+const projectOptions = computed(() =>
+  props.capsuleEdit
+    ? [...projects.projects, ...(projects.deletedProjects ?? [])]
+    : projects.projects,
+)
+
+/** 弹窗标题：时间胶囊编辑模式单独命名，区分于普通任务编辑 */
+const modalTitle = computed(() => {
+  if (props.subtaskMode) return props.subtask ? '编辑子任务' : '添加子任务'
+  if (props.capsuleEdit) return '编辑时间胶囊任务'
+  return props.task ? '编辑任务' : '新建任务'
+})
 
 const name = ref('')
 const description = ref('')
@@ -56,6 +71,13 @@ const reminder = ref('')
 const projectId = ref('')
 const status = ref<'pending' | 'completed'>('pending')
 const err = ref('')
+
+/** 时间胶囊编辑：子任务本地编辑列表（新增/勾选/编辑/删除；保存时随主任务写回胶囊，不丢子任务附件） */
+const capsuleSubs = ref<Subtask[]>([])
+/** 正在编辑的子任务下标：-1 = 新增，null = 未在编辑 */
+const capsuleSubEditIndex = ref<number | null>(null)
+/** 子任务编辑表单（名称/描述/起止/提醒，新增与编辑共用） */
+const capsuleSubForm = ref({ name: '', description: '', startTime: '', endTime: '', reminderTime: '' })
 
 /** 重复任务设置（仅主任务；子任务不支持重复） */
 const repeatEnabled = ref(false)
@@ -201,6 +223,9 @@ watch(
     attachments.value = [...(isSub ? (s?.attachments ?? []) : (t?.attachments ?? []))]
     originalIds.value = new Set(attachments.value.map((a) => a.id))
     removedAttachments.value = []
+    // 时间胶囊编辑：初始化子任务本地列表（副本，避免直接改胶囊数据）
+    capsuleSubs.value = props.capsuleEdit ? [...(t?.subtasks ?? [])].map((s) => ({ ...s })) : []
+    capsuleSubEditIndex.value = null
     savedFlag.value = false
     previewMeta.value = null
     void nextTick(autoResizeDescription)
@@ -253,6 +278,68 @@ function askDelete() {
   const id = props.task.id
   cancel()
   emit('delete', id)
+}
+
+/** 时间胶囊编辑：开始新增（index=null）或编辑（index）子任务 */
+function startCapsuleSubEdit(index: number | null) {
+  if (index === null) {
+    capsuleSubEditIndex.value = -1
+    capsuleSubForm.value = { name: '', description: '', startTime: '', endTime: '', reminderTime: '' }
+    return
+  }
+  const s = capsuleSubs.value[index]
+  if (!s) return
+  capsuleSubEditIndex.value = index
+  capsuleSubForm.value = {
+    name: s.name ?? '',
+    description: s.description ?? '',
+    startTime: toLocalInput(s.startTime),
+    endTime: toLocalInput(s.endTime),
+    reminderTime: toLocalInput(s.reminderTime),
+  }
+}
+
+/** 取消子任务编辑 */
+function cancelCapsuleSubEdit() {
+  capsuleSubEditIndex.value = null
+}
+
+/** 保存子任务（新增或编辑）：写入本地列表，随主任务保存时一起写回胶囊 */
+function saveCapsuleSubEdit() {
+  const f = capsuleSubForm.value
+  const editing = capsuleSubEditIndex.value
+  if (!f.name.trim() || editing === null) return
+  const existing = editing === -1 ? null : capsuleSubs.value[editing]
+  const now = nowIso()
+  const sub: Subtask = {
+    id: existing?.id ?? crypto.randomUUID(),
+    name: f.name.trim(),
+    description: f.description.trim(),
+    startTime: fromLocalInput(f.startTime),
+    endTime: fromLocalInput(f.endTime),
+    reminderTime: fromLocalInput(f.reminderTime) || null,
+    completed: existing?.completed ?? false,
+    // 编辑保留原创建/更新时间与附件；新增子任务用当前时间
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: existing?.updatedAt ?? now,
+    attachments: existing ? [...(existing.attachments ?? [])] : [],
+  }
+  if (editing === -1) capsuleSubs.value.push(sub)
+  else capsuleSubs.value[editing] = sub
+  capsuleSubEditIndex.value = null
+}
+
+/** 勾选/取消子任务完成状态（时间胶囊编辑） */
+function toggleCapsuleSub(index: number) {
+  const s = capsuleSubs.value[index]
+  if (s) s.completed = !s.completed
+}
+
+/** 删除子任务（时间胶囊编辑） */
+function removeCapsuleSub(index: number) {
+  capsuleSubs.value.splice(index, 1)
+  if (capsuleSubEditIndex.value === index) capsuleSubEditIndex.value = null
+  else if (capsuleSubEditIndex.value !== null && capsuleSubEditIndex.value > index) capsuleSubEditIndex.value -= 1
 }
 
 const MAX_ATTACH_SIZE = 50 * 1024 * 1024 // 单个附件最大 50MB
@@ -600,9 +687,10 @@ async function submit() {
     status: props.task ? (status.value === 'completed' ? 'completed' : props.task.status === 'deleted' ? 'deleted' : 'pending') : status.value,
     isReminded: props.task?.isReminded ?? false,
     createdAt: props.task?.createdAt ?? now,
-    updatedAt: now,
+    // 时间胶囊编辑：保留完成/入舱时间不变（决定所在分片与排序，不能刷新为当前时间）
+    updatedAt: props.capsuleEdit ? (props.task?.updatedAt ?? now) : now,
     // 编辑主任务时原样保留已有子任务，避免保存时丢失
-    subtasks: props.task?.subtasks ?? [],
+    subtasks: props.capsuleEdit ? capsuleSubs.value : (props.task?.subtasks ?? []),
     attachments: attachments.value,
   }
   task.repeat = repeat
@@ -612,9 +700,11 @@ async function submit() {
   saving.value = true
   emit('update:open', false)
   try {
-    const ok = props.templateMasterId
-      ? await tasks.saveFutureOccurrenceConfirmed(task, props.templateMasterId)
-      : await tasks.saveTaskConfirmed(task, { prevProjectId: props.task?.projectId ?? undefined })
+    const ok = props.capsuleEdit
+      ? await tasks.saveTrashTaskConfirmed(task, { prevProjectId: props.task?.projectId ?? undefined })
+      : props.templateMasterId
+        ? await tasks.saveFutureOccurrenceConfirmed(task, props.templateMasterId)
+        : await tasks.saveTaskConfirmed(task, { prevProjectId: props.task?.projectId ?? undefined })
     if (!ok) {
       // 保存失败：store 已弹错误提示，这里清理本次新上传的孤文件并停止后台上传
       cleanupNewUploads()
@@ -659,7 +749,7 @@ onUnmounted(() => {
       @drop.prevent="onDropFiles"
     >
       <div class="text-base font-semibold">
-        {{ subtaskMode ? (subtask ? '编辑子任务' : '添加子任务') : task ? '编辑任务' : '新建任务' }}
+        {{ modalTitle }}
       </div>
       <form class="mt-3 space-y-2.5" @submit.prevent="submit">
         <div>
@@ -702,7 +792,7 @@ onUnmounted(() => {
           <div v-if="!subtaskMode">
             <label class="text-xs text-slate-500 block mb-0.5">所属项目</label>
             <select v-model="projectId" class="w-full border rounded-lg px-2 py-1.5 text-sm bg-white">
-              <option v-for="p in projects.projects" :key="p.id" :value="p.id">{{ p.name }}</option>
+              <option v-for="p in projectOptions" :key="p.id" :value="p.id">{{ p.name }}{{ p.id && !projects.projects.some((x) => x.id === p.id) ? '（已删除）' : '' }}</option>
             </select>
           </div>
           <div v-else></div>
@@ -805,6 +895,92 @@ onUnmounted(() => {
           </div>
         </div>
 
+        <!-- 子任务（时间胶囊编辑）：可直接新增/勾选/编辑/删除，保存时随主任务写回胶囊 -->
+        <div v-if="capsuleEdit && !subtaskMode" class="rounded-lg border border-slate-100 p-2.5">
+          <div class="flex items-center justify-between">
+            <label class="text-xs text-slate-500">子任务</label>
+            <button
+              type="button"
+              class="inline-flex items-center gap-1 text-xs text-brand hover:text-brand-dark"
+              @click="startCapsuleSubEdit(null)"
+            >
+              <AppIcon name="plus" :size="12" />添加子任务
+            </button>
+          </div>
+          <div v-if="capsuleSubs.length" class="mt-1.5 space-y-1">
+            <div
+              v-for="(s, i) in capsuleSubs"
+              :key="s.id"
+              class="flex items-center gap-2 rounded-lg border border-slate-100 bg-slate-50/70 px-2 py-1.5"
+              :class="s.completed ? 'opacity-75' : ''"
+            >
+              <button
+                type="button"
+                class="shrink-0 w-4 h-4 rounded border flex items-center justify-center"
+                :class="s.completed ? 'bg-brand border-brand text-white' : 'border-slate-300 bg-white text-transparent'"
+                :title="s.completed ? '标记为未完成' : '标记为已完成'"
+                @click="toggleCapsuleSub(i)"
+              >
+                <AppIcon name="check" :size="10" :stroke-width="2.5" />
+              </button>
+              <button
+                type="button"
+                class="flex-1 min-w-0 text-left text-[13px]"
+                :class="s.completed ? 'line-through text-slate-400' : 'text-slate-700'"
+                :title="'点击编辑：' + (s.name || '（未命名子任务）')"
+                @click="startCapsuleSubEdit(i)"
+              >
+                {{ s.name || '（未命名子任务）' }}
+              </button>
+              <span
+                v-if="(s.attachments?.length ?? 0) > 0"
+                class="shrink-0 text-[11px] text-brand/70 inline-flex items-center gap-0.5"
+              >
+                <AppIcon name="paperclip" :size="11" />{{ s.attachments.length }}
+              </span>
+              <button
+                type="button"
+                class="shrink-0 text-slate-300 hover:text-red-500"
+                title="删除子任务"
+                @click="removeCapsuleSub(i)"
+              >
+                <AppIcon name="close" :size="13" />
+              </button>
+            </div>
+          </div>
+          <div v-else class="mt-1 text-[11px] text-slate-400">暂无子任务</div>
+          <!-- 新增/编辑子任务表单 -->
+          <div v-if="capsuleSubEditIndex !== null" class="mt-2 space-y-1.5 rounded-lg border border-slate-100 bg-white p-2">
+            <input v-model="capsuleSubForm.name" type="text" placeholder="子任务名称" class="w-full border rounded-lg px-2 py-1.5 text-sm" />
+            <input v-model="capsuleSubForm.description" type="text" placeholder="描述（可选）" class="w-full border rounded-lg px-2 py-1.5 text-sm" />
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label class="text-[11px] text-slate-400 block mb-0.5">开始时间</label>
+                <input v-model="capsuleSubForm.startTime" type="datetime-local" class="w-full border rounded-lg px-2 py-1.5 text-sm" />
+              </div>
+              <div>
+                <label class="text-[11px] text-slate-400 block mb-0.5">结束时间</label>
+                <input v-model="capsuleSubForm.endTime" type="datetime-local" class="w-full border rounded-lg px-2 py-1.5 text-sm" />
+              </div>
+            </div>
+            <div>
+              <label class="text-[11px] text-slate-400 block mb-0.5">提醒时间</label>
+              <input v-model="capsuleSubForm.reminderTime" type="datetime-local" class="w-full border rounded-lg px-2 py-1.5 text-sm" />
+            </div>
+            <div class="flex justify-end gap-2 pt-1">
+              <button type="button" class="px-3 py-1.5 rounded-lg text-xs text-slate-600 hover:bg-slate-100" @click="cancelCapsuleSubEdit">取消</button>
+              <button
+                type="button"
+                class="px-3 py-1.5 rounded-lg text-xs text-white bg-brand hover:bg-brand-dark disabled:opacity-50"
+                :disabled="!capsuleSubForm.name.trim()"
+                @click="saveCapsuleSubEdit"
+              >
+                {{ capsuleSubEditIndex === -1 ? '添加' : '保存' }}
+              </button>
+            </div>
+          </div>
+        </div>
+
         <!-- 附件：任务与子任务均支持；安全位图 / PDF 在线预览，其余（含 SVG 等脚本格式）仅下载 -->
         <div>
           <div class="flex items-center justify-between">
@@ -861,12 +1037,12 @@ onUnmounted(() => {
         <div v-if="err" class="text-sm text-red-500">{{ err }}</div>
         <div class="flex justify-between items-center gap-2 pt-1">
           <button
-            v-if="!subtaskMode && task"
+            v-if="!subtaskMode && task && !capsuleEdit"
             type="button"
             class="px-3 py-1.5 rounded-lg text-xs text-red-500 border border-red-200 hover:bg-red-50"
             @click="askDelete"
           >
-            移入回收站
+            存入时间胶囊
           </button>
           <div class="flex justify-end gap-2 ml-auto">
             <button type="button" class="px-4 py-1.5 rounded-lg text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-50" :disabled="saving" @click="cancel">

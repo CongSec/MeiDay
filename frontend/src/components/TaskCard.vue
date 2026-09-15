@@ -166,7 +166,7 @@ function onAddSubtask() {
       <button
         v-else
         class="shrink-0 w-7 h-7 flex items-center justify-center rounded-lg border border-red-200 text-red-400 hover:bg-red-50 btn-press"
-        title="删除（移入回收站）"
+        title="删除（存入时间胶囊）"
         @click.stop="emit('delete', task.id)"
       >
         <AppIcon name="trash" :size="14" />

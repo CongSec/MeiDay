@@ -706,6 +706,78 @@ export const useTasksStore = defineStore('tasks', {
       this.trashHasMore[projectId] = shards.some((m) => !updated.includes(m))
       return remote.length > 0
     },
+    /** 扫描弹窗选择「加载今年数据」：只下载 year-01 至今各项目的回收站分片并合并进内存，
+     *  更早年份不碰（仍按需加载），保持按项目分组；调用方负责全部展开。
+     *  未分类是单文件（不分片），整文件加载。返回 { projects: 有今年数据的项目数, tasks: 拉到的任务数 }。 */
+    async loadTrashYearAll(year: number): Promise<{ projects: number; tasks: number }> {
+      const auth = useAuthStore()
+      let projectCount = 0
+      let taskCount = 0
+      if (!auth.creds || !auth.username) return { projects: projectCount, tasks: taskCount }
+      const client = await createOssClient(auth.creds)
+      const since = `${year}-01`
+      // 扫描过的项目（已有分片索引）+ 本地已加载过胶囊数据的项目
+      const pids = new Set<string>([
+        ...Object.keys(this.trashShardMonths ?? {}),
+        ...Object.keys(this.trash ?? {}),
+      ])
+      for (const pid of pids) {
+        if (pid === UNCATEGORIZED) continue
+        let allMonths: string[] = []
+        let months: string[] = []
+        try {
+          const known = this.trashShardMonths[pid]
+          if (known?.length) {
+            allMonths = known
+          } else {
+            allMonths = await listTrashShardMonths(client, auth.username, pid)
+          }
+          months = allMonths.filter((m) => m >= since)
+        } catch {
+          allMonths = []
+          months = []
+        }
+        if (!months.length) {
+          // 无今年分片（或无法枚举，如无 list 权限）：降级按「当月 + 上月」窗口加载，
+          // 保证项目名出现且「加载更早」按钮按需可用
+          await this.loadTrash(pid).catch(() => {})
+          if ((this.trash[pid]?.length ?? 0) > 0) projectCount++
+          continue
+        }
+        let changed = false
+        for (const m of months) {
+          const remote = await fetchRemoteTrashShard(client, auth.username, pid, m)
+          if (remote.length) {
+            this.trash[pid] = mergeUnique(this.trash[pid] ?? [], remote)
+            changed = true
+            taskCount += remote.length
+          }
+        }
+        if (changed) await idbPut('trash', trashCacheKey(auth.username, pid), this.trash[pid])
+        const loaded = new Set(this.trashLoadedMonths[pid] ?? [])
+        for (const m of months) loaded.add(m)
+        this.trashLoadedMonths[pid] = [...loaded].sort()
+        // 保留完整分片索引并更新「加载更早」：今年之后还有更早分片时按钮按需出现
+        this.trashShardMonths[pid] = allMonths
+        this.trashHasMore[pid] = allMonths.some((m) => !loaded.has(m))
+        if (!this.trashLoaded.includes(pid)) this.trashLoaded.push(pid)
+        if (changed) projectCount++
+      }
+      // 未分类：单文件整文件加载（不分片，无法只取今年）
+      try {
+        const remoteU = await fetchRemoteTrashShard(client, auth.username, UNCATEGORIZED)
+        if (remoteU.length) {
+          this.trash[UNCATEGORIZED] = mergeUnique(this.trash[UNCATEGORIZED] ?? [], remoteU)
+          taskCount += remoteU.length
+          await idbPut('trash', trashCacheKey(auth.username, UNCATEGORIZED), this.trash[UNCATEGORIZED])
+        }
+      } catch {
+        /* 未分类文件不存在/网络失败：忽略 */
+      }
+      if (!this.trashLoaded.includes(UNCATEGORIZED)) this.trashLoaded.push(UNCATEGORIZED)
+      projectCount++
+      return { projects: projectCount, tasks: taskCount }
+    },
     /** 彻底删除某项目全部回收站文件（分片 + 旧版 trash.json / 未分类 today_trash.json），
      *  并清空内存与 IDB 缓存。用于「清空回收站」与整项目恢复，删除后该项目不再出现在回收站扫描结果中。 */
     async purgeTrashFiles(projectId: string): Promise<void> {
@@ -1015,7 +1087,7 @@ export const useTasksStore = defineStore('tasks', {
       if (projectId === UNCATEGORIZED) {
         const r = await this._saveTrashShard(client, auth.username, projectId, undefined, list)
         if (!r.ok) {
-          useUiStore().toast('保存回收站失败：检测到其他设备持续修改，请稍后重试', 'error')
+          useUiStore().toast('保存时间胶囊失败：检测到其他设备持续修改，请稍后重试', 'error')
           return false
         }
         await idbPut('trash', trashCacheKey(auth.username, projectId), list)
@@ -1063,7 +1135,7 @@ export const useTasksStore = defineStore('tasks', {
         }
       }
       if (!ok) {
-        useUiStore().toast('保存回收站失败：检测到其他设备持续修改，请稍后重试', 'error')
+        useUiStore().toast('保存时间胶囊失败：检测到其他设备持续修改，请稍后重试', 'error')
         return false
       }
       // 更新合并 IDB 缓存（UI / 下次 loadTrash 直接读取）
@@ -1071,8 +1143,8 @@ export const useTasksStore = defineStore('tasks', {
       queueSyncChange(auth.username, 'trash', projectId)
       return true
       } catch (e) {
-        console.error('保存回收站到 OSS 失败', e)
-        useUiStore().toast(`保存回收站失败：${describeOssError(e)}`, 'error')
+        console.error('保存时间胶囊到 OSS 失败', e)
+        useUiStore().toast(`保存时间胶囊失败：${describeOssError(e)}`, 'error')
         return false
       }
       finally {
@@ -1956,6 +2028,19 @@ export const useTasksStore = defineStore('tasks', {
         task.updatedAt = nowIso()
         return this.saveProjectNow(projectId)
       }
+      // 时间胶囊任务（不在活跃列表，也不在 repeats 模板）：
+      // 后台上传完成的附件写回胶囊并落盘；保留完成/入舱时间，不刷新 updatedAt
+      const trashTask = (this.trash[projectId] ?? []).find((t) => t.id === targetTaskId)
+      if (trashTask) {
+        if (subtaskId) {
+          const sub = trashTask.subtasks.find((s) => s.id === subtaskId)
+          if (!sub) return false
+          if (!sub.attachments.some((a) => a.id === meta.id)) sub.attachments.push(meta)
+        } else if (!trashTask.attachments.some((a) => a.id === meta.id)) {
+          trashTask.attachments.push(meta)
+        }
+        return this.saveTrashNow(projectId)
+      }
       // 未来任务的重复出现（repeats 中的模板）不在主任务列表：
       // 把后台上传完成的附件写回模板并持久化 repeats，保证“像普通任务一样编辑未来任务”时附件不丢
       const masters = this.repeats[projectId] ?? []
@@ -2100,6 +2185,55 @@ export const useTasksStore = defineStore('tasks', {
       for (const [pid, list] of tasksSnap) {
         this.tasks[pid] = list
         await idbPut('tasks', taskCacheKey(auth.username, pid), list)
+      }
+      for (const [pid, list] of trashSnap) {
+        this.trash[pid] = list
+        await idbPut('trash', trashCacheKey(auth.username, pid), list)
+      }
+      return false
+    },
+    /** 确认式保存「时间胶囊」任务编辑：任务保持在胶囊内（状态不变、完成/入舱时间不变），
+     *  编辑结果写回胶囊对应项目分片；跨项目移动时新旧项目都落盘，成功才返回 true，失败回滚并返回 false。 */
+    async saveTrashTaskConfirmed(task: Task, opts?: { prevProjectId?: string }): Promise<boolean> {
+      const auth = useAuthStore()
+      // 任务所在胶囊项目：优先用显式传入的旧项目，否则在已加载胶囊数据中查找
+      let sourcePid = opts?.prevProjectId
+      if (!sourcePid || !(this.trash[sourcePid] ?? []).some((t) => t.id === task.id)) {
+        for (const [pid, list] of Object.entries(this.trash)) {
+          if (list.some((t) => t.id === task.id)) {
+            sourcePid = pid
+            break
+          }
+        }
+      }
+      if (sourcePid === undefined) return false
+      const targetPid = task.projectId || sourcePid
+      normalizeTask(task)
+      // 快照涉及项目（跨项目移动时新旧两个都要）
+      const trashSnap = new Map<string, Task[]>()
+      for (const pid of new Set([sourcePid, targetPid])) {
+        trashSnap.set(pid, (this.trash[pid] ?? []).slice())
+      }
+      // 从源项目胶囊移除旧任务，写入目标项目胶囊（同项目时即原位替换）
+      this.trash[sourcePid] = (this.trash[sourcePid] ?? []).filter((t) => t.id !== task.id)
+      this.trash[targetPid] = mergeUnique(this.trash[targetPid] ?? [], [task])
+      if (!this.trashLoaded.includes(targetPid)) this.trashLoaded.push(targetPid)
+      const okSource = await this.saveTrashNow(sourcePid)
+      const okTarget = sourcePid === targetPid ? true : await this.saveTrashNow(targetPid)
+      if (okSource && okTarget) {
+        // 刷新目标项目分片索引，保证「加载更早」可用
+        if (sourcePid !== targetPid && auth.creds && targetPid !== UNCATEGORIZED) {
+          try {
+            const client = await createOssClient(auth.creds)
+            const shards = await listTrashShardMonths(client, auth.username, targetPid)
+            this.trashShardMonths[targetPid] = shards
+            this.trashHasMore[targetPid] = shards.some((m) => !(this.trashLoadedMonths[targetPid] ?? []).includes(m))
+          } catch {
+            /* 枚举失败不影响保存结果 */
+          }
+        }
+        logAudit('编辑时间胶囊任务', safeDetail(`任务ID：${task.id}，项目ID：${targetPid}`))
+        return true
       }
       for (const [pid, list] of trashSnap) {
         this.trash[pid] = list

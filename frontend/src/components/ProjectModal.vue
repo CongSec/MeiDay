@@ -86,7 +86,7 @@ async function confirmDelete() {
   close()
   router.push('/today')
   const ok = await projects.deleteProject(pid)
-  if (ok) ui.toast('项目已删除，任务进入回收站')
+  if (ok) ui.toast('项目已删除，任务已存入时间胶囊')
 }
 </script>
 
@@ -127,7 +127,7 @@ async function confirmDelete() {
   <ConfirmDialog
     :open="confirmDeleteOpen"
     title="删除项目"
-    message="项目及其下所有任务将移入回收站，可在回收站「恢复整个项目」（重名时自动合并）。确定删除吗？"
+    message="项目及其下所有任务将存入时间胶囊，可在时间胶囊「恢复整个项目」（重名时自动合并）。确定删除吗？"
     confirm-text="删除"
     :danger="true"
     :disabled="saving"

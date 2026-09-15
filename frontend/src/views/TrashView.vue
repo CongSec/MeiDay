@@ -6,6 +6,8 @@ import { useTasksStore } from '@/stores/tasks'
 import { useUiStore } from '@/stores/ui'
 import AppIcon from '@/components/AppIcon.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import TaskModal from '@/components/TaskModal.vue'
+import TrashTaskDetailModal from '@/components/TrashTaskDetailModal.vue'
 import type JSZip from 'jszip'
 import { deleteAttachments, downloadAttachment } from '@/utils/attachments'
 import { createOssClient } from '@/utils/oss'
@@ -17,6 +19,9 @@ const auth = useAuthStore()
 const projects = useProjectsStore()
 const tasks = useTasksStore()
 const ui = useUiStore()
+
+/** 扫描时「加载今年数据」的目标年份：当前自然年（2026-01 至今） */
+const CURRENT_YEAR = new Date().getFullYear()
 
 /** 回收站同时支持活跃项目与已删除项目：导出/展示时都必须能取到项目名称 */
 function projectById(id: string): Project | DeletedProject | undefined {
@@ -63,6 +68,21 @@ const visibleLimit = ref<Record<string, number>>({})
 /** 「加载更早」进行中（按项目） */
 const loadingMore = ref<Record<string, boolean>>({})
 
+/** 搜索关键词：按项目名 / 已加载项目的任务名与内容过滤 */
+const searchQuery = ref('')
+/** 是否处于搜索状态（决定空状态文案） */
+const searching = computed(() => searchQuery.value.trim().length > 0)
+
+/** 扫描完成后「是否加载今年数据」的确认弹窗 */
+const scanConfirmOpen = ref(false)
+/** 「加载今年数据」进行中：禁用弹窗按钮防重复点击 */
+const loadingYearAll = ref(false)
+
+/** 详情/编辑弹窗状态 */
+const detailTask = ref<Task | null>(null)
+const editTask = ref<Task | null>(null)
+const editOpen = ref(false)
+
 /** 展开项目时只打开当前项目的数据包：仅加载该项目回收站文件，其余保持未加载 */
 async function openGroup(key: string) {
   if (tasks.trashLoaded.includes(key) || loading.value[key]) return
@@ -72,7 +92,7 @@ async function openGroup(key: string) {
     await tasks.loadTrash(key)
   } catch (e) {
     loadError.value = { ...loadError.value, [key]: true }
-    ui.toast((e as Error).message || '回收站文件加载失败，请检查网络或 OSS 配置', 'error')
+    ui.toast((e as Error).message || '时间胶囊文件加载失败，请检查网络或 OSS 配置', 'error')
   } finally {
     loading.value = { ...loading.value, [key]: false }
   }
@@ -104,7 +124,7 @@ async function loadMoreGroup(key: string) {
   try {
     const got = await tasks.loadMoreTrash(key)
     visibleLimit.value = { ...visibleLimit.value, [key]: limit + TRASH_VISIBLE }
-    if (!got) ui.toast('已加载全部回收站记录')
+    if (!got) ui.toast('已加载全部时间胶囊记录')
   } catch (e) {
     ui.toast((e as Error).message || '加载更早记录失败，请检查网络或 OSS 配置', 'error')
   } finally {
@@ -117,12 +137,12 @@ async function loadTrashBase() {
   if (!projects.loaded) await projects.load()
 }
 
-const MOBILE_TITLE = '回收站'
+const MOBILE_TITLE = '时间胶囊'
 onMounted(async () => {
   if (mobileActions) mobileActions.title = MOBILE_TITLE
   loadExpanded()
   await loadTrashBase()
-  logAudit('打开回收站')
+  logAudit('打开时间胶囊')
 })
 onUnmounted(() => {
   // 离开回收站：解除全部展开项目的固定，交回 LRU 逐出
@@ -148,7 +168,7 @@ watch(
   },
 )
 
-/** 用户主动点击才扫描回收站：只枚举哪些项目存在回收站文件（元数据），不下载任何文件内容 */
+/** 用户主动点击才扫描时间胶囊：只枚举哪些项目存在回收站文件（元数据），不下载任何文件内容 */
 async function scanTrash() {
   if (scanning.value) return
   scanning.value = true
@@ -169,13 +189,44 @@ async function scanTrash() {
     page.value = 1
     visibleLimit.value = {}
     loadingMore.value = {}
-    collapseAll()
-    ui.toast('回收站已扫描')
-    logAudit('扫描回收站', `发现 ${scanIds.value.length} 个项目的回收站文件`)
+    logAudit('扫描时间胶囊', `发现 ${scanIds.value.length} 个项目的胶囊数据`)
+    // 扫描完成：提示用户是否加载今年数据
+    scanConfirmOpen.value = true
   } catch (e) {
-    ui.toast((e as Error).message || '回收站扫描失败，请检查网络或 OSS 配置', 'error')
+    ui.toast((e as Error).message || '时间胶囊扫描失败，请检查网络或 OSS 配置', 'error')
   } finally {
     scanning.value = false
+  }
+}
+
+/** 扫描确认弹窗「仅项目名称」：收起全部项目，仅展示项目名列表，点击项目后再按需加载 */
+function scanOnlyNames() {
+  scanConfirmOpen.value = false
+  collapseAll()
+  ui.toast('时间胶囊已扫描')
+}
+
+/** 扫描确认弹窗「加载今年数据」：只下载今年（2026-01 至今）各项目数据并全部展开，更早年份按需加载 */
+async function loadYearAll() {
+  if (loadingYearAll.value) return
+  loadingYearAll.value = true
+  try {
+    const res = await tasks.loadTrashYearAll(CURRENT_YEAR)
+    // 全部项目展开并记忆（钉住内存，避免被 LRU 逐出）；未加载的项目仍按需加载
+    const next: Record<string, boolean> = {}
+    for (const g of projectGroups.value) {
+      next[g.key] = true
+      tasks.pinViewProject(g.key)
+      if (!g.loaded) void openGroup(g.key)
+    }
+    expanded.value = next
+    localStorage.setItem(expandedKey(), JSON.stringify(next))
+    ui.toast(`已加载 ${res.projects} 个项目的今年数据（${res.tasks} 条任务）`)
+  } catch (e) {
+    ui.toast((e as Error).message || '加载今年数据失败，请检查网络或 OSS 配置', 'error')
+  } finally {
+    loadingYearAll.value = false
+    scanConfirmOpen.value = false
   }
 }
 
@@ -255,7 +306,30 @@ const projectGroups = computed<TrashGroup[]>(() => {
     if (!ta && tb) return 1
     return a.label.localeCompare(b.label)
   })
-  return groups
+  // 搜索过滤：项目名包含关键词，或已加载项目中任务名/内容匹配
+  const q = searchQuery.value.trim().toLowerCase()
+  if (!q) return groups
+  const out: TrashGroup[] = []
+  for (const g of groups) {
+    if (g.label.toLowerCase().includes(q)) {
+      out.push(g)
+      continue
+    }
+    // 只搜已加载过的项目任务（未加载的项目内容不可搜索）
+    if (!g.loaded) continue
+    const matched = (tasks.trash[g.key] ?? []).filter((t) => {
+      const name = (t.name || '').toLowerCase()
+      const desc = (t.description || '').toLowerCase()
+      return name.includes(q) || desc.includes(q)
+    })
+    if (!matched.length) continue
+    out.push({
+      ...g,
+      tasks: matched.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+      hasMore: false,
+    })
+  }
+  return out
 })
 
 /** 回收站项目名列表分页：每页 20 个；进入/重新扫描回到第 1 页，翻页时收起全部项目 */
@@ -384,7 +458,7 @@ async function exportTrash() {
   try {
     const projectsData = await collectAllTrash()
     if (!projectsData.length) {
-      ui.toast('回收站为空，无需导出', 'error')
+      ui.toast('时间胶囊为空，无需导出', 'error')
       return
     }
     const payload = { exportedAt: nowIso(), version: 1, projects: projectsData }
@@ -409,7 +483,7 @@ async function exportTrash() {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `回收站备份-${todayKey()}.zip`
+    a.download = `时间胶囊备份-${todayKey()}.zip`
     document.body.appendChild(a)
     a.click()
     a.remove()
@@ -417,10 +491,10 @@ async function exportTrash() {
     const count = projectsData.reduce((n, p) => n + p.tasks.length, 0)
     ui.toast(
       failedAtts
-        ? `已导出 ${count} 条回收站记录（${failedAtts} 个附件下载失败）`
-        : `已导出 ${count} 条回收站记录及 ${allAtts.length} 个附件`,
+        ? `已导出 ${count} 条时间胶囊记录（${failedAtts} 个附件下载失败）`
+        : `已导出 ${count} 条时间胶囊记录及 ${allAtts.length} 个附件`,
     )
-    logAudit('导出回收站备份', `项目 ${projectsData.length} 个，任务 ${count} 条，附件 ${allAtts.length} 个（失败 ${failedAtts}）`)
+    logAudit('导出时间胶囊备份', `项目 ${projectsData.length} 个，任务 ${count} 条，附件 ${allAtts.length} 个（失败 ${failedAtts}）`)
   } catch (e) {
     ui.toast((e as Error).message || '导出失败，请检查网络或 OSS 配置', 'error')
   } finally {
@@ -529,10 +603,10 @@ async function onImportFile(e: Event) {
     if (count > 0) {
       ui.toast(
         attOk || attFailed
-          ? `已导入 ${count} 条回收站记录（附件 ${attOk} 个成功${attFailed ? `，${attFailed} 个缺失/失败` : ''}）`
-          : `已导入 ${count} 条回收站记录`,
+          ? `已导入 ${count} 条时间胶囊记录（附件 ${attOk} 个成功${attFailed ? `，${attFailed} 个缺失/失败` : ''}）`
+          : `已导入 ${count} 条时间胶囊记录`,
       )
-      logAudit('导入回收站备份', `${count} 条，附件 ${attOk} 成功 ${attFailed} 失败`)
+      logAudit('导入时间胶囊备份', `${count} 条，附件 ${attOk} 成功 ${attFailed} 失败`)
     } else {
       ui.toast('备份文件中没有可导入的任务', 'error')
     }
@@ -548,7 +622,7 @@ async function clearTrash() {
   try {
     const all = await collectAllTrash()
     if (!all.length) {
-      ui.toast('回收站已为空')
+      ui.toast('时间胶囊已为空')
       clearOpen.value = false
       return
     }
@@ -571,8 +645,8 @@ async function clearTrash() {
     scanIds.value = scanIds.value.filter((pid) => !clearedPids.has(pid))
     for (const pid of clearedPids) delete scanLatest.value[pid]
     if (clearedPids.has(UNCATEGORIZED)) scanHasUncategorized.value = false
-    ui.toast(`已清空回收站（${cleared} 条，清理附件 ${deletedAtts} 个）`)
-    logAudit('清空回收站', `${cleared} 条，附件 ${deletedAtts} 个`)
+    ui.toast(`已清空时间胶囊（${cleared} 条，清理附件 ${deletedAtts} 个）`)
+    logAudit('清空时间胶囊', `${cleared} 条，附件 ${deletedAtts} 个`)
   } catch (e) {
     ui.toast((e as Error).message || '清空失败，请检查网络或 OSS 配置', 'error')
   } finally {
@@ -630,6 +704,26 @@ async function confirmDelete() {
   const ok = await tasks.permanentDeleteConfirmed(t.projectId, t.id)
   if (ok) ui.toast('已永久删除')
 }
+
+/** 打开任务详情弹窗 */
+function openDetail(t: Task) {
+  detailTask.value = t
+}
+
+/** 详情弹窗「编辑」：关闭详情，打开胶囊编辑弹窗 */
+function openEdit(t: Task) {
+  detailTask.value = null
+  editTask.value = t
+  editOpen.value = true
+}
+
+/** 胶囊编辑保存成功：关闭弹窗并提示 */
+function onCapsuleSaved() {
+  editOpen.value = false
+  editTask.value = null
+  detailTask.value = null
+  ui.toast('已保存到时间胶囊')
+}
 </script>
 
 <template>
@@ -638,10 +732,10 @@ async function confirmDelete() {
       <span class="w-9 h-9 rounded-xl bg-white border border-line shadow-card text-brand flex items-center justify-center shrink-0">
         <AppIcon name="trash" :size="18" />
       </span>
-      <h1 class="text-xl font-bold text-slate-800">回收站</h1>
+      <h1 class="text-xl font-bold text-slate-800">时间胶囊</h1>
     </div>
     <div class="mt-0.5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
-      <div class="text-xs text-slate-400 leading-relaxed">被删除的任务与项目，永不自动清理。扫描只列出有回收站文件的项目，展开项目时才加载对应文件</div>
+      <div class="text-xs text-slate-400 leading-relaxed">存入时间胶囊的任务与项目，永不自动清理。扫描只列出有时间胶囊数据的项目，展开项目时才加载对应文件</div>
       <div class="flex flex-wrap items-center gap-2">
         <button
           class="inline-flex items-center gap-1.5 shrink-0 px-3 py-1.5 rounded-lg text-xs border border-slate-200 hover:bg-slate-50 disabled:opacity-60"
@@ -664,7 +758,7 @@ async function confirmDelete() {
           @click="clearOpen = true"
         >
           <AppIcon name="trash" :size="13" class="shrink-0" />
-          {{ clearBusy ? '清空中…' : '清空回收站' }}
+          {{ clearBusy ? '清空中…' : '清空时间胶囊' }}
         </button>
         <button
           class="inline-flex items-center gap-1.5 shrink-0 px-3 py-1.5 rounded-lg text-xs border border-slate-200 hover:bg-slate-50 disabled:opacity-60"
@@ -672,20 +766,38 @@ async function confirmDelete() {
           @click="scanTrash"
         >
           <AppIcon name="search" :size="13" class="text-slate-500" />
-          {{ scanning ? '扫描中…' : '扫描回收站文件' }}
+          {{ scanning ? '扫描中…' : '扫描时间胶囊文件' }}
         </button>
       </div>
       <input ref="fileInput" type="file" accept=".zip,.json,application/json,application/zip" class="hidden" @change="onImportFile" />
     </div>
 
+    <!-- 搜索：项目名 + 已加载项目的任务名/内容 -->
+    <div class="mt-4">
+      <div class="relative">
+        <AppIcon name="search" :size="15" class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+        <input
+          v-model="searchQuery"
+          type="text"
+          placeholder="搜索项目名 / 任务名 / 任务内容（仅已加载的项目）"
+          class="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-700 placeholder:text-slate-400 focus:border-brand focus:outline-none"
+        />
+      </div>
+      <div v-if="searching" class="mt-1.5 text-[11px] text-slate-400">
+        仅搜索已加载的项目与任务；未加载的项目请先展开后再搜索
+      </div>
+    </div>
+
     <div v-if="!projectGroups.length" class="mt-4 py-16 text-center text-sm text-slate-400">
-      {{ scanned ? '未发现回收站文件' : '回收站未扫描，点击右上角「扫描回收站文件」后可见历史任务' }}
+      <template v-if="searching">未找到匹配的时间胶囊记录</template>
+      <template v-else-if="scanned">未发现时间胶囊数据</template>
+      <template v-else>时间胶囊未扫描，点击右上角「扫描时间胶囊文件」后可见历史任务</template>
     </div>
     <div v-for="g in paginatedGroups" :key="g.key" class="mt-4">
       <div class="flex items-center gap-2 mb-2">
         <button
           class="flex items-center gap-2 flex-1 min-w-0 px-0.5 py-1 rounded-lg hover:bg-slate-50 text-left"
-          :title="isExpanded(g.key) ? '点击折叠' : '点击展开并加载该项目回收站'"
+          :title="isExpanded(g.key) ? '点击折叠' : '点击展开并加载该项目时间胶囊'"
           @click="toggleGroup(g.key)"
         >
           <span class="w-4 flex items-center justify-center text-slate-400 shrink-0">
@@ -710,7 +822,7 @@ async function confirmDelete() {
         </button>
       </div>
       <div v-if="isExpanded(g.key)" class="space-y-2">
-        <div v-if="loading[g.key]" class="px-0.5 py-2 text-xs text-slate-400">正在加载该项目的回收站文件…</div>
+        <div v-if="loading[g.key]" class="px-0.5 py-2 text-xs text-slate-400">正在加载该项目的时间胶囊数据…</div>
         <template v-else>
           <div v-if="loadError[g.key]" class="px-0.5 py-2 text-xs text-red-500">加载失败，点击项目名可重试</div>
           <div
@@ -734,6 +846,14 @@ async function confirmDelete() {
               </div>
             </div>
             <button
+              class="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs text-slate-600 border border-slate-200 hover:bg-slate-50 shrink-0"
+              title="查看任务详情"
+              @click="openDetail(t)"
+            >
+              <AppIcon name="eye" :size="13" class="shrink-0" />
+              详情
+            </button>
+            <button
               class="px-3 py-1.5 rounded-lg text-xs text-brand border border-brand/30 hover:bg-brand/5 shrink-0"
               @click="restore(t)"
             >
@@ -756,7 +876,7 @@ async function confirmDelete() {
             {{ loadingMore[g.key] ? '加载中…' : '加载更早' }}
           </button>
           <div v-if="!loadError[g.key] && !g.tasks.length && !g.hasMore" class="text-xs text-slate-400 px-0.5">
-            {{ g.deleted ? '该项目没有任务' : '该项目回收站为空' }}
+            {{ g.deleted ? '该项目没有任务' : '该项目时间胶囊为空' }}
           </div>
         </template>
       </div>
@@ -810,6 +930,41 @@ async function confirmDelete() {
       </span>
     </div>
 
+    <!-- 扫描完成：是否加载全部数据 -->
+    <div
+      v-if="scanConfirmOpen"
+      class="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center px-4"
+    >
+      <div class="modal-panel rounded-2xl w-full max-w-md animate-modal-pop p-5">
+        <h3 class="text-base font-semibold text-slate-800">扫描完成</h3>
+        <p class="mt-2 text-sm text-slate-500 leading-relaxed">
+          已发现 {{ scanIds.length }} 个项目的时间胶囊数据，是否加载全部数据？
+        </p>
+        <p class="mt-1 text-xs text-slate-400">选择「加载今年数据」只下载 {{ CURRENT_YEAR }}-01 至今的数据，更早年份仍按需加载。</p>
+        <div class="mt-4 flex flex-col gap-2">
+          <button
+            class="w-full py-2 rounded-lg text-sm text-white bg-brand hover:bg-brand/90 disabled:opacity-60 disabled:cursor-not-allowed"
+            :disabled="loadingYearAll"
+            @click="loadYearAll"
+          >
+            {{ loadingYearAll ? '正在加载今年数据…' : `加载今年数据（${CURRENT_YEAR}-01 至今）` }}
+          </button>
+          <button
+            class="w-full py-2 rounded-lg text-sm text-slate-700 bg-slate-100 hover:bg-slate-200"
+            @click="scanOnlyNames"
+          >
+            仅加载项目名称
+          </button>
+          <button
+            class="w-full py-2 rounded-lg text-sm text-slate-500 hover:bg-slate-100"
+            @click="scanConfirmOpen = false"
+          >
+            取消
+          </button>
+        </div>
+      </div>
+    </div>
+
     <ConfirmDialog
       :open="!!deleteTarget"
       title="永久删除"
@@ -821,14 +976,26 @@ async function confirmDelete() {
     />
     <ConfirmDialog
       :open="clearOpen"
-      title="清空回收站"
-      message="将永久删除回收站中的全部任务，且无法恢复，确定清空吗？建议先导出备份。"
+      title="清空时间胶囊"
+      message="将永久删除时间胶囊中的全部任务，且无法恢复，确定清空吗？建议先导出备份。"
       confirm-text="确认清空"
       :danger="true"
       :disabled="clearBusy"
       @confirm="clearTrash"
       @cancel="clearOpen = false"
     />
+
+    <TrashTaskDetailModal
+      :open="!!detailTask"
+      :task="detailTask"
+      @close="detailTask = null"
+      @edit="openEdit"
+    />
+    <TaskModal
+      v-model:open="editOpen"
+      :task="editTask"
+      :capsule-edit="true"
+      @saved="onCapsuleSaved"
+    />
   </div>
 </template>
-

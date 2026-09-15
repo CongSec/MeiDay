@@ -306,7 +306,7 @@ export const useProjectsStore = defineStore('projects', {
         tasks.saveRepeatsNow(id),
       ])
       if (okProfile && okTasks && okTrash && okRepeats) {
-        logAudit('删除项目', safeDetail(`项目ID：${id}，其下任务已移入回收站`))
+        logAudit('删除项目', safeDetail(`项目ID：${id}，其下任务已存入时间胶囊`))
         // 显式清空该项目在服务端的提醒行，避免残留提醒继续发信（BUG-12）
         if (auth.token && id) {
           try {
