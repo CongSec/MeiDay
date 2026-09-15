@@ -8,7 +8,6 @@ import AppIcon from '@/components/AppIcon.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import TaskModal from '@/components/TaskModal.vue'
 import TimeCapsuleCalendar from '@/components/TimeCapsuleCalendar.vue'
-import TimeCapsuleGantt from '@/components/TimeCapsuleGantt.vue'
 import TimeCapsuleHeatmap from '@/components/TimeCapsuleHeatmap.vue'
 import TimeCapsuleTrend from '@/components/TimeCapsuleTrend.vue'
 import type JSZip from 'jszip'
@@ -89,14 +88,13 @@ const searching = computed(() => searchQuery.value.trim().length > 0)
 const editTask = ref<Task | null>(null)
 const editOpen = ref(false)
 
-/** 多视图：当前视图（列表为默认视图），多视图按需加载年份数据 */
-const viewMode = ref<'list' | 'calendar' | 'heatmap' | 'trend' | 'gantt'>('list')
+/** 多视图：当前视图（项目为默认视图），多视图按需加载年份数据 */
+const viewMode = ref<'list' | 'calendar' | 'heatmap' | 'trend'>('list')
 const VIEW_TABS: { key: typeof viewMode.value; label: string; icon: string }[] = [
-  { key: 'list', label: '列表图', icon: 'menu' },
+  { key: 'list', label: '项目图', icon: 'menu' },
   { key: 'calendar', label: '日历图', icon: 'calendar' },
   { key: 'heatmap', label: '热力图', icon: 'flame' },
   { key: 'trend', label: '趋势图', icon: 'chart' },
-  { key: 'gantt', label: '甘特图', icon: 'grid' },
 ]
 /** 多视图当前查看的年份 / 月份（默认今年 / 当月） */
 const viewYear = ref(CURRENT_YEAR)
@@ -261,8 +259,8 @@ async function ensureViewYear(year: number) {
   await tasks.loadTrashYear(year)
 }
 
-/** 切换多视图：非列表视图自动加载当前年数据（默认今年，更早年份按需加载） */
-async function switchView(mode: 'list' | 'calendar' | 'heatmap' | 'trend' | 'gantt') {
+/** 切换多视图：非项目视图自动加载当前年数据（默认今年，更早年份按需加载） */
+async function switchView(mode: 'list' | 'calendar' | 'heatmap' | 'trend') {
   viewMode.value = mode
   if (mode === 'list') return
   const needsLoad = !tasks.trashLoadedYears.includes(viewYear.value)
@@ -288,7 +286,7 @@ async function onViewYearChange(year: number) {
   }
 }
 
-/** 日历/甘特切换月份：跨年时按需加载新一年 */
+/** 日历切换月份：跨年时按需加载新一年 */
 async function onViewMonthChange(month: string) {
   viewMonth.value = month
   const year = Number(month.slice(0, 4))
@@ -318,16 +316,16 @@ const completedTrashTasks = computed(() => {
   }
   return out
 })
-/** 待办过滤缓存：同上，键为活跃任务数组引用 */
-const ganttActiveCache = new WeakMap<Task[], Task[]>()
-/** 甘特图「未完成」：胶囊外活跃待办（仅已加载项目的 pending 任务；deleted 不计入） */
-const ganttActiveTasks = computed(() => {
+/** 胶囊外待办过滤缓存：同上，键为活跃任务数组引用 */
+const pendingActiveCache = new WeakMap<Task[], Task[]>()
+/** 日历图「胶囊外任务」：有开始/提醒时间或重复规则的活跃待办（仅已加载项目的 pending 任务；deleted 不计入） */
+const pendingActiveTasks = computed(() => {
   const out: Task[] = []
   for (const arr of Object.values(tasks.tasks)) {
-    let cached = ganttActiveCache.get(arr)
+    let cached = pendingActiveCache.get(arr)
     if (!cached) {
-      cached = arr.filter((t) => t.status === 'pending')
-      ganttActiveCache.set(arr, cached)
+      cached = arr.filter((t) => t.status === 'pending' && (!!t.startTime || !!t.reminderTime || !!t.repeat))
+      pendingActiveCache.set(arr, cached)
     }
     out.push(...cached)
   }
@@ -850,17 +848,21 @@ function durationText(t: Task): string {
   return `耗时${parts.join('')}`
 }
 
-/** 打开任务编辑弹窗（任务详情页已废弃：列表/日历/甘特图点击任务都直接进编辑） */
+/** 编辑弹窗：胶囊内任务用胶囊编辑（保留完成/入舱时间），胶囊外待办用普通编辑 */
+const editCapsule = ref(true)
+
+/** 打开任务编辑弹窗（任务详情页已废弃：列表/日历点击任务都直接进编辑） */
 function openEdit(t: Task) {
   editTask.value = t
+  editCapsule.value = t.status !== 'pending'
   editOpen.value = true
 }
 
-/** 胶囊编辑保存成功：关闭弹窗并提示 */
-function onCapsuleSaved() {
+/** 编辑保存成功：关闭弹窗并提示 */
+function onSaved(task: Task) {
   editOpen.value = false
   editTask.value = null
-  ui.toast('已保存到时间胶囊')
+  ui.toast(task.status === 'pending' ? '任务已保存' : '已保存到时间胶囊')
 }
 </script>
 
@@ -910,7 +912,7 @@ function onCapsuleSaved() {
       <input ref="fileInput" type="file" accept=".zip,.json,application/json,application/zip" class="hidden" @change="onImportFile" />
     </div>
 
-    <!-- 多视图切换：列表（默认）/ 日历 / 热力图 / 趋势 / 甘特图 -->
+    <!-- 多视图切换：项目（默认）/ 日历 / 热力图 / 趋势 -->
     <div class="mt-3 flex flex-wrap items-center gap-1.5">
       <button
         v-for="tab in VIEW_TABS"
@@ -925,7 +927,7 @@ function onCapsuleSaved() {
       </button>
     </div>
 
-    <!-- 列表视图：搜索 + 按项目分组（默认视图） -->
+    <!-- 项目视图：搜索 + 按项目分组（默认视图） -->
     <div v-if="viewMode === 'list'">
     <!-- 搜索：项目名 + 已加载项目的任务名/内容 -->
     <div class="mt-4">
@@ -1096,7 +1098,7 @@ function onCapsuleSaved() {
     </div>
     </div>
 
-    <!-- 多视图：日历 / 热力图 / 趋势 / 甘特图（按需加载年份数据） -->
+    <!-- 多视图：日历 / 热力图 / 趋势（按需加载年份数据） -->
     <div v-else class="mt-4">
       <div v-if="viewLoading" class="flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white py-16 text-sm text-slate-500">
         <AppIcon name="refresh" :size="16" class="animate-spin text-brand" />
@@ -1107,6 +1109,7 @@ function onCapsuleSaved() {
         <TimeCapsuleCalendar
           v-if="viewMode === 'calendar'"
           :tasks="completedTrashTasks"
+          :pending="pendingActiveTasks"
           :month="viewMonth"
           :project-name="projectNameOf"
           @change-month="onViewMonthChange"
@@ -1124,15 +1127,6 @@ function onCapsuleSaved() {
           :year="viewYear"
           :years="tasks.trashLoadedYears"
           @change-year="onViewYearChange"
-        />
-        <TimeCapsuleGantt
-          v-else-if="viewMode === 'gantt'"
-          :completed="completedTrashTasks"
-          :active="ganttActiveTasks"
-          :month="viewMonth"
-          :project-name="projectNameOf"
-          @change-month="onViewMonthChange"
-          @open-task="openEdit"
         />
       </template>
     </div>
@@ -1160,8 +1154,8 @@ function onCapsuleSaved() {
     <TaskModal
       v-model:open="editOpen"
       :task="editTask"
-      :capsule-edit="true"
-      @saved="onCapsuleSaved"
+      :capsule-edit="editCapsule"
+      @saved="onSaved"
     />
   </div>
 </template>

@@ -146,7 +146,7 @@ onMounted(() => {
 /** SVG 折线图 */
 const CHART_H = 180
 const PAD_X = 30
-const PAD_TOP = 18
+const PAD_TOP = 26
 const PAD_BOTTOM = 26
 const chartW = computed(() => Math.max(560, activePoints.value.length * 30))
 const maxVal = computed(() => Math.max(1, ...activePoints.value.map((p) => p.value)))
@@ -230,6 +230,16 @@ const gridLines = computed(() => {
             <circle :cx="p.x" :cy="p.y" r="3.5" fill="#ffffff" stroke="#4557C9" stroke-width="2">
               <title>{{ p.label }}：完成 {{ p.value }} 个任务</title>
             </circle>
+            <text
+              :x="p.x"
+              :y="p.y - 12"
+              text-anchor="middle"
+              :font-size="String(p.value).length >= 3 ? 8 : 10"
+              font-weight="600"
+              fill="#4557C9"
+            >
+              {{ p.value }}
+            </text>
           </g>
           <text
             v-for="(lb, i) in axisItems"
