@@ -373,6 +373,15 @@ export const useTasksStore = defineStore('tasks', {
         .flat()
         .filter((t) => t.status === 'pending' && isTaskVisibleToday(t, today)).length
     },
+    /** 侧栏头部：全部待办任务数（跨项目，仅统计内存中已加载的项目） */
+    pendingCount: (s) => Object.values(s.tasks).flat().filter((t) => t.status === 'pending').length,
+    /** 侧栏头部：今天已完成任务数（跨项目；完成任务时 updatedAt 记为完成时间） */
+    completedTodayCount: (s) => {
+      const today = todayKey()
+      return Object.values(s.tasks)
+        .flat()
+        .filter((t) => t.status === 'completed' && dateKeyOf(t.updatedAt) === today).length
+    },
     /** 今日相关项目：本地（IDB）缓存里存在“今日可见”任务的项目。
      *  登录/全量同步时只刷这些，其余项目打开时再由 loadProject 按需从 OSS 拉取。 */
     todayRelevantProjectIds: (s) => (projectIds: string[]) => {

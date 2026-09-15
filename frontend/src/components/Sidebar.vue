@@ -85,12 +85,19 @@ function onActiveDragEnd() {
     class="fixed inset-y-0 left-0 z-40 w-64 bg-white shadow-lg flex flex-col transition-transform duration-200 lg:translate-x-0"
     :class="ui.drawerOpen ? 'translate-x-0' : '-translate-x-full'"
   >
-    <div class="px-5 py-4 flex items-center justify-between border-b border-slate-100">
-      <div class="flex items-center gap-2">
-        <img :src="logo" alt="MeiDay" class="h-7 w-7 rounded-lg object-cover" />
-        <span class="text-lg font-bold text-slate-800">MeiDay</span>
+    <div class="px-5 py-4 border-b border-slate-100">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <img :src="logo" alt="MeiDay" class="h-7 w-7 rounded-lg object-cover" />
+          <span class="text-lg font-bold text-slate-800">MeiDay</span>
+        </div>
+        <button class="lg:hidden w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100" @click="ui.closeDrawer()"><AppIcon name="close" :size="18" /></button>
       </div>
-      <button class="lg:hidden w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100" @click="ui.closeDrawer()"><AppIcon name="close" :size="18" /></button>
+      <div class="mt-2 pl-9 text-xs text-slate-500">
+        <span>待办 {{ tasks.pendingCount }} 个</span>
+        <span class="mx-1.5 text-slate-300">·</span>
+        <span>今天已完成 {{ tasks.completedTodayCount }} 个</span>
+      </div>
     </div>
 
     <div class="flex-1 overflow-y-auto px-3 py-3">
