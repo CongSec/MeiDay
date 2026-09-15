@@ -792,10 +792,76 @@ export const useTasksStore = defineStore('tasks', {
       this.trashLoadedYears.push(year)
       return { projects: projectCount, tasks: taskCount }
     },
-    /** 扫描弹窗选择「加载今年数据」：只下载今年（year-01 至今）各项目的回收站分片并合并进内存，
-     *  更早年份不碰（仍按需加载），保持按项目分组；调用方负责全部展开。 */
-    async loadTrashYearAll(year: number): Promise<{ projects: number; tasks: number }> {
-      return this.loadTrashYear(year)
+    /** 「扫描时间胶囊文件」按钮：直接全量加载全部项目全部月份分片并合并进内存（不再弹确认框），
+     *  更早年份一并加载，展开后无需再按需下载；未点击扫描按钮时多视图仍按需动态加载。 */
+    async loadTrashAll(): Promise<{ projects: number; tasks: number }> {
+      const auth = useAuthStore()
+      if (!auth.creds || !auth.username) return { projects: 0, tasks: 0 }
+      const client = await createOssClient(auth.creds)
+      let projectCount = 0
+      let taskCount = 0
+      // 扫描过的项目（已有分片索引）+ 本地已加载过胶囊数据的项目
+      const pids = new Set<string>([
+        ...Object.keys(this.trashShardMonths ?? {}),
+        ...Object.keys(this.trash ?? {}),
+      ])
+      const loadedYears = new Set<number>(this.trashLoadedYears)
+      for (const pid of pids) {
+        if (pid === UNCATEGORIZED) continue
+        let allMonths: string[] = []
+        try {
+          const known = this.trashShardMonths[pid]
+          if (known?.length) {
+            allMonths = known
+          } else {
+            allMonths = await listTrashShardMonths(client, auth.username, pid)
+          }
+        } catch {
+          allMonths = []
+        }
+        if (!allMonths.length) {
+          // 无分片索引（或无法枚举，如无 list 权限）：降级整文件加载
+          await this.loadTrash(pid).catch(() => {})
+          if ((this.trash[pid]?.length ?? 0) > 0) projectCount++
+          for (const m of this.trashLoadedMonths[pid] ?? []) loadedYears.add(Number(m.slice(0, 4)))
+          continue
+        }
+        let changed = false
+        for (const m of allMonths) {
+          const remote = await fetchRemoteTrashShard(client, auth.username, pid, m)
+          if (remote.length) {
+            this.trash[pid] = mergeUnique(this.trash[pid] ?? [], remote)
+            changed = true
+            taskCount += remote.length
+          }
+          loadedYears.add(Number(m.slice(0, 4)))
+        }
+        if (changed) await idbPut('trash', trashCacheKey(auth.username, pid), this.trash[pid])
+        const loaded = new Set(this.trashLoadedMonths[pid] ?? [])
+        for (const m of allMonths) loaded.add(m)
+        this.trashLoadedMonths[pid] = [...loaded].sort()
+        // 保留完整分片索引并置「加载更早」为否：全部月份已加载完毕
+        this.trashShardMonths[pid] = allMonths
+        this.trashHasMore[pid] = false
+        if (!this.trashLoaded.includes(pid)) this.trashLoaded.push(pid)
+        if (changed) projectCount++
+      }
+      // 未分类：单文件整文件加载（不分片，无法只取某年）
+      try {
+        const remoteU = await fetchRemoteTrashShard(client, auth.username, UNCATEGORIZED)
+        if (remoteU.length) {
+          this.trash[UNCATEGORIZED] = mergeUnique(this.trash[UNCATEGORIZED] ?? [], remoteU)
+          taskCount += remoteU.length
+          await idbPut('trash', trashCacheKey(auth.username, UNCATEGORIZED), this.trash[UNCATEGORIZED])
+        }
+      } catch {
+        /* 未分类文件不存在/网络失败：忽略 */
+      }
+      if (!this.trashLoaded.includes(UNCATEGORIZED)) this.trashLoaded.push(UNCATEGORIZED)
+      projectCount++
+      // 全部月份已加载：年份按需加载的缓存标记直接补齐，多视图切年不再重复下载
+      this.trashLoadedYears = [...loadedYears].sort((a, b) => a - b)
+      return { projects: projectCount, tasks: taskCount }
     },
     /** 退出时间胶囊页：释放时间胶囊占用的内存与本地 IDB 缓存（含多视图加载的年份数据）。
      *  仅清理胶囊相关数据，不影响活跃任务/重复模板缓存；下次进入重新按需下载。 */

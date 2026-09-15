@@ -92,8 +92,8 @@ const editOpen = ref(false)
 /** 多视图：当前视图（列表为默认视图），多视图按需加载年份数据 */
 const viewMode = ref<'list' | 'calendar' | 'heatmap' | 'trend' | 'gantt'>('list')
 const VIEW_TABS: { key: typeof viewMode.value; label: string; icon: string }[] = [
-  { key: 'list', label: '列表', icon: 'menu' },
-  { key: 'calendar', label: '日历', icon: 'calendar' },
+  { key: 'list', label: '列表图', icon: 'menu' },
+  { key: 'calendar', label: '日历图', icon: 'calendar' },
   { key: 'heatmap', label: '热力图', icon: 'flame' },
   { key: 'trend', label: '趋势图', icon: 'chart' },
   { key: 'gantt', label: '甘特图', icon: 'grid' },
@@ -194,7 +194,7 @@ watch(
 /** 进行中的扫描 Promise：手动扫描与多视图静默扫描并发时复用，避免重复扫描/读到半成品索引 */
 let scanInFlight: Promise<void> | null = null
 /** 扫描时间胶囊：只枚举哪些项目存在回收站文件（元数据），不下载任何文件内容。
- *  默认扫描完成后自动加载今年数据（2026-01 至今）并全部展开；多视图自动加载时传 { confirm: false } 静默扫描。 */
+ *  手动点击按钮扫描完成后直接全量加载全部数据并全部展开；多视图自动加载时传 { confirm: false } 静默扫描，仍按视图动态加载。 */
 async function scanTrash(options?: { confirm?: boolean }): Promise<void> {
   if (scanInFlight) return scanInFlight
   const p = (async () => {
@@ -218,8 +218,8 @@ async function scanTrash(options?: { confirm?: boolean }): Promise<void> {
     visibleLimit.value = {}
     loadingMore.value = {}
     logAudit('扫描时间胶囊', `发现 ${scanIds.value.length} 个项目的胶囊数据`)
-    // 扫描完成：直接加载今年数据（2026-01 至今）并全部展开，不再弹确认框
-    if (options?.confirm !== false) await loadYearAll()
+    // 扫描完成：手动点击按钮时直接全量加载全部数据并全部展开（多视图自动加载不在此加载）
+    if (options?.confirm !== false) await loadAllTrashData()
   } catch (e) {
     ui.toast((e as Error).message || '时间胶囊扫描失败，请检查网络或 OSS 配置', 'error')
   } finally {
@@ -234,10 +234,10 @@ async function scanTrash(options?: { confirm?: boolean }): Promise<void> {
   }
 }
 
-/** 加载今年数据（2026-01 至今）：只下载今年各项目分片并全部展开，更早年份按需加载 */
-async function loadYearAll() {
+/** 全量加载：点击「扫描时间胶囊文件」后下载全部项目全部月份分片并全部展开（更早年份一并加载） */
+async function loadAllTrashData() {
   try {
-    const res = await tasks.loadTrashYearAll(CURRENT_YEAR)
+    const res = await tasks.loadTrashAll()
     // 全部项目展开并记忆（钉住内存，避免被 LRU 逐出）；未加载的项目仍按需加载
     const next: Record<string, boolean> = {}
     for (const g of projectGroups.value) {
@@ -247,9 +247,9 @@ async function loadYearAll() {
     }
     expanded.value = next
     localStorage.setItem(expandedKey(), JSON.stringify(next))
-    ui.toast(`已加载 ${res.projects} 个项目的今年数据（${res.tasks} 条任务）`)
+    ui.toast(`已全量加载 ${res.projects} 个项目的全部数据（${res.tasks} 条任务）`)
   } catch (e) {
-    ui.toast((e as Error).message || '加载今年数据失败，请检查网络或 OSS 配置', 'error')
+    ui.toast((e as Error).message || '全量加载时间胶囊数据失败，请检查网络或 OSS 配置', 'error')
   }
 }
 
@@ -873,7 +873,7 @@ function onCapsuleSaved() {
       <h1 class="text-xl font-bold text-slate-800">时间胶囊</h1>
     </div>
     <div class="mt-0.5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
-      <div class="text-xs text-slate-400 leading-relaxed">存入时间胶囊的任务与项目，永不自动清理。扫描只列出有时间胶囊数据的项目，展开项目时才加载对应文件</div>
+      <div class="text-xs text-slate-400 leading-relaxed">把过去完成删除的时间任务存入胶囊封印起来，减少数据加载带来的性能</div>
       <div class="flex flex-wrap items-center gap-2">
         <button
           class="inline-flex items-center gap-1.5 shrink-0 px-3 py-1.5 rounded-lg text-xs border border-slate-200 hover:bg-slate-50 disabled:opacity-60"

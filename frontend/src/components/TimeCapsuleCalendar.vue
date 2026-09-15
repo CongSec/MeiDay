@@ -222,7 +222,7 @@ function changeMonth(delta: number) {
         <button
           v-for="seg in row.segments"
           :key="seg.task.id + '-' + ri"
-          class="absolute z-10 flex h-[21px] cursor-pointer items-center overflow-hidden rounded bg-amber-200/90 pl-1.5 pr-1 text-left text-[11px] leading-[21px] text-amber-800 hover:bg-amber-300/90"
+          class="absolute z-10 flex h-[21px] cursor-pointer items-center overflow-hidden rounded bg-slate-100 pl-1.5 pr-1 text-left text-[11px] leading-[21px] text-slate-600 hover:bg-slate-200"
           :style="{
             left: (seg.startCol / 7) * 100 + '%',
             width: ((seg.endCol - seg.startCol + 1) / 7) * 100 + '%',
