@@ -7,7 +7,6 @@ import { useUiStore } from '@/stores/ui'
 import AppIcon from '@/components/AppIcon.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import TaskModal from '@/components/TaskModal.vue'
-import TrashTaskDetailModal from '@/components/TrashTaskDetailModal.vue'
 import TimeCapsuleCalendar from '@/components/TimeCapsuleCalendar.vue'
 import TimeCapsuleGantt from '@/components/TimeCapsuleGantt.vue'
 import TimeCapsuleHeatmap from '@/components/TimeCapsuleHeatmap.vue'
@@ -74,16 +73,19 @@ const loadingMore = ref<Record<string, boolean>>({})
 
 /** 搜索关键词：按项目名 / 已加载项目的任务名与内容过滤 */
 const searchQuery = ref('')
+/** 搜索输入（防抖后写入 searchQuery，避免大列表每敲一个字符就全量过滤） */
+const searchInput = ref('')
+let searchTimer: ReturnType<typeof setTimeout> | undefined
+watch(searchInput, (v) => {
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => {
+    searchQuery.value = v
+  }, 200)
+})
 /** 是否处于搜索状态（决定空状态文案） */
 const searching = computed(() => searchQuery.value.trim().length > 0)
 
-/** 扫描完成后「是否加载今年数据」的确认弹窗 */
-const scanConfirmOpen = ref(false)
-/** 「加载今年数据」进行中：禁用弹窗按钮防重复点击 */
-const loadingYearAll = ref(false)
-
-/** 详情/编辑弹窗状态 */
-const detailTask = ref<Task | null>(null)
+/** 编辑弹窗状态（任务详情页已废弃，所有视图点击任务直接进编辑） */
 const editTask = ref<Task | null>(null)
 const editOpen = ref(false)
 
@@ -93,7 +95,7 @@ const VIEW_TABS: { key: typeof viewMode.value; label: string; icon: string }[] =
   { key: 'list', label: '列表', icon: 'menu' },
   { key: 'calendar', label: '日历', icon: 'calendar' },
   { key: 'heatmap', label: '热力图', icon: 'flame' },
-  { key: 'trend', label: '趋势', icon: 'chart' },
+  { key: 'trend', label: '趋势图', icon: 'chart' },
   { key: 'gantt', label: '甘特图', icon: 'grid' },
 ]
 /** 多视图当前查看的年份 / 月份（默认今年 / 当月） */
@@ -192,7 +194,7 @@ watch(
 /** 进行中的扫描 Promise：手动扫描与多视图静默扫描并发时复用，避免重复扫描/读到半成品索引 */
 let scanInFlight: Promise<void> | null = null
 /** 扫描时间胶囊：只枚举哪些项目存在回收站文件（元数据），不下载任何文件内容。
- *  默认扫描完成后弹「是否加载今年数据」确认框；多视图自动加载时传 { confirm: false } 静默扫描。 */
+ *  默认扫描完成后自动加载今年数据（2026-01 至今）并全部展开；多视图自动加载时传 { confirm: false } 静默扫描。 */
 async function scanTrash(options?: { confirm?: boolean }): Promise<void> {
   if (scanInFlight) return scanInFlight
   const p = (async () => {
@@ -216,8 +218,8 @@ async function scanTrash(options?: { confirm?: boolean }): Promise<void> {
     visibleLimit.value = {}
     loadingMore.value = {}
     logAudit('扫描时间胶囊', `发现 ${scanIds.value.length} 个项目的胶囊数据`)
-    // 扫描完成：提示用户是否加载今年数据（多视图静默扫描不弹框）
-    if (options?.confirm !== false) scanConfirmOpen.value = true
+    // 扫描完成：直接加载今年数据（2026-01 至今）并全部展开，不再弹确认框
+    if (options?.confirm !== false) await loadYearAll()
   } catch (e) {
     ui.toast((e as Error).message || '时间胶囊扫描失败，请检查网络或 OSS 配置', 'error')
   } finally {
@@ -232,17 +234,8 @@ async function scanTrash(options?: { confirm?: boolean }): Promise<void> {
   }
 }
 
-/** 扫描确认弹窗「仅项目名称」：收起全部项目，仅展示项目名列表，点击项目后再按需加载 */
-function scanOnlyNames() {
-  scanConfirmOpen.value = false
-  collapseAll()
-  ui.toast('时间胶囊已扫描')
-}
-
-/** 扫描确认弹窗「加载今年数据」：只下载今年（2026-01 至今）各项目数据并全部展开，更早年份按需加载 */
+/** 加载今年数据（2026-01 至今）：只下载今年各项目分片并全部展开，更早年份按需加载 */
 async function loadYearAll() {
-  if (loadingYearAll.value) return
-  loadingYearAll.value = true
   try {
     const res = await tasks.loadTrashYearAll(CURRENT_YEAR)
     // 全部项目展开并记忆（钉住内存，避免被 LRU 逐出）；未加载的项目仍按需加载
@@ -257,9 +250,6 @@ async function loadYearAll() {
     ui.toast(`已加载 ${res.projects} 个项目的今年数据（${res.tasks} 条任务）`)
   } catch (e) {
     ui.toast((e as Error).message || '加载今年数据失败，请检查网络或 OSS 配置', 'error')
-  } finally {
-    loadingYearAll.value = false
-    scanConfirmOpen.value = false
   }
 }
 
@@ -313,15 +303,33 @@ async function onViewMonthChange(month: string) {
   }
 }
 
+/** 已完成任务过滤缓存：以回收站数组引用为键（数组整体替换，引用即指纹），避免每次变化都全量 filter */
+const completedCache = new WeakMap<Task[], Task[]>()
 /** 多视图：已完成胶囊任务（跨所有已加载年份；只统计 status=completed，按 updatedAt 归属日期） */
-const completedTrashTasks = computed(() =>
-  Object.values(tasks.trash).flat().filter((t) => t.status === 'completed'),
-)
+const completedTrashTasks = computed(() => {
+  const out: Task[] = []
+  for (const arr of Object.values(tasks.trash)) {
+    let cached = completedCache.get(arr)
+    if (!cached) {
+      cached = arr.filter((t) => t.status === 'completed')
+      completedCache.set(arr, cached)
+    }
+    out.push(...cached)
+  }
+  return out
+})
+/** 待办过滤缓存：同上，键为活跃任务数组引用 */
+const ganttActiveCache = new WeakMap<Task[], Task[]>()
 /** 甘特图「未完成」：胶囊外活跃待办（仅已加载项目的 pending 任务；deleted 不计入） */
 const ganttActiveTasks = computed(() => {
   const out: Task[] = []
   for (const arr of Object.values(tasks.tasks)) {
-    for (const t of arr) if (t.status === 'pending') out.push(t)
+    let cached = ganttActiveCache.get(arr)
+    if (!cached) {
+      cached = arr.filter((t) => t.status === 'pending')
+      ganttActiveCache.set(arr, cached)
+    }
+    out.push(...cached)
   }
   return out
 })
@@ -346,6 +354,18 @@ interface TrashGroup {
   updatedAt: string
 }
 
+/** 各项目回收站排序缓存：以数组引用为键（数组整体替换，引用即指纹），避免分组计算反复 sort */
+const trashSortCache = new WeakMap<Task[], Task[]>()
+function sortedTrashArr(key: string): Task[] {
+  const arr = tasks.trash[key] ?? []
+  let sorted = trashSortCache.get(arr)
+  if (!sorted) {
+    sorted = arr.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    trashSortCache.set(arr, sorted)
+  }
+  return sorted
+}
+
 /** 回收站按项目分组：展开时才加载该项目文件；统一按“回收站最新变动时间”倒序（新回收的排前面） */
 const projectGroups = computed<TrashGroup[]>(() => {
   if (!scanned.value) return []
@@ -359,7 +379,7 @@ const projectGroups = computed<TrashGroup[]>(() => {
   const push = (key: string, label: string, deleted: boolean, deletedProject: DeletedProject | null) => {
     if (seen.has(key)) return
     seen.add(key)
-    const arr = (tasks.trash[key] ?? []).slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    const arr = sortedTrashArr(key)
     // 默认只展示最近 100 条；更早的通过「加载更早」追加
     const limit = visibleLimit.value[key] ?? TRASH_VISIBLE
     // 排序键：优先扫描到的回收站文件最新变动时间；已删除项目回退到删除时间；
@@ -806,14 +826,32 @@ async function confirmDelete() {
   if (ok) ui.toast('已永久删除')
 }
 
-/** 打开任务详情弹窗 */
-function openDetail(t: Task) {
-  detailTask.value = t
+/** 任务开始时间：有提醒时间优先，否则用开始时间 */
+function taskStartOf(t: Task): string {
+  return t.reminderTime || t.startTime || ''
 }
 
-/** 详情弹窗「编辑」：关闭详情，打开胶囊编辑弹窗 */
+/** 已完成任务耗时：开始（提醒优先）→ 完成时间（updatedAt）；无开始时间无法计算，不显示耗时 */
+function durationText(t: Task): string {
+  if (t.status !== 'completed') return ''
+  const s = taskStartOf(t)
+  if (!s) return ''
+  const diffMs = new Date(t.updatedAt).getTime() - new Date(s).getTime()
+  if (!Number.isFinite(diffMs) || diffMs < 0) return ''
+  const mins = Math.round(diffMs / 60000)
+  if (mins < 1) return '耗时不足1分钟'
+  const d = Math.floor(mins / 1440)
+  const h = Math.floor((mins % 1440) / 60)
+  const m = mins % 60
+  const parts: string[] = []
+  if (d > 0) parts.push(`${d}天`)
+  if (h > 0) parts.push(`${h}小时`)
+  if (m > 0 || !parts.length) parts.push(`${m}分钟`)
+  return `耗时${parts.join('')}`
+}
+
+/** 打开任务编辑弹窗（任务详情页已废弃：列表/日历/甘特图点击任务都直接进编辑） */
 function openEdit(t: Task) {
-  detailTask.value = null
   editTask.value = t
   editOpen.value = true
 }
@@ -822,7 +860,6 @@ function openEdit(t: Task) {
 function onCapsuleSaved() {
   editOpen.value = false
   editTask.value = null
-  detailTask.value = null
   ui.toast('已保存到时间胶囊')
 }
 </script>
@@ -830,7 +867,7 @@ function onCapsuleSaved() {
 <template>
   <div class="p-4 sm:p-6 max-w-3xl mx-auto">
     <div class="hidden lg:flex items-center gap-2.5">
-      <span class="w-9 h-9 rounded-xl bg-white border border-line shadow-card text-brand flex items-center justify-center shrink-0">
+      <span class="w-9 h-9 rounded-lg bg-white border border-slate-200 text-brand flex items-center justify-center shrink-0">
         <AppIcon name="trash" :size="18" />
       </span>
       <h1 class="text-xl font-bold text-slate-800">时间胶囊</h1>
@@ -879,7 +916,7 @@ function onCapsuleSaved() {
         v-for="tab in VIEW_TABS"
         :key="tab.key"
         class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors"
-        :class="viewMode === tab.key ? 'bg-brand text-white shadow-sm' : 'border border-slate-200 text-slate-600 hover:bg-slate-50'"
+        :class="viewMode === tab.key ? 'bg-brand text-white' : 'border border-slate-200 text-slate-600 hover:bg-slate-50'"
         :disabled="viewLoading"
         @click="switchView(tab.key)"
       >
@@ -895,10 +932,10 @@ function onCapsuleSaved() {
       <div class="relative">
         <AppIcon name="search" :size="15" class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
         <input
-          v-model="searchQuery"
+          v-model="searchInput"
           type="text"
           placeholder="搜索项目名 / 任务名 / 任务内容（仅已加载的项目）"
-          class="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-700 placeholder:text-slate-400 focus:border-brand focus:outline-none"
+          class="w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-700 placeholder:text-slate-400 focus:border-brand focus:outline-none"
         />
       </div>
       <div v-if="searching" class="mt-1.5 text-[11px] text-slate-400">
@@ -946,7 +983,10 @@ function onCapsuleSaved() {
           <div
             v-for="t in g.tasks"
             :key="t.id"
-            class="bg-white rounded-xl border border-line shadow-card p-4 flex items-center gap-3"
+            v-memo="[t.id, t.name, t.status, t.updatedAt, t.projectId]"
+            class="cursor-pointer bg-white rounded-lg border border-slate-200 p-4 flex items-center gap-3 hover:bg-slate-50/60"
+            title="点击编辑该任务"
+            @click="openEdit(t)"
           >
             <div class="flex-1 min-w-0">
               <div class="flex items-center gap-2">
@@ -957,6 +997,13 @@ function onCapsuleSaved() {
                 >
                   {{ t.status === 'deleted' ? '已删除' : '已完成' }}
                 </span>
+                <span
+                  v-if="durationText(t)"
+                  class="shrink-0 rounded-full border border-slate-100 bg-slate-50 px-1.5 py-0.5 text-[11px] text-slate-400"
+                  :title="`开始：${taskStartOf(t).slice(0, 16)} → 完成：${t.updatedAt.slice(0, 16)}`"
+                >
+                  {{ durationText(t) }}
+                </span>
               </div>
               <div class="mt-1 flex flex-wrap gap-x-4 text-[11px] text-slate-400">
                 <span>{{ t.projectId ? (projectOf(t.projectId)?.name ?? '未知项目') : '无分类' }}</span>
@@ -965,21 +1012,21 @@ function onCapsuleSaved() {
             </div>
             <button
               class="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs text-slate-600 border border-slate-200 hover:bg-slate-50 shrink-0"
-              title="查看任务详情"
-              @click="openDetail(t)"
+              title="编辑任务"
+              @click.stop="openEdit(t)"
             >
-              <AppIcon name="eye" :size="13" class="shrink-0" />
-              详情
+              <AppIcon name="edit" :size="13" class="shrink-0" />
+              编辑
             </button>
             <button
               class="px-3 py-1.5 rounded-lg text-xs text-brand border border-brand/30 hover:bg-brand/5 shrink-0"
-              @click="restore(t)"
+              @click.stop="restore(t)"
             >
               恢复
             </button>
             <button
               class="px-3 py-1.5 rounded-lg text-xs text-red-500 border border-red-200 hover:bg-red-50 shrink-0"
-              @click="askDelete(t)"
+              @click.stop="askDelete(t)"
             >
               永久删除
             </button>
@@ -1051,7 +1098,7 @@ function onCapsuleSaved() {
 
     <!-- 多视图：日历 / 热力图 / 趋势 / 甘特图（按需加载年份数据） -->
     <div v-else class="mt-4">
-      <div v-if="viewLoading" class="flex items-center justify-center gap-2 rounded-xl border border-line bg-white py-16 text-sm text-slate-500">
+      <div v-if="viewLoading" class="flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white py-16 text-sm text-slate-500">
         <AppIcon name="refresh" :size="16" class="animate-spin text-brand" />
         正在下载OSS数据并进行本地计算中......
       </div>
@@ -1063,7 +1110,7 @@ function onCapsuleSaved() {
           :month="viewMonth"
           :project-name="projectNameOf"
           @change-month="onViewMonthChange"
-          @open-task="openDetail"
+          @open-task="openEdit"
         />
         <TimeCapsuleHeatmap
           v-else-if="viewMode === 'heatmap'"
@@ -1085,44 +1132,9 @@ function onCapsuleSaved() {
           :month="viewMonth"
           :project-name="projectNameOf"
           @change-month="onViewMonthChange"
-          @open-task="openDetail"
+          @open-task="openEdit"
         />
       </template>
-    </div>
-
-    <!-- 扫描完成：是否加载全部数据 -->
-    <div
-      v-if="scanConfirmOpen"
-      class="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center px-4"
-    >
-      <div class="modal-panel rounded-2xl w-full max-w-md animate-modal-pop p-5">
-        <h3 class="text-base font-semibold text-slate-800">扫描完成</h3>
-        <p class="mt-2 text-sm text-slate-500 leading-relaxed">
-          已发现 {{ scanIds.length }} 个项目的时间胶囊数据，是否加载全部数据？
-        </p>
-        <p class="mt-1 text-xs text-slate-400">选择「加载今年数据」只下载 {{ CURRENT_YEAR }}-01 至今的数据，更早年份仍按需加载。</p>
-        <div class="mt-4 flex flex-col gap-2">
-          <button
-            class="w-full py-2 rounded-lg text-sm text-white bg-brand hover:bg-brand/90 disabled:opacity-60 disabled:cursor-not-allowed"
-            :disabled="loadingYearAll"
-            @click="loadYearAll"
-          >
-            {{ loadingYearAll ? '正在加载今年数据…' : `加载今年数据（${CURRENT_YEAR}-01 至今）` }}
-          </button>
-          <button
-            class="w-full py-2 rounded-lg text-sm text-slate-700 bg-slate-100 hover:bg-slate-200"
-            @click="scanOnlyNames"
-          >
-            仅加载项目名称
-          </button>
-          <button
-            class="w-full py-2 rounded-lg text-sm text-slate-500 hover:bg-slate-100"
-            @click="scanConfirmOpen = false"
-          >
-            取消
-          </button>
-        </div>
-      </div>
     </div>
 
     <ConfirmDialog
@@ -1145,12 +1157,6 @@ function onCapsuleSaved() {
       @cancel="clearOpen = false"
     />
 
-    <TrashTaskDetailModal
-      :open="!!detailTask"
-      :task="detailTask"
-      @close="detailTask = null"
-      @edit="openEdit"
-    />
     <TaskModal
       v-model:open="editOpen"
       :task="editTask"

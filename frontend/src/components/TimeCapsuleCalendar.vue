@@ -2,7 +2,8 @@
 /**
  * 时间胶囊 - 日历视图
  * 以月为单位展示每天完成的任务（status=completed，按 updatedAt 归属日期）。
- * 跨天任务（开始[提醒优先]→完成横跨多天）连成一条色条，统一排在月历下方。
+ * 跨天任务（开始[提醒优先]→完成横跨多天）在月历格子内连成一条色条，
+ * 排在当天普通任务下方；跨周时行末接行首连续显示，重叠任务上下分层堆叠。
  */
 import { computed } from 'vue'
 import type { Task } from '@/types'
@@ -47,7 +48,7 @@ function taskEnd(t: Task): string {
   return t.updatedAt || t.endTime || ''
 }
 
-/** 跨天任务：起点到完成横跨多天，且与当前月份有交集（默认排在月历最底下） */
+/** 跨天任务：起点到完成横跨多天，且与当前月份有交集 */
 const crossDayTasks = computed<Task[]>(() => {
   const out: Task[] = []
   for (const t of props.tasks) {
@@ -82,36 +83,88 @@ const dayByDate = computed(() => {
   return map
 })
 
+/** 跨天横条单行高度（px），每条占一行 */
+const LANE_H = 24
+
 interface DayCell {
   key: string
   day: number
   inMonth: boolean
   tasks: Task[]
 }
-const grid = computed<DayCell[]>(() => {
-  const cells: DayCell[] = []
+interface CrossSeg {
+  task: Task
+  startCol: number
+  endCol: number
+  lane: number
+}
+interface WeekRow {
+  cells: DayCell[]
+  segments: CrossSeg[]
+}
+
+/** 月历按周行组织；跨天任务切分到所在周行，同一行内重叠任务分层堆叠 */
+const rows = computed<WeekRow[]>(() => {
+  const rowCount = cellCount.value / 7
+  const out: WeekRow[] = []
   const firstDate = new Date(year.value, monthIdx.value, 1 - firstCol.value)
   const pad = (n: number) => String(n).padStart(2, '0')
-  for (let i = 0; i < cellCount.value; i++) {
-    const d = new Date(firstDate.getFullYear(), firstDate.getMonth(), firstDate.getDate() + i)
-    const key = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-    const inMonth = d.getMonth() === monthIdx.value
-    cells.push({ key, day: d.getDate(), inMonth, tasks: inMonth ? dayByDate.value.get(key) ?? [] : [] })
+  for (let r = 0; r < rowCount; r++) {
+    const cells: DayCell[] = []
+    for (let c = 0; c < 7; c++) {
+      const d = new Date(firstDate.getFullYear(), firstDate.getMonth(), firstDate.getDate() + r * 7 + c)
+      const key = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+      const inMonth = d.getMonth() === monthIdx.value
+      cells.push({ key, day: d.getDate(), inMonth, tasks: inMonth ? dayByDate.value.get(key) ?? [] : [] })
+    }
+    out.push({ cells, segments: [] })
   }
-  return cells
+  // 把每条跨天任务切成各周行的段（行末接行首，视觉连续）；跨月任务按「与本月交集」截取起止日
+  for (const t of crossDayTasks.value) {
+    const sKey = taskStart(t).slice(0, 10)
+    const eKey = taskEnd(t).slice(0, 10)
+    const fromKey = sKey < monthFirst.value ? monthFirst.value : sKey
+    const toKey = eKey > monthLast.value ? monthLast.value : eKey
+    if (fromKey > toKey) continue
+    const s = Number(fromKey.slice(8, 10))
+    const e = Number(toKey.slice(8, 10))
+    let day = s
+    while (day <= e) {
+      const idx = firstCol.value + (day - 1)
+      const r = Math.floor(idx / 7)
+      const rowStart = r * 7 - firstCol.value + 1
+      const rowEnd = rowStart + 6
+      const segStart = Math.max(s, rowStart)
+      const segEnd = Math.min(e, rowEnd)
+      const startCol = firstCol.value + (segStart - 1) - r * 7
+      const endCol = firstCol.value + (segEnd - 1) - r * 7
+      out[r].segments.push({ task: t, startCol, endCol, lane: 0 })
+      day = segEnd + 1
+    }
+  }
+  // 每行内按开始列贪心分配车道，重叠任务错开
+  for (const row of out) {
+    if (!row.segments.length) continue
+    row.segments.sort((a, b) => a.startCol - b.startCol || a.endCol - b.endCol)
+    const laneEnds: number[] = []
+    for (const seg of row.segments) {
+      let lane = laneEnds.findIndex((end) => end < seg.startCol)
+      if (lane === -1) {
+        lane = laneEnds.length
+        laneEnds.push(seg.endCol)
+      } else {
+        laneEnds[lane] = seg.endCol
+      }
+      seg.lane = lane
+    }
+  }
+  return out
 })
 
-/** 跨天条在月日条带上的位置（%），越界时裁剪到本月初/月末 */
-function crossBar(t: Task): { left: number; width: number } {
-  const sd = dateKeyOf(taskStart(t))
-  const ed = dateKeyOf(taskEnd(t))
-  const clampDay = (d: string) => (d < monthFirst.value ? 1 : d > monthLast.value ? daysInMonth.value : Number(d.slice(8, 10)))
-  const startDay = clampDay(sd)
-  const endDay = clampDay(ed)
-  let left = ((startDay - 1) / daysInMonth.value) * 100
-  let width = ((endDay - startDay + 1) / daysInMonth.value) * 100
-  if (left + width > 100) width = Math.max(0, 100 - left)
-  return { left, width }
+/** 某周行跨天条占用的车道数（用于拉高格子，保证横条始终可见） */
+function laneCount(row: WeekRow): number {
+  if (!row.segments.length) return 0
+  return Math.max(...row.segments.map((s) => s.lane)) + 1
 }
 
 function changeMonth(delta: number) {
@@ -133,26 +186,31 @@ function changeMonth(delta: number) {
       </button>
     </div>
 
-    <div class="mt-3 rounded-xl border border-slate-200 bg-white overflow-hidden">
-      <div class="grid grid-cols-7 bg-slate-50/70 border-b border-slate-200">
+    <div class="mt-3 rounded-lg border border-slate-200 bg-white overflow-hidden">
+      <div class="grid grid-cols-7 border-b border-slate-200 bg-slate-50/70">
         <div v-for="w in WEEK_LABELS" :key="w" class="py-1.5 text-center text-[11px] font-medium text-slate-400">周{{ w }}</div>
       </div>
-      <div class="grid grid-cols-7">
+      <div
+        v-for="(row, ri) in rows"
+        :key="ri"
+        class="relative flex border-b border-slate-100 last:border-b-0"
+        :style="{ paddingBottom: laneCount(row) * LANE_H + 'px' }"
+      >
         <div
-          v-for="cell in grid"
+          v-for="cell in row.cells"
           :key="cell.key"
-          class="min-h-[86px] border-b border-r border-slate-100 p-1 last:border-r-0"
+          class="min-h-[104px] flex-1 border-r border-slate-100 p-1.5 last:border-r-0"
           :class="cell.inMonth ? 'bg-white' : 'bg-slate-50/70'"
         >
           <div class="flex items-center justify-between">
             <span class="text-[11px] leading-4" :class="cell.inMonth ? 'text-slate-600' : 'text-slate-300'">{{ cell.day }}</span>
-            <span v-if="cell.tasks.length" class="rounded bg-brand/10 px-1 text-[10px] leading-4 text-brand">{{ cell.tasks.length }}</span>
+            <span v-if="cell.tasks.length" class="rounded bg-slate-100 px-1 text-[10px] leading-4 text-slate-500">{{ cell.tasks.length }}</span>
           </div>
           <div class="mt-1 space-y-0.5">
             <button
               v-for="t in cell.tasks"
               :key="t.id"
-              class="block w-full truncate rounded bg-brand/10 px-1 py-0.5 text-left text-[10px] leading-4 text-brand hover:bg-brand/20"
+              class="block w-full truncate rounded bg-slate-100 px-1 py-0.5 text-left text-[10px] leading-4 text-slate-600 hover:bg-slate-200"
               :title="`${t.name}（${t.updatedAt.slice(11, 16)} 完成）`"
               @click="emit('open-task', t)"
             >
@@ -160,44 +218,21 @@ function changeMonth(delta: number) {
             </button>
           </div>
         </div>
-      </div>
-    </div>
-
-    <div v-if="crossDayTasks.length" class="mt-4">
-      <div class="mb-1.5 text-xs font-medium text-slate-500">跨天任务（开始 → 完成，默认排在最底下）</div>
-      <div class="rounded-xl border border-slate-200 bg-white overflow-hidden">
-        <div class="flex items-center border-b border-slate-200 bg-slate-50/70">
-          <div class="w-36 sm:w-48 shrink-0 px-2 py-1 text-[11px] text-slate-400">任务</div>
-          <div class="relative flex-1 h-6">
-            <div
-              v-for="d in daysInMonth"
-              :key="d"
-              class="absolute top-0 bottom-0 text-center text-[10px] leading-6 text-slate-300"
-              :style="{ left: ((d - 1) / daysInMonth) * 100 + '%', width: (100 / daysInMonth) + '%' }"
-            >
-              {{ d }}
-            </div>
-          </div>
-        </div>
-        <div v-for="t in crossDayTasks" :key="t.id" class="flex items-center border-b border-slate-100 last:border-b-0">
-          <button
-            class="w-36 sm:w-48 shrink-0 px-2 py-2 text-left text-xs text-slate-600 truncate hover:bg-slate-50"
-            :title="`${projectName(t.projectId)} · ${t.name}`"
-            @click="emit('open-task', t)"
-          >
-            {{ projectName(t.projectId) }} · {{ t.name }}
-          </button>
-          <div class="relative flex-1 h-7">
-            <div
-              class="absolute top-1/2 h-4 -translate-y-1/2 rounded-md bg-amber-400/85"
-              :style="{ left: crossBar(t).left + '%', width: crossBar(t).width + '%' }"
-              :title="`${t.name}：${taskStart(t).slice(0, 16)} → ${taskEnd(t).slice(0, 16)}`"
-            ></div>
-          </div>
-        </div>
-      </div>
-      <div class="mt-1 text-[11px] text-slate-400">
-        色条从开始时间（有提醒则优先）连到完成时间，跨出本月部分已裁剪。
+        <!-- 跨天任务横条：压在普通任务下方，跨周连续，重叠分层 -->
+        <button
+          v-for="seg in row.segments"
+          :key="seg.task.id + '-' + ri"
+          class="absolute z-10 flex h-[21px] cursor-pointer items-center overflow-hidden rounded bg-amber-200/90 pl-1.5 pr-1 text-left text-[11px] leading-[21px] text-amber-800 hover:bg-amber-300/90"
+          :style="{
+            left: (seg.startCol / 7) * 100 + '%',
+            width: ((seg.endCol - seg.startCol + 1) / 7) * 100 + '%',
+            bottom: seg.lane * LANE_H + 'px',
+          }"
+          :title="`${projectName(seg.task.projectId)} · ${seg.task.name}：${taskStart(seg.task).slice(0, 16)} → ${taskEnd(seg.task).slice(0, 16)}`"
+          @click="emit('open-task', seg.task)"
+        >
+          <span class="min-w-0 truncate">{{ seg.task.name }}</span>
+        </button>
       </div>
     </div>
   </div>

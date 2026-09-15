@@ -3,7 +3,7 @@
  * 时间胶囊 - 甘特图（按月分列）
  * 横向按月分列（默认当月）：已完成任务来自时间胶囊（status=completed），
  * 未完成任务来自胶囊外活跃待办（status=pending）；deleted 不计入。
- * 无开始时间的任务在完成/截止位置显示较小横向条；全部任务按时间排序平铺。
+ * 全部任务按时间排序平铺。
  */
 import { computed, ref } from 'vue'
 import type { Task } from '@/types'
@@ -75,7 +75,7 @@ function barOf(start: string, end: string): GanttBar | null {
   const clampDay = (d: string) => (d < monthFirst.value ? 1 : d > monthLast.value ? daysInMonth.value : Number(d.slice(8, 10)))
   const unit = (1 / daysInMonth.value) * 100
   if (!sDate) {
-    // 无开始时间：在完成/截止位置显示较小横向条
+    // 无开始时间：在完成/截止位置显示小条
     const day = clampDay(eDate)
     const width = Math.min(12, unit)
     const left = Math.min(((day - 1) / daysInMonth.value) * 100, Math.max(0, 100 - width))
@@ -195,7 +195,6 @@ function changeMonth(delta: number) {
     <div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-400">
       <span class="flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded bg-brand/80"></span>已完成（时间胶囊）</span>
       <span class="flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded bg-amber-400/90"></span>未完成（胶囊外待办）</span>
-      <span>无开始时间的任务在完成/截止位置显示较小横向条</span>
     </div>
   </div>
 </template>

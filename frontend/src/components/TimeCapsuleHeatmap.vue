@@ -3,6 +3,7 @@
  * 时间胶囊 - 年度热力图
  * GitHub 风格：以周为列、周一到周日为行，颜色深浅表示当天完成任务量
  * （只统计 status=completed，按 updatedAt 归属日期）。
+ * 白色卡片固定不动，仅格子区域内部横向滚动；左侧星期标签对齐到对应行。
  */
 import { computed } from 'vue'
 import type { Task } from '@/types'
@@ -17,6 +18,8 @@ const props = defineProps<{
 const emit = defineEmits<{ (e: 'change-year', year: number): void }>()
 
 const MONTH_LABELS = ['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月']
+/** 左侧星期标签：7 行固定高度，与格子行严格一一对应（空串仅占位） */
+const WEEK_LABELS = ['一', '', '三', '', '五', '', '日']
 
 /** 每日完成数 */
 const counts = computed(() => {
@@ -83,36 +86,35 @@ function colorOf(count: number): string {
 </script>
 
 <template>
-  <div class="overflow-x-auto pb-1">
-    <div class="min-w-[640px]">
-      <div class="flex items-center justify-between">
-        <button class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50" @click="emit('change-year', year - 1)">
-          <AppIcon name="chevron-left" :size="15" /> 上一年
-        </button>
-        <div class="text-sm font-semibold text-slate-700">{{ year }} 年 · 共完成 {{ totalCount }} 个任务</div>
-        <button class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50" @click="emit('change-year', year + 1)">
-          下一年 <AppIcon name="chevron-right" :size="15" />
-        </button>
-      </div>
+  <div>
+    <div class="flex items-center justify-between">
+      <button class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50" @click="emit('change-year', year - 1)">
+        <AppIcon name="chevron-left" :size="15" /> 上一年
+      </button>
+      <div class="text-sm font-semibold text-slate-700">{{ year }} 年 · 共完成 {{ totalCount }} 个任务</div>
+      <button class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50" @click="emit('change-year', year + 1)">
+        下一年 <AppIcon name="chevron-right" :size="15" />
+      </button>
+    </div>
 
-      <div class="mt-3 rounded-xl border border-slate-200 bg-white p-4">
-        <div class="flex">
-          <div class="mr-1.5 flex flex-col justify-between py-0.5 text-[10px] leading-3 text-slate-400">
-            <span>一</span>
-            <span>三</span>
-            <span>五</span>
-            <span>日</span>
-          </div>
-          <div class="flex-1">
+    <div class="mt-3 rounded-lg border border-slate-200 bg-white p-4">
+      <div class="flex">
+        <!-- 左侧星期标签：跳过月份标签行高度（pt-4），严格对齐 7 行格子 -->
+        <div class="mr-1.5 flex w-4 shrink-0 flex-col gap-[3px] pt-4 text-[10px] leading-none text-slate-400">
+          <div v-for="(lb, li) in WEEK_LABELS" :key="li" class="flex h-[13px] items-center justify-center">{{ lb }}</div>
+        </div>
+        <!-- 右侧：月份标签 + 格子，仅在格子区域内部横向滚动，白色卡片固定不动 -->
+        <div class="min-w-0 flex-1 overflow-x-auto pb-1">
+          <div class="min-w-[640px]">
             <div class="relative h-4 text-[10px] leading-4 text-slate-400">
               <span v-for="mp in monthPositions" :key="mp.label" class="absolute" :style="{ left: (mp.col / weeks) * 100 + '%' }">{{ mp.label }}</span>
             </div>
             <div class="flex gap-[3px]">
-              <div v-for="(week, wi) in cells" :key="wi" class="flex flex-col gap-[3px]">
+              <div v-for="(week, wi) in cells" :key="wi" class="flex flex-1 flex-col gap-[3px]">
                 <div
                   v-for="(cell, ri) in week"
                   :key="cell.dateKey"
-                  class="h-[13px] w-[13px] rounded-[3px]"
+                  class="h-[13px] w-full shrink-0 rounded-[2px]"
                   :class="cell.inYear ? '' : 'opacity-0'"
                   :style="{ backgroundColor: colorOf(cell.count) }"
                   :title="cell.inYear ? `${cell.dateKey}：完成 ${cell.count} 个任务` : ''"
@@ -121,16 +123,16 @@ function colorOf(count: number): string {
             </div>
           </div>
         </div>
-        <div class="mt-3 flex items-center justify-end gap-1 text-[10px] text-slate-400">
-          少
-          <span class="h-3 w-3 rounded-[3px]" style="background-color: #eef0f4"></span>
-          <span class="h-3 w-3 rounded-[3px]" style="background-color: #c3cbf0"></span>
-          <span class="h-3 w-3 rounded-[3px]" style="background-color: #a3aee6"></span>
-          <span class="h-3 w-3 rounded-[3px]" style="background-color: #7c89d9"></span>
-          <span class="h-3 w-3 rounded-[3px]" style="background-color: #5a6ad1"></span>
-          <span class="h-3 w-3 rounded-[3px]" style="background-color: #3a49ad"></span>
-          多
-        </div>
+      </div>
+      <div class="mt-3 flex items-center justify-end gap-1 text-[10px] text-slate-400">
+        少
+        <span class="h-3 w-3 rounded-[2px]" style="background-color: #eef0f4"></span>
+        <span class="h-3 w-3 rounded-[2px]" style="background-color: #c3cbf0"></span>
+        <span class="h-3 w-3 rounded-[2px]" style="background-color: #a3aee6"></span>
+        <span class="h-3 w-3 rounded-[2px]" style="background-color: #7c89d9"></span>
+        <span class="h-3 w-3 rounded-[2px]" style="background-color: #5a6ad1"></span>
+        <span class="h-3 w-3 rounded-[2px]" style="background-color: #3a49ad"></span>
+        多
       </div>
     </div>
   </div>
