@@ -13,7 +13,7 @@ import TimeCapsuleTrend from '@/components/TimeCapsuleTrend.vue'
 import type JSZip from 'jszip'
 import { deleteAttachments, downloadAttachment } from '@/utils/attachments'
 import { createOssClient } from '@/utils/oss'
-import { formatTodayTitle, nowIso, todayKey } from '@/utils/time'
+import { dateKeyOf, formatTodayTitle, nowIso, todayKey } from '@/utils/time'
 import { logAudit } from '@/utils/audit'
 import { UNCATEGORIZED, type AttachmentMeta, type DeletedProject, type Project, type Task } from '@/types'
 
@@ -63,11 +63,11 @@ function isExpanded(key: string) {
 const loading = ref<Record<string, boolean>>({})
 const loadError = ref<Record<string, boolean>>({})
 
-/** 每个项目默认展示的回收站记录条数（最近 100 条）；更早记录通过「加载更早」追加 */
-const TRASH_VISIBLE = 100
-/** 每个项目当前已展示的条数上限 */
-const visibleLimit = ref<Record<string, number>>({})
-/** 「加载更早」进行中（按项目） */
+/** 展开的项目默认展示的月份数（最近 N 个月，最新在前）；更早月份通过「加载更早月份」追加 */
+const MONTHS_VISIBLE = 1
+/** 每个项目当前已展示的月份数 */
+const visibleMonths = ref<Record<string, number>>({})
+/** 「加载更早月份」进行中（按项目） */
 const loadingMore = ref<Record<string, boolean>>({})
 
 /** 搜索关键词：按项目名 / 已加载项目的任务名与内容过滤 */
@@ -130,25 +130,26 @@ function toggleGroup(key: string) {
   }
 }
 
-/** 「加载更早」：先把已加载但未展示的记录就地展示更多；展示完后再拉取更早分片 */
+/** 「加载更早月份」：展示下一个更早月份的任务；该月尚未拉取时先按需拉取一个月分片 */
 async function loadMoreGroup(key: string) {
   if (loadingMore.value[key]) return
-  const arr = tasks.trash[key] ?? []
-  const limit = visibleLimit.value[key] ?? TRASH_VISIBLE
-  if (arr.length > limit) {
-    visibleLimit.value = { ...visibleLimit.value, [key]: limit + TRASH_VISIBLE }
-    return
+  const count = visibleMonths.value[key] ?? MONTHS_VISIBLE
+  const loadedMonths = toMonthGroups(tasks.trash[key] ?? [])
+  // 需要展示的下一个更早月份还没在本地：先拉取一个更早分片
+  const needFetch = loadedMonths.length <= count && !!tasks.trashHasMore[key]
+  if (needFetch) {
+    loadingMore.value = { ...loadingMore.value, [key]: true }
+    try {
+      const got = await tasks.loadMoreTrash(key)
+      if (!got) ui.toast('已加载全部时间胶囊记录')
+    } catch (e) {
+      ui.toast((e as Error).message || '加载更早记录失败，请检查网络或 OSS 配置', 'error')
+      return
+    } finally {
+      loadingMore.value = { ...loadingMore.value, [key]: false }
+    }
   }
-  loadingMore.value = { ...loadingMore.value, [key]: true }
-  try {
-    const got = await tasks.loadMoreTrash(key)
-    visibleLimit.value = { ...visibleLimit.value, [key]: limit + TRASH_VISIBLE }
-    if (!got) ui.toast('已加载全部时间胶囊记录')
-  } catch (e) {
-    ui.toast((e as Error).message || '加载更早记录失败，请检查网络或 OSS 配置', 'error')
-  } finally {
-    loadingMore.value = { ...loadingMore.value, [key]: false }
-  }
+  visibleMonths.value = { ...visibleMonths.value, [key]: count + 1 }
 }
 
 /** 只读本地基础数据：档案（活跃/已删除项目），不预载任何回收站文件内容 */
@@ -164,8 +165,10 @@ onMounted(async () => {
   logAudit('打开时间胶囊')
 })
 onUnmounted(() => {
-  // 离开回收站：解除全部展开项目的固定，交回 LRU 逐出
+  // 离开回收站：解除全部展开项目与全量加载项目的固定，交回 LRU 逐出
   for (const k of Object.keys(expanded.value)) tasks.unpinViewProject(k)
+  for (const k of fullLoadedKeys) tasks.unpinViewProject(k)
+  fullLoadedKeys.clear()
   if (mobileActions && mobileActions.title === MOBILE_TITLE) mobileActions.title = ''
   // 退出时间胶囊：释放内存与 IDB 缓存（含多视图加载的年份数据），下次进入重新按需下载
   void tasks.releaseTrashMemory()
@@ -180,7 +183,7 @@ watch(
     scanLatest.value = {}
     scanHasUncategorized.value = false
     page.value = 1
-    visibleLimit.value = {}
+    visibleMonths.value = {}
     loadingMore.value = {}
     if (c) {
       loadExpanded()
@@ -192,7 +195,7 @@ watch(
 /** 进行中的扫描 Promise：手动扫描与多视图静默扫描并发时复用，避免重复扫描/读到半成品索引 */
 let scanInFlight: Promise<void> | null = null
 /** 扫描时间胶囊：只枚举哪些项目存在回收站文件（元数据），不下载任何文件内容。
- *  手动点击按钮扫描完成后直接全量加载全部数据并全部展开；多视图自动加载时传 { confirm: false } 静默扫描，仍按视图动态加载。 */
+ *  手动点击按钮扫描完成后直接全量加载全部数据（项目保持折叠，展开时按月展示）；多视图自动加载时传 { confirm: false } 静默扫描，仍按视图动态加载。 */
 async function scanTrash(options?: { confirm?: boolean }): Promise<void> {
   if (scanInFlight) return scanInFlight
   const p = (async () => {
@@ -213,10 +216,10 @@ async function scanTrash(options?: { confirm?: boolean }): Promise<void> {
     }
     scanned.value = true
     page.value = 1
-    visibleLimit.value = {}
+    visibleMonths.value = {}
     loadingMore.value = {}
     logAudit('扫描时间胶囊', `发现 ${scanIds.value.length} 个项目的胶囊数据`)
-    // 扫描完成：手动点击按钮时直接全量加载全部数据并全部展开（多视图自动加载不在此加载）
+    // 扫描完成：手动点击按钮时直接全量加载全部数据（不展开，展开时按月展示；多视图自动加载不在此加载）
     if (options?.confirm !== false) await loadAllTrashData()
   } catch (e) {
     ui.toast((e as Error).message || '时间胶囊扫描失败，请检查网络或 OSS 配置', 'error')
@@ -232,19 +235,17 @@ async function scanTrash(options?: { confirm?: boolean }): Promise<void> {
   }
 }
 
-/** 全量加载：点击「扫描时间胶囊文件」后下载全部项目全部月份分片并全部展开（更早年份一并加载） */
+/** 全量加载：点击「扫描时间胶囊文件」后下载全部项目全部月份分片进内存（项目保持折叠，
+ *  数据固定常驻避免被 LRU 逐出；展开项目时按月展示，不一次性渲染全部任务） */
+const fullLoadedKeys = new Set<string>()
 async function loadAllTrashData() {
   try {
     const res = await tasks.loadTrashAll()
-    // 全部项目展开并记忆（钉住内存，避免被 LRU 逐出）；未加载的项目仍按需加载
-    const next: Record<string, boolean> = {}
+    // 数据全部载入内存并固定（离开时间胶囊页时统一解除）
     for (const g of projectGroups.value) {
-      next[g.key] = true
       tasks.pinViewProject(g.key)
-      if (!g.loaded) void openGroup(g.key)
+      fullLoadedKeys.add(g.key)
     }
-    expanded.value = next
-    localStorage.setItem(expandedKey(), JSON.stringify(next))
     ui.toast(`已全量加载 ${res.projects} 个项目的全部数据（${res.tasks} 条任务）`)
   } catch (e) {
     ui.toast((e as Error).message || '全量加载时间胶囊数据失败，请检查网络或 OSS 配置', 'error')
@@ -343,7 +344,8 @@ interface TrashGroup {
   deleted: boolean
   /** 已删除项目元数据（供「恢复整个项目」使用） */
   deletedProject: DeletedProject | null
-  tasks: Task[]
+  /** 按月份分组（最新在前），仅包含当前已展示的月份 */
+  monthGroups: { key: string; tasks: Task[] }[]
   /** 该项目的回收站文件是否已加载 */
   loaded: boolean
   /** 是否还有更早记录可加载（已加载但未展示 / OSS 上还有更早分片） */
@@ -364,6 +366,35 @@ function sortedTrashArr(key: string): Task[] {
   return sorted
 }
 
+/** 任务按月份分组（YYYY-MM 倒序，最新在前），以数组引用为键缓存，避免分组计算反复遍历 */
+const monthGroupsCache = new WeakMap<Task[], { key: string; tasks: Task[] }[]>()
+function toMonthGroups(list: Task[]): { key: string; tasks: Task[] }[] {
+  let groups = monthGroupsCache.get(list)
+  if (groups) return groups
+  const map = new Map<string, Task[]>()
+  for (const t of list) {
+    const m = dateKeyOf(t.updatedAt || '').slice(0, 7)
+    if (m.length !== 7) continue
+    const arr = map.get(m) ?? []
+    arr.push(t)
+    map.set(m, arr)
+  }
+  groups = [...map.entries()]
+    .sort((a, b) => b[0].localeCompare(a[0]))
+    .map(([key, tasks]) => ({ key, tasks }))
+  monthGroupsCache.set(list, groups)
+  return groups
+}
+/** 月份标签：2026-09 -> 2026年9月 */
+function monthLabel(m: string): string {
+  const [y, mo] = m.split('-')
+  return `${y}年${Number(mo)}月`
+}
+/** 项目已展示的任务总数（项目名右侧计数） */
+function totalShown(g: TrashGroup): number {
+  return g.monthGroups.reduce((n, mg) => n + mg.tasks.length, 0)
+}
+
 /** 回收站按项目分组：展开时才加载该项目文件；统一按“回收站最新变动时间”倒序（新回收的排前面） */
 const projectGroups = computed<TrashGroup[]>(() => {
   if (!scanned.value) return []
@@ -378,8 +409,9 @@ const projectGroups = computed<TrashGroup[]>(() => {
     if (seen.has(key)) return
     seen.add(key)
     const arr = sortedTrashArr(key)
-    // 默认只展示最近 100 条；更早的通过「加载更早」追加
-    const limit = visibleLimit.value[key] ?? TRASH_VISIBLE
+    // 默认只展示最近 1 个月；更早月份通过「加载更早月份」追加
+    const monthGroups = toMonthGroups(arr)
+    const shownMonths = visibleMonths.value[key] ?? MONTHS_VISIBLE
     // 排序键：优先扫描到的回收站文件最新变动时间；已删除项目回退到删除时间；
     // 再回退到本地已加载任务的最新时间；全无则为空（排最后，按名称正序）
     const updatedAt =
@@ -391,9 +423,9 @@ const projectGroups = computed<TrashGroup[]>(() => {
       label,
       deleted,
       deletedProject,
-      tasks: arr.slice(0, limit),
+      monthGroups: monthGroups.slice(0, shownMonths),
       loaded: tasks.trashLoaded.includes(key),
-      hasMore: arr.length > limit || !!tasks.trashHasMore[key],
+      hasMore: monthGroups.length > shownMonths || !!tasks.trashHasMore[key],
       updatedAt,
     })
   }
@@ -444,7 +476,7 @@ const projectGroups = computed<TrashGroup[]>(() => {
     if (!matched.length) continue
     out.push({
       ...g,
-      tasks: matched.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+      monthGroups: toMonthGroups(matched.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))),
       hasMore: false,
     })
   }
@@ -963,7 +995,7 @@ function onSaved(task: Task) {
           <span class="text-sm font-medium text-slate-600 truncate">{{ g.label }}</span>
           <span v-if="g.deleted" class="shrink-0 text-[11px] text-slate-400">已删除项目</span>
           <span class="shrink-0 text-[11px] text-slate-400">
-            <template v-if="g.loaded">（{{ g.tasks.length }}）</template>
+            <template v-if="g.loaded">（{{ totalShown(g) }}）</template>
             <template v-else-if="loading[g.key]">加载中…</template>
             <template v-else>（…）</template>
           </span>
@@ -982,56 +1014,63 @@ function onSaved(task: Task) {
         <div v-if="loading[g.key]" class="px-0.5 py-2 text-xs text-slate-400">正在加载该项目的时间胶囊数据…</div>
         <template v-else>
           <div v-if="loadError[g.key]" class="px-0.5 py-2 text-xs text-red-500">加载失败，点击项目名可重试</div>
-          <div
-            v-for="t in g.tasks"
-            :key="t.id"
-            v-memo="[t.id, t.name, t.status, t.updatedAt, t.projectId]"
-            class="cursor-pointer bg-white rounded-lg border border-slate-200 p-4 flex items-center gap-3 hover:bg-slate-50/60"
-            title="点击编辑该任务"
-            @click="openEdit(t)"
-          >
-            <div class="flex-1 min-w-0">
-              <div class="flex items-center gap-2">
-                <span class="text-sm font-medium text-slate-700 truncate">{{ t.name || '未命名任务' }}</span>
-                <span
-                  class="text-[11px] px-1.5 py-0.5 rounded-full shrink-0"
-                  :class="t.status === 'deleted' ? 'bg-red-50 text-red-500' : 'bg-slate-100 text-slate-500'"
-                >
-                  {{ t.status === 'deleted' ? '已删除' : '已完成' }}
-                </span>
-                <span
-                  v-if="durationText(t)"
-                  class="shrink-0 rounded-full border border-slate-100 bg-slate-50 px-1.5 py-0.5 text-[11px] text-slate-400"
-                  :title="`开始：${taskStartOf(t).slice(0, 16)} → 完成：${t.updatedAt.slice(0, 16)}`"
-                >
-                  {{ durationText(t) }}
-                </span>
-              </div>
-              <div class="mt-1 flex flex-wrap gap-x-4 text-[11px] text-slate-400">
-                <span>{{ t.projectId ? (projectOf(t.projectId)?.name ?? '未知项目') : '无分类' }}</span>
-                <span>{{ formatTodayTitle(t.updatedAt) }}</span>
-              </div>
+          <div v-for="mg in g.monthGroups" :key="mg.key">
+            <div class="px-0.5 pt-1 pb-0.5 text-xs font-medium text-slate-500">
+              {{ monthLabel(mg.key) }} · {{ mg.tasks.length }} 条
             </div>
-            <button
-              class="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs text-slate-600 border border-slate-200 hover:bg-slate-50 shrink-0"
-              title="编辑任务"
-              @click.stop="openEdit(t)"
-            >
-              <AppIcon name="edit" :size="13" class="shrink-0" />
-              编辑
-            </button>
-            <button
-              class="px-3 py-1.5 rounded-lg text-xs text-brand border border-brand/30 hover:bg-brand/5 shrink-0"
-              @click.stop="restore(t)"
-            >
-              恢复
-            </button>
-            <button
-              class="px-3 py-1.5 rounded-lg text-xs text-red-500 border border-red-200 hover:bg-red-50 shrink-0"
-              @click.stop="askDelete(t)"
-            >
-              永久删除
-            </button>
+            <div class="space-y-2">
+              <div
+                v-for="t in mg.tasks"
+                :key="t.id"
+                v-memo="[t.id, t.name, t.status, t.updatedAt, t.projectId]"
+                class="cursor-pointer bg-white rounded-lg border border-slate-200 p-4 flex items-center gap-3 hover:bg-slate-50/60"
+                title="点击编辑该任务"
+                @click="openEdit(t)"
+              >
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2">
+                  <span class="text-sm font-medium text-slate-700 truncate">{{ t.name || '未命名任务' }}</span>
+                  <span
+                    class="text-[11px] px-1.5 py-0.5 rounded-full shrink-0"
+                    :class="t.status === 'deleted' ? 'bg-red-50 text-red-500' : 'bg-slate-100 text-slate-500'"
+                  >
+                    {{ t.status === 'deleted' ? '已删除' : '已完成' }}
+                  </span>
+                  <span
+                    v-if="durationText(t)"
+                    class="shrink-0 rounded-full border border-slate-100 bg-slate-50 px-1.5 py-0.5 text-[11px] text-slate-400"
+                    :title="`开始：${taskStartOf(t).slice(0, 16)} → 完成：${t.updatedAt.slice(0, 16)}`"
+                  >
+                    {{ durationText(t) }}
+                  </span>
+                </div>
+                <div class="mt-1 flex flex-wrap gap-x-4 text-[11px] text-slate-400">
+                  <span>{{ t.projectId ? (projectOf(t.projectId)?.name ?? '未知项目') : '无分类' }}</span>
+                  <span>{{ formatTodayTitle(t.updatedAt) }}</span>
+                </div>
+              </div>
+              <button
+                class="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs text-slate-600 border border-slate-200 hover:bg-slate-50 shrink-0"
+                title="编辑任务"
+                @click.stop="openEdit(t)"
+              >
+                <AppIcon name="edit" :size="13" class="shrink-0" />
+                编辑
+              </button>
+              <button
+                class="px-3 py-1.5 rounded-lg text-xs text-brand border border-brand/30 hover:bg-brand/5 shrink-0"
+                @click.stop="restore(t)"
+              >
+                恢复
+              </button>
+              <button
+                class="px-3 py-1.5 rounded-lg text-xs text-red-500 border border-red-200 hover:bg-red-50 shrink-0"
+                @click.stop="askDelete(t)"
+              >
+                永久删除
+              </button>
+            </div>
+            </div>
           </div>
           <button
             v-if="g.hasMore"
@@ -1040,9 +1079,9 @@ function onSaved(task: Task) {
             @click="loadMoreGroup(g.key)"
           >
             <AppIcon name="chevron-down" :size="13" class="inline-block -mt-0.5 mr-1" />
-            {{ loadingMore[g.key] ? '加载中…' : '加载更早' }}
+            {{ loadingMore[g.key] ? '加载中…' : '加载更早月份' }}
           </button>
-          <div v-if="!loadError[g.key] && !g.tasks.length && !g.hasMore" class="text-xs text-slate-400 px-0.5">
+          <div v-if="!loadError[g.key] && !totalShown(g) && !g.hasMore" class="text-xs text-slate-400 px-0.5">
             {{ g.deleted ? '该项目没有任务' : '该项目时间胶囊为空' }}
           </div>
         </template>
