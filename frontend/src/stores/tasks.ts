@@ -112,6 +112,26 @@ function isServerEmptyError(e: unknown): boolean {
  * 项目一旦被拖拽排序（存在 sort 值）就按 sort 升序排列（未分配 sort 的新任务补到末尾），
  * 让手动拖拽顺序在加载/同步合并后保持；从未拖拽过的项目退化为按截止时间升序（旧行为）。
  */
+/** 任务排序参考时间：提醒时间 > 开始时间（都没有返回 null，无时间任务排最后） */
+function taskSortTime(t: Task): { iso: string; day: string; rank: 1 | 2 } | null {
+  if (t.reminderTime) return { iso: t.reminderTime, day: dateKeyOf(t.reminderTime), rank: 1 }
+  if (t.startTime) return { iso: t.startTime, day: dateKeyOf(t.startTime), rank: 2 }
+  return null
+}
+
+/** 新建任务插入比较：同一天按「提醒 > 开始」类型优先级；不同一天所有时间同一级别，按实际时间先后（无时间排最后） */
+function compareTaskSort(a: Task, b: Task): number {
+  const ta = taskSortTime(a)
+  const tb = taskSortTime(b)
+  if (!ta && !tb) return 0
+  if (!ta) return 1
+  if (!tb) return -1
+  if (ta.day === tb.day) {
+    if (ta.rank !== tb.rank) return ta.rank - tb.rank
+    return ta.iso.localeCompare(tb.iso)
+  }
+  return ta.iso.localeCompare(tb.iso)
+}
 function sortActiveList(list: Task[]): Task[] {
   const hasSort = list.some((t) => t.sort !== undefined)
   const cmp = hasSort
@@ -1633,18 +1653,28 @@ export const useTasksStore = defineStore('tasks', {
       const idx = list.findIndex((t) => t.id === task.id)
       const isNew = idx < 0
       task.updatedAt = nowIso()
-      // 新任务/跨项目移入：清掉旧项目的 sort，避免按其旧位置插入（新任务由 sortActiveList 补到末尾）
-      if (isNew) task.sort = undefined
+      if (idx >= 0) {
+        Object.assign(list[idx], task)
+      } else {
+        // 新建/跨项目移入：不继承旧项目的 sort；仅把该任务按「同一天提醒 > 开始，
+        // 不同一天按实际时间先后」插入当前顺序的合适位置（其他任务顺序保持不变），
+        // 再整体重排 sort 序号，使新顺序在加载/同步合并后依然保持
+        const pendingEnd = list.findIndex((t) => t.status !== 'pending')
+        const bound = pendingEnd === -1 ? list.length : pendingEnd
+        let at = 0
+        while (at < bound && compareTaskSort(list[at], task) <= 0) at++
+        list.splice(at, 0, task)
+        list.forEach((t, i) => {
+          t.sort = i
+        })
+      }
       // 新任务若是今日可见，登记到今日顺序表末尾（独立小文件后台落盘，失败不影响主保存），
       // 保证今日视图里新任务的位置跨设备一致，而不是每次按截止时间重排
       if (isNew && isTaskVisibleToday(task, todayKey())) {
         this.todayOrder = [...this.todayOrder.filter((id) => id !== task.id), task.id]
         void this.saveTodayOrderNow()
       }
-      if (idx >= 0) Object.assign(list[idx], task)
-      else list.push(task)
-      // README：恢复/增删时按截止时间补位；仅新插入/移动项目时重排，避免覆盖拖拽手动顺序
-      this.tasks[target] = isNew ? sortActiveList(list) : list
+      this.tasks[target] = list
       this._persist(target)
       // 编辑源任务后同步重复模板：保持后续周期属性一致；移除重复则删除模板（周期提醒随之停止）
       this._syncRepeatMasterForTask(task)

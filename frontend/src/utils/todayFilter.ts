@@ -92,6 +92,25 @@ export function nextVisibleDateInWindow(t: Task, today: string, windowDays = 30)
  *    重复规则命中、子任务同规则），30 天窗口外才开始/提醒的任务不收集；
  *  - 重复模板（完成重复任务后生成）：dueDate 落在窗口内，且按今日视图规则当天会显示
  *    才收集（物化后即成为当天可见的待办任务）。 */
+/** 未来任务排序参考时间：提醒时间 > 开始时间 > 下次任务生成日（生成日按当天 00:00 参与跨天比较） */
+function futureSortTime(x: { task: Task; date: string }): { iso: string; day: string; rank: 1 | 2 | 3 } {
+  const t = x.task
+  if (t.reminderTime) return { iso: t.reminderTime, day: dateKeyOf(t.reminderTime), rank: 1 }
+  if (t.startTime) return { iso: t.startTime, day: dateKeyOf(t.startTime), rank: 2 }
+  return { iso: `${x.date}T00:00:00+08:00`, day: x.date, rank: 3 }
+}
+
+/** 未来任务比较：同一天按「提醒 > 开始 > 生成」的类型优先级；不同一天所有时间同一级别，按实际时间先后 */
+function compareFutureSort(a: { task: Task; date: string }, b: { task: Task; date: string }): number {
+  const ta = futureSortTime(a)
+  const tb = futureSortTime(b)
+  if (ta.day === tb.day) {
+    if (ta.rank !== tb.rank) return ta.rank - tb.rank
+    return ta.iso.localeCompare(tb.iso)
+  }
+  return ta.iso.localeCompare(tb.iso)
+}
+
 export function collectFutureVisibleTasks(
   allTasks: Task[],
   repeats: Record<string, RepeatMaster[]>,
@@ -114,7 +133,8 @@ export function collectFutureVisibleTasks(
       }
     }
   }
-  // 同一任务只展示一次（最早出现日在前）；按出现日期升序
+  // 同一任务只展示一次（最早出现日在前）；
+  // 排序：同一天按「提醒 > 开始 > 下次生成」类型优先级；不同一天所有时间同一级别，按实际时间先后
   const seen = new Set<string>()
   return out
     .filter((x) => {
@@ -122,7 +142,7 @@ export function collectFutureVisibleTasks(
       seen.add(x.task.id)
       return true
     })
-    .sort((a, b) => (a.date || '').localeCompare(b.date || ''))
+    .sort(compareFutureSort)
 }
 
 /** 重复任务在 date 当天是否「活跃」（首次出现日已到且当天是重复日）：
