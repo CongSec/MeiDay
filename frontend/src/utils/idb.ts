@@ -89,6 +89,8 @@ export async function idbClearUserCache(username: string): Promise<void> {
     idbDeletePrefix(tx.objectStore('trash'), `trash:${prefix}`)
     idbDeletePrefix(tx.objectStore('repeats'), `repeats:${prefix}`)
     idbDeletePrefix(tx.objectStore('kv'), `etag:${prefix}`)
+    // Last-Modified 条件请求缓存（读路径 If-Modified-Since 用），与 etag 一一对应，登出一并清除
+    idbDeletePrefix(tx.objectStore('kv'), `lm:${prefix}`)
     // profile 直接用用户名作 key
     tx.objectStore('profile').delete(username)
     // 统计缓存：key 为 `stats:{username}`
@@ -119,7 +121,11 @@ export async function idbClearTrashUserCache(username: string): Promise<void> {
       const cursor = req.result
       if (!cursor) return
       const key = cursor.key
-      if (typeof key === 'string' && key.startsWith(`etag:${username}:`) && key.includes(':trash')) {
+      if (
+        typeof key === 'string' &&
+        key.includes(':trash') &&
+        (key.startsWith(`etag:${username}:`) || key.startsWith(`lm:${username}:`))
+      ) {
         cursor.delete()
       }
       cursor.continue()

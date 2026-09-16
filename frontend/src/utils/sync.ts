@@ -138,6 +138,31 @@ export function versionToken(
   return null
 }
 
+
+/**
+ * 大小写无关地读取响应头中的 Last-Modified（RFC 1123 时间串，如 'Wed, 21 Oct 2015 07:28:00 GMT'）。
+ * 阿里云 OSS 的 GET 响应不带 ETag 头（只有 Content-MD5 + Last-Modified），且对
+ * If-None-Match 条件请求不识别（实测带 Content-MD5 hex 永远回 200 全量），
+ * 但对 If-Modified-Since 能正确回 304。因此读路径用 Last-Modified 做条件请求。
+ */
+export function lastModifiedOf(headers: Record<string, unknown> | undefined): string | null {
+  if (!headers) return null
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === 'last-modified') {
+      const v = String(headers[key] ?? '')
+      return v || null
+    }
+  }
+  return null
+}
+
+/** 由 etag 键派生对应的 Last-Modified 键：'lm:' 前缀 + 去掉 'etag:' 后的后缀。
+ *  etag 键同时被 CAS 写路径复用（knownEtag 冲突检测），绝不能把时间写进 etag 键；
+ *  Last-Modified 只用于读路径的 If-Modified-Since 条件请求，独立存放互不干扰。 */
+export function lmKeyOf(etagKey: string): string {
+  return 'lm:' + etagKey.replace(/^etag:/, '')
+}
+
 /** 读取远端对象内容 + ETag；文件不存在时返回 null（不抛错） */
 async function fetchRemote<T>(client: OssClient, key: string): Promise<{ content: T | null; etag: string | null }> {
   try {

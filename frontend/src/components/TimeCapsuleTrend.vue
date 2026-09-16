@@ -15,7 +15,7 @@ const props = defineProps<{
   year: number
 }>()
 
-const emit = defineEmits<{ (e: 'change-year', year: number): void }>()
+// 按年份过滤：不再支持组件内切年（年份切换经由「扫描时间胶囊文件」按钮）
 
 type Mode = 'week' | 'month' | 'year'
 const mode = ref<Mode>('week')
@@ -35,6 +35,22 @@ function mondayOf(d: Date): string {
 const now = new Date()
 const weekStartKey = ref(mondayOf(now))
 const monthKey = ref(`${props.year}-${pad(now.getMonth() + 1)}`)
+/** 所选年份的起止日期（周/月翻页钳制在当年内，跨年不再触发加载） */
+const yearStartKey = computed(() => `${props.year}-01-01`)
+const yearEndKey = computed(() => `${props.year}-12-31`)
+
+/** 初始化周/月锚点：查看当年时从「当前周/本月」开始；查看往年/未来年时落到该年 1 月，
+ *  避免「本周」在往年视图下出现一整年空窗。 */
+function initAnchors() {
+  const nowY = now.getFullYear()
+  if (nowY === props.year) {
+    weekStartKey.value = mondayOf(now)
+    monthKey.value = `${props.year}-${pad(now.getMonth() + 1)}`
+  } else {
+    weekStartKey.value = yearStartKey.value
+    monthKey.value = `${props.year}-01`
+  }
+}
 
 function shortKey(key: string): string {
   return `${Number(key.slice(5, 7))}/${Number(key.slice(8, 10))}`
@@ -107,40 +123,29 @@ const periodTitle = computed(() => {
   return `${props.year}年`
 })
 
-/** 确保某年数据已加载（未加载时通知父级按需加载） */
-function ensureYear(y: number) {
-  if (y === props.year) return
-  const has = props.tasks.some((t) => t.status === 'completed' && Number(dateKeyOf(t.updatedAt).slice(0, 4)) === y)
-  if (!has) emit('change-year', y)
-}
-
-/** 切换周期：上/下一周、上/下一月、上/下一年 */
+/** 切换周期：上/下一周、上/下一月（钳制在所选年份内）；「本年」只有一年，无需翻年 */
 function shift(delta: number) {
   if (mode.value === 'week') {
-    weekStartKey.value = addDaysKey(weekStartKey.value, delta * 7)
-    const s = weekStartKey.value
-    ensureYear(Number(s.slice(0, 4)))
-    ensureYear(Number(addDaysKey(s, 6).slice(0, 4)))
+    const next = addDaysKey(weekStartKey.value, delta * 7)
+    if (next < yearStartKey.value || next > yearEndKey.value) return
+    weekStartKey.value = next
   } else if (mode.value === 'month') {
     const [y, m] = monthKey.value.split('-').map(Number)
     const d = new Date(y, m - 1 + delta, 1)
+    if (d.getFullYear() !== props.year) return
     monthKey.value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`
-    ensureYear(d.getFullYear())
-  } else {
-    emit('change-year', props.year + delta)
   }
 }
 
-// 进入/切换分类时，确保当前周期所在年份已加载（例如在 2025 年视图下看「本周」需要 2026 数据）
-watch(mode, (m) => {
-  if (m === 'year') return
-  const y = m === 'week' ? Number(weekStartKey.value.slice(0, 4)) : Number(monthKey.value.slice(0, 4))
-  ensureYear(y)
-})
+// 年份切换（经由「扫描时间胶囊文件」）时把周/月锚点重置到新年份
+watch(
+  () => props.year,
+  () => {
+    initAnchors()
+  },
+)
 onMounted(() => {
-  if (mode.value === 'year') return
-  const y = mode.value === 'week' ? Number(weekStartKey.value.slice(0, 4)) : Number(monthKey.value.slice(0, 4))
-  ensureYear(y)
+  initAnchors()
 })
 
 /** SVG 折线图 */

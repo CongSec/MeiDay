@@ -1,9 +1,9 @@
 import { defineStore } from 'pinia'
 import { useAuthStore } from './auth'
 import { createOssClient, describeOssError, paths } from '@/utils/oss'
-import { compareAndSwapPut, mergeStats, mergeStatsAfterSave, versionToken } from '@/utils/sync'
+import { compareAndSwapPut, lastModifiedOf, lmKeyOf, mergeStats, mergeStatsAfterSave, versionToken } from '@/utils/sync'
 import { enrichOssError } from '@/utils/ossDiag'
-import { idbGet, idbPut } from '@/utils/idb'
+import { idbGet, idbPut, idbDel } from '@/utils/idb'
 import { queueSyncChange } from '@/utils/syncReport'
 import { nowIso, todayKey } from '@/utils/time'
 import type { UserStats } from '@/types'
@@ -71,17 +71,23 @@ export const useStatsStore = defineStore('stats', {
       }
       try {
         const client = await createOssClient(auth.creds)
-        const etag = await idbGet<string>('kv', etagKey(auth.username))
+        // 读路径条件请求用 If-Modified-Since（Last-Modified）：阿里云 OSS 不带 ETag 头，
+        // 只认 Last-Modified 回 304；etag 键保留给写路径 CAS 用，两者互不覆盖。
+        const eKey = etagKey(auth.username)
+        const lmKey = lmKeyOf(eKey)
+        const lm = await idbGet<string>('kv', lmKey)
         const res = await client.get(
           paths.stats(auth.username),
-          etag ? { headers: { 'If-None-Match': etag } } : undefined,
+          lm ? { headers: { 'If-Modified-Since': lm } } : undefined,
         )
         if (res.res.status !== 304) {
           const remote = JSON.parse(res.content.toString()) as UserStats
           this.stats = remote
           await idbPut('kv', cacheKey(auth.username), remote)
           const newEtag = versionToken(res.res.headers as Record<string, unknown>, res.content) ?? ''
-          if (newEtag) await idbPut('kv', etagKey(auth.username), newEtag)
+          if (newEtag) await idbPut('kv', eKey, newEtag)
+          const newLm = lastModifiedOf(res.res.headers as Record<string, unknown>)
+          if (newLm) await idbPut('kv', lmKey, newLm)
         }
       } catch (e) {
         const err = e as { code?: string | number; status?: number }
@@ -122,6 +128,8 @@ export const useStatsStore = defineStore('stats', {
           const result = await compareAndSwapPut<UserStats>(client, key, stats, knownEtag)
           if (result.ok) {
             if (result.etag) await idbPut('kv', eKey, result.etag)
+            // 写成功后清掉 Last-Modified，避免旧值导致后续 304 误判（Last-Modified 秒级精度）
+            await idbDel('kv', lmKeyOf(eKey))
             queueSyncChange(auth.username, 'stats')
             await idbPut('kv', cacheKey(auth.username), stats)
             if (snapshot && this.stats) {

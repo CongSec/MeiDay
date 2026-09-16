@@ -1,12 +1,13 @@
 import { defineStore } from 'pinia'
 import type { OssClient } from '@/utils/oss'
 import { useAuthStore } from './auth'
+import { useProjectsStore } from './projects'
 import { useUiStore } from './ui'
 import { useStatsStore } from './stats'
 import { createOssClient, describeOssError, paths } from '@/utils/oss'
-import { applyDeletedTombstones, compareAndSwapPut, filterTasksForProject, mergeDeletedTombstones, mergeTasks, versionToken } from '@/utils/sync'
+import { applyDeletedTombstones, compareAndSwapPut, filterTasksForProject, lastModifiedOf, lmKeyOf, mergeDeletedTombstones, mergeTasks, versionToken } from '@/utils/sync'
 import { enrichOssError } from '@/utils/ossDiag'
-import { idbGet, idbPut, idbDel, idbClearTrashUserCache } from '@/utils/idb'
+import { idbClearTrashUserCache, idbGet, idbPut, idbDel } from '@/utils/idb'
 import { debounce, type Debounced } from '@/utils/debounce'
 import { queueSyncChange } from '@/utils/syncReport'
 import { dateKeyOf, diffDaysKey, nowIso, todayKey } from '@/utils/time'
@@ -29,6 +30,8 @@ const toggleSaving = new Set<string>()
 const savingNow = new Set<string>()
 /** 内存常驻项目上限：超过上限的“最近最少使用”非固定项目会被逐出（仅内存，IDB 缓存保留，下次访问按需重载） */
 const MAX_RESIDENT_PROJECTS = 10
+/** 回收站分片拉取并发上限：有界并发下载分片，避免一次性打满网络/连接池 */
+const TRASH_FETCH_CONCURRENCY = 8
 /** 固定保留项目（不参与逐出）：
  *  - viewPins：当前视图聚焦的项目（正在浏览的项目 / 回收站展开的项目），由视图挂载/卸载时增删；
  *  - 今日相关项目：逐出时实时计算「内存里存在今日可见任务的项目」，保证今日视图/侧栏角标依赖的
@@ -201,8 +204,23 @@ function filterStaleAcrossProjects(
     (t) => !others.some((o) => o.id === t.id && (o.updatedAt || '').localeCompare(t.updatedAt || '') > 0),
   )
 }
+/** 有界并发 map：限制同时执行的异步任务数，避免回收站分片全量拉取时一次性打满网络/连接池。 */
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length)
+  let next = 0
+  async function worker() {
+    while (next < items.length) {
+      const i = next++
+      results[i] = await fn(items[i])
+    }
+  }
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker())
+  await Promise.all(workers)
+  return results
+}
+
 /** 拉取远端单个回收站文件（真实项目某月分片 / 未分类单文件）；文件不存在时视为空，网络/权限错误向上抛。
- *  带 ETag 条件 GET：远端未变化返回 304 时直接复用本地缓存，避免每次同步都全量下载
+ *  带 Last-Modified 条件 GET（If-Modified-Since）：远端未变化返回 304 时直接复用本地缓存，避免每次同步都全量下载
  *  （回收站按月分片后日常只碰当月 + 上月两个小文件）。 */
 async function fetchRemoteTrashShard(
   client: OssClient,
@@ -211,12 +229,16 @@ async function fetchRemoteTrashShard(
   month?: string,
 ): Promise<Task[]> {
   const etagKey = `etag:${username}:${projectId}:trash${month ? `:${month}` : ''}`
+  const lmKey = lmKeyOf(etagKey)
   const cacheKey = trashCacheKey(username, projectId, month)
-  const etag = await idbGet<string>('kv', etagKey)
+  // 阿里云 OSS 对 If-None-Match（ETag 条件 GET）不识别（实测带 Content-MD5 hex 永远回 200 全量），
+  // 但对 If-Modified-Since 能正确回 304。因此读路径改用 Last-Modified 做条件请求；
+  // etag 键仍保留给 CAS 写路径（compareAndSwapPut 复用同一键做冲突检测），两者互不覆盖。
+  const lm = await idbGet<string>('kv', lmKey)
   try {
     const res = await client.get(
       trashFilePath(username, projectId, month),
-      etag ? { headers: { 'If-None-Match': etag } } : undefined,
+      lm ? { headers: { 'If-Modified-Since': lm } } : undefined,
     )
     if (res.res.status === 304) {
       // 远端未变化：复用本地回收站缓存（无缓存视为空）
@@ -225,18 +247,22 @@ async function fetchRemoteTrashShard(
     }
     if (res.res.status === 404) {
       await idbDel('kv', etagKey)
+      await idbDel('kv', lmKey)
       return []
     }
     const list = JSON.parse(res.content.toString()) as Task[]
     normalizeTasks(list)
     const newEtag = versionToken(res.res.headers as Record<string, unknown>, res.content) ?? ''
     if (newEtag) await idbPut('kv', etagKey, newEtag)
+    const newLm = lastModifiedOf(res.res.headers as Record<string, unknown>)
+    if (newLm) await idbPut('kv', lmKey, newLm)
     await idbPut('trash', cacheKey, list)
     return list
   } catch (e) {
     const err = e as { code?: string | number; status?: number }
     if (err.status === 404 || err.code === 'NoSuchKey') {
       await idbDel('kv', etagKey)
+      await idbDel('kv', lmKey)
       return []
     }
     // ali-oss 对 304 可能抛异常而非正常返回：与 loadProject/loadTrash 一致地兜底
@@ -302,6 +328,7 @@ async function migrateLegacyTrash(client: OssClient, username: string, projectId
     const putRes = await client.put(paths.trashShard(username, projectId, m), JSON.stringify(merged))
     const etag = versionToken(putRes.res.headers as Record<string, unknown>, merged) ?? ''
     if (etag) await idbPut('kv', `etag:${username}:${projectId}:trash:${m}`, etag)
+    await idbDel('kv', lmKeyOf(`etag:${username}:${projectId}:trash:${m}`))
     await idbPut('trash', trashCacheKey(username, projectId, m), merged)
   }
   await client.delete(paths.trash(username, projectId))
@@ -380,6 +407,8 @@ export const useTasksStore = defineStore('tasks', {
     trashHasMore: {} as Record<string, boolean>,
     /** 已动态加载进内存的时间胶囊年份（多视图按需加载标记） */
     trashLoadedYears: [] as number[],
+    /** 时间胶囊当前过滤年份（按年份过滤模式：整个时间胶囊页只展示这一年） */
+    trashYear: null as number | null,
     repeatsLoaded: [] as string[],
     /** 今日任务跨项目拖拽顺序表（任务 id 全局有序；展示时按「今日可见 + 仍存在」过滤） */
     todayOrder: [] as string[],
@@ -458,12 +487,14 @@ export const useTasksStore = defineStore('tasks', {
         await this.sweepCompleted(projectId)
         return
       }
+      const etagKey = `etag:${auth.username}:${projectId}`
+      const lmKey = lmKeyOf(etagKey)
       try {
         const client = await createOssClient(auth.creds)
-        const etag = await idbGet<string>('kv', `etag:${auth.username}:${projectId}`)
+        const lm = await idbGet<string>('kv', lmKey)
         const res = await client.get(
           tasksFilePath(auth.username, projectId),
-          etag ? { headers: { 'If-None-Match': etag } } : undefined,
+          lm ? { headers: { 'If-Modified-Since': lm } } : undefined,
         )
         if (res.res.status !== 304) {
                   const remote = JSON.parse(res.content.toString()) as Task[]
@@ -484,7 +515,9 @@ export const useTasksStore = defineStore('tasks', {
             void this._persistTrash(projectId, true)
           }
           const newEtag = versionToken(res.res.headers as Record<string, unknown>, res.content) ?? ''
-          if (newEtag) await idbPut('kv', `etag:${auth.username}:${projectId}`, newEtag)
+          if (newEtag) await idbPut('kv', etagKey, newEtag)
+          const newLm = lastModifiedOf(res.res.headers as Record<string, unknown>)
+          if (newLm) await idbPut('kv', lmKey, newLm)
         }
       } catch (e) {
         const err = e as { code?: string | number; status?: number }
@@ -496,7 +529,8 @@ export const useTasksStore = defineStore('tasks', {
           // 避免旧数据被当作权威展示，也避免下次编辑时把过期数据再次同步回云端
           this.tasks[projectId] = []
           await idbDel('tasks', taskCacheKey(auth.username, projectId))
-          await idbDel('kv', `etag:${auth.username}:${projectId}`)
+          await idbDel('kv', etagKey)
+          await idbDel('kv', lmKey)
         } else {
           throw new Error(await enrichOssError(e))
         }
@@ -555,10 +589,12 @@ export const useTasksStore = defineStore('tasks', {
       if (!auth.creds) return
       try {
         const client = await createOssClient(auth.creds)
-        const etag = await idbGet<string>('kv', todayOrderEtagKey(auth.username))
+        const etagKey = todayOrderEtagKey(auth.username)
+        const lmKey = lmKeyOf(etagKey)
+        const lm = await idbGet<string>('kv', lmKey)
         const res = await client.get(
           todayOrderFilePath(auth.username),
-          etag ? { headers: { 'If-None-Match': etag } } : undefined,
+          lm ? { headers: { 'If-Modified-Since': lm } } : undefined,
         )
         if (res.res.status === 304) return
         const remote = JSON.parse(res.content.toString()) as { ids?: string[] }
@@ -566,7 +602,9 @@ export const useTasksStore = defineStore('tasks', {
         this.todayOrder = ids
         await idbPut('kv', cacheKey, { ids })
         const newEtag = versionToken(res.res.headers as Record<string, unknown>, res.content) ?? ''
-        if (newEtag) await idbPut('kv', todayOrderEtagKey(auth.username), newEtag)
+        if (newEtag) await idbPut('kv', etagKey, newEtag)
+        const newLm = lastModifiedOf(res.res.headers as Record<string, unknown>)
+        if (newLm) await idbPut('kv', lmKey, newLm)
       } catch (e) {
         const err = e as { code?: string | number; status?: number }
         // 文件不存在（首次使用/未拖拽过）或 304：静默忽略
@@ -778,8 +816,12 @@ export const useTasksStore = defineStore('tasks', {
           continue
         }
         let changed = false
-        for (const m of months) {
+        // 有界并发拉取该年各分片（Last-Modified 条件 GET，未变动的月份直接 304 复用缓存）
+        const results = await mapLimit(months, TRASH_FETCH_CONCURRENCY, async (m) => {
           const remote = await fetchRemoteTrashShard(client, auth.username, pid, m)
+          return { remote }
+        })
+        for (const { remote } of results) {
           if (remote.length) {
             this.trash[pid] = mergeUnique(this.trash[pid] ?? [], remote)
             changed = true
@@ -810,6 +852,127 @@ export const useTasksStore = defineStore('tasks', {
       if (!this.trashLoaded.includes(UNCATEGORIZED)) this.trashLoaded.push(UNCATEGORIZED)
       projectCount++
       this.trashLoadedYears.push(year)
+      return { projects: projectCount, tasks: taskCount }
+    },
+    /** 时间胶囊「按年份过滤」核心：清空其它年份的内存 + IDB 缓存（trash 数据 + etag/lm），
+     *  再一次性把该年全部项目分片下载进内存（真实项目按月分片、未分类单文件按年过滤）。
+     *  年份切换只经由「扫描时间胶囊文件」按钮触发；返回该年有数据的项目数与任务数。
+     *  注意：不写 trashLoaded —— 导出/清空等全量路径仍依赖 trashLoaded 判断是否已加载全部年份。 */
+    async switchTrashYear(year: number): Promise<{ projects: number; tasks: number }> {
+      const auth = useAuthStore()
+      if (!auth.creds || !auth.username) return { projects: 0, tasks: 0 }
+      // 若尚未扫描（如首次进入页面直接加载），先枚举哪些项目存在回收站文件
+      if (!Object.keys(this.trashShardMonths ?? {}).length) {
+        await this.listTrashProjects().catch(() => {})
+      }
+      // 复制分片索引：随后要清空 trashShardMonths 重建，但需先确定该年要拉哪些分片
+      const shardsByPid = { ...this.trashShardMonths }
+      // 先把未落盘的胶囊变更写盘，避免清缓存丢数据
+      for (const fn of trashDebouncers.values()) {
+        fn.flush()
+        fn.cancel()
+      }
+      // 清空旧年份的 IDB 缓存（trash 数据 + etag/lm），只保留即将写入的该年数据
+      await idbClearTrashUserCache(auth.username)
+      // 解除旧年份项目固定并清空内存态
+      for (const pid of Object.keys(this.trash)) viewPins.delete(pid)
+      this.trash = {}
+      this.trashLoaded = []
+      this.trashLoadedMonths = {}
+      this.trashShardMonths = {}
+      this.trashHasMore = {}
+      this.trashLoadedYears = [year]
+      this.trashYear = year
+      const client = await createOssClient(auth.creds)
+      const since = `${year}-01`
+      const isCurrent = year === new Date().getFullYear()
+      const until = isCurrent ? monthOfNow() : `${year}-12`
+      let projectCount = 0
+      let taskCount = 0
+      const pids = new Set<string>([...Object.keys(shardsByPid), ...Object.keys(this.trash)])
+      // 无 list 权限时无法枚举分片：降级为所有已知项目（与扫描降级策略一致）
+      if (!Object.keys(shardsByPid).length) {
+        const projectsStore = useProjectsStore()
+        if (!projectsStore.loaded) await projectsStore.load().catch(() => {})
+        for (const p of projectsStore.projects) pids.add(p.id)
+      }
+      // 真实项目：一次性拉取该年全部月份分片
+      for (const pid of pids) {
+        if (pid === UNCATEGORIZED) continue
+        let allMonths: string[] = []
+        let months: string[] = []
+        try {
+          const known = shardsByPid[pid]
+          if (known?.length) {
+            allMonths = known
+          } else {
+            allMonths = await listTrashShardMonths(client, auth.username, pid)
+          }
+          months = allMonths.filter((m) => m >= since && m <= until)
+        } catch {
+          allMonths = []
+          months = []
+        }
+        if (!months.length) {
+          // 无该年份分片（或无法枚举）：当前年份降级按「当月 + 上月」窗口加载，保证今年数据尽量完整
+          if (isCurrent) {
+            try {
+              await migrateLegacyTrash(client, auth.username, pid)
+              const remote = await fetchRemoteTrash(client, auth.username, pid)
+              if (remote.length) {
+                this.trash[pid] = mergeUnique(this.trash[pid] ?? [], remote)
+                taskCount += remote.length
+                projectCount++
+                viewPins.add(pid)
+                await idbPut('trash', trashCacheKey(auth.username, pid), this.trash[pid])
+              }
+            } catch {
+              /* 单项目失败不影响其它项目 */
+            }
+          }
+          continue
+        }
+        // 有界并发拉取该年各分片（Last-Modified 条件 GET，未变动的月份 304 复用缓存）；
+        // 先收集结果再串行合并，避免并发写共享 trash[pid] 数组
+        const results = await mapLimit(months, TRASH_FETCH_CONCURRENCY, async (m) => {
+          const remote = await fetchRemoteTrashShard(client, auth.username, pid, m)
+          return { m, remote }
+        })
+        let changed = false
+        for (const { remote } of results) {
+          if (remote.length) {
+            this.trash[pid] = mergeUnique(this.trash[pid] ?? [], remote)
+            changed = true
+            taskCount += remote.length
+          }
+        }
+        if (changed) {
+          await idbPut('trash', trashCacheKey(auth.username, pid), this.trash[pid])
+          projectCount++
+          viewPins.add(pid)
+        }
+        this.trashLoadedMonths[pid] = [...new Set([...(this.trashLoadedMonths[pid] ?? []), ...months])].sort()
+        // 保留完整分片索引（导出/清空据此判断还有更早分片可加载）
+        this.trashShardMonths[pid] = allMonths
+        this.trashHasMore[pid] = allMonths.some((m) => !(this.trashLoadedMonths[pid] ?? []).includes(m))
+      }
+      // 未分类：单文件整文件拉取，按年份过滤后只保留该年任务
+      try {
+        const remoteU = await fetchRemoteTrashShard(client, auth.username, UNCATEGORIZED)
+        if (remoteU.length) {
+          const yearStr = String(year)
+          const filtered = remoteU.filter((t) => dateKeyOf(t.updatedAt || '').slice(0, 4) === yearStr)
+          if (filtered.length) {
+            this.trash[UNCATEGORIZED] = mergeUnique(this.trash[UNCATEGORIZED] ?? [], filtered)
+            taskCount += filtered.length
+            projectCount++
+            viewPins.add(UNCATEGORIZED)
+            await idbPut('trash', trashCacheKey(auth.username, UNCATEGORIZED), this.trash[UNCATEGORIZED])
+          }
+        }
+      } catch {
+        /* 未分类文件不存在/网络失败：忽略 */
+      }
       return { projects: projectCount, tasks: taskCount }
     },
     /** 「扫描时间胶囊文件」按钮：直接全量加载全部项目全部月份分片并合并进内存（不再弹确认框），
@@ -847,8 +1010,12 @@ export const useTasksStore = defineStore('tasks', {
           continue
         }
         let changed = false
-        for (const m of allMonths) {
+        // 有界并发拉取该项目全部分片（Last-Modified 条件 GET，未变动的月份直接 304 复用缓存）
+        const results = await mapLimit(allMonths, TRASH_FETCH_CONCURRENCY, async (m) => {
           const remote = await fetchRemoteTrashShard(client, auth.username, pid, m)
+          return { m, remote }
+        })
+        for (const { m, remote } of results) {
           if (remote.length) {
             this.trash[pid] = mergeUnique(this.trash[pid] ?? [], remote)
             changed = true
@@ -883,8 +1050,8 @@ export const useTasksStore = defineStore('tasks', {
       this.trashLoadedYears = [...loadedYears].sort((a, b) => a - b)
       return { projects: projectCount, tasks: taskCount }
     },
-    /** 退出时间胶囊页：释放时间胶囊占用的内存与本地 IDB 缓存（含多视图加载的年份数据）。
-     *  仅清理胶囊相关数据，不影响活跃任务/重复模板缓存；下次进入重新按需下载。 */
+    /** 退出时间胶囊页：释放时间胶囊占用的内存并清空该用户全部 IDB 缓存（trash 数据 + etag/lm）。
+     *  下次进入重新从 OSS 下载当前年份数据，避免本地残留其它年份/旧数据占存储配额。 */
     async releaseTrashMemory() {
       // 先把未落盘的胶囊变更写盘，再清内存，避免丢数据
       for (const fn of trashDebouncers.values()) {
@@ -899,6 +1066,7 @@ export const useTasksStore = defineStore('tasks', {
       this.trashShardMonths = {}
       this.trashHasMore = {}
       this.trashLoadedYears = []
+      this.trashYear = null
       const auth = useAuthStore()
       if (auth.username) await idbClearTrashUserCache(auth.username)
     },
@@ -922,6 +1090,7 @@ export const useTasksStore = defineStore('tasks', {
           await client.delete(trashFilePath(auth.username, projectId, m)).catch(() => {})
           await idbDel('trash', trashCacheKey(auth.username, projectId, m))
           await idbDel('kv', `etag:${auth.username}:${projectId}:trash:${m}`)
+          await idbDel('kv', lmKeyOf(`etag:${auth.username}:${projectId}:trash:${m}`))
         }
         await client.delete(paths.trash(auth.username, projectId)).catch(() => {})
       }
@@ -1005,13 +1174,15 @@ export const useTasksStore = defineStore('tasks', {
       if (!auth.creds || !auth.username) return
       const client = await createOssClient(auth.creds)
       const key = tasksFilePath(auth.username, projectId)
-      // 条件 GET：带本地 ETag（If-None-Match），远端未变化时返回 304，避免全量下载
-      const etag = await idbGet<string>('kv', `etag:${auth.username}:${projectId}`)
+      // 条件 GET：带本地 Last-Modified（If-Modified-Since，OSS 不认 If-None-Match），远端未变化返回 304
+      const etagKey = `etag:${auth.username}:${projectId}`
+      const lmKey = lmKeyOf(etagKey)
+      const lm = await idbGet<string>('kv', lmKey)
       const res = await client.get(
         key,
-        etag ? { headers: { 'If-None-Match': etag } } : undefined,
+        lm ? { headers: { 'If-Modified-Since': lm } } : undefined,
       )
-      if (res.res.status === 304) return // 远端未变化（ETag 命中），无需下载/合并
+      if (res.res.status === 304) return // 远端未变化（Last-Modified 命中），无需下载/合并
       const remote = JSON.parse(res.content.toString()) as Task[]
       normalizeTasks(remote)
       const { active: rawRemoteActive, deleted: remoteDeleted } = splitDeleted(remote)
@@ -1048,7 +1219,9 @@ export const useTasksStore = defineStore('tasks', {
         void this._persistTrash(projectId, true)
       }
       const newEtag = versionToken(res.res.headers as Record<string, unknown>, res.content) ?? ''
-      if (newEtag) await idbPut('kv', `etag:${auth.username}:${projectId}`, newEtag)
+      if (newEtag) await idbPut('kv', etagKey, newEtag)
+      const newLm = lastModifiedOf(res.res.headers as Record<string, unknown>)
+      if (newLm) await idbPut('kv', lmKey, newLm)
       // 合并结果相对远端原始内容有差异（含被过滤掉的过期副本）时写回，
       // 让其他设备也能看到，并顺带“自愈”掉源项目里残留的旧副本（BUG）
       if (JSON.stringify(merged) !== JSON.stringify(rawRemoteActive)) {
@@ -1116,6 +1289,8 @@ export const useTasksStore = defineStore('tasks', {
         const result = await compareAndSwapPut<Task[]>(client, key, list, knownEtag)
         if (result.ok) {
           if (result.etag) await idbPut('kv', etagKey, result.etag)
+          // 本地写入成功后清掉 Last-Modified，避免下一轮读路径用旧时间条件 GET 误判 304
+          await idbDel('kv', lmKeyOf(etagKey))
           await idbPut('tasks', taskCacheKey(auth.username, projectId), list)
             queueSyncChange(auth.username, 'tasks', projectId)
           if (attempt > 0) useUiStore().toast('检测到其他设备同时修改，已自动合并最新数据', 'ok')
@@ -1186,6 +1361,8 @@ export const useTasksStore = defineStore('tasks', {
         const result = await compareAndSwapPut<Task[]>(client, key, list, knownEtag)
         if (result.ok) {
           if (result.etag) await idbPut('kv', etagKey, result.etag)
+          // 本地写入成功后清掉 Last-Modified，避免下一轮读路径用旧时间条件 GET 误判 304
+          await idbDel('kv', lmKeyOf(etagKey))
           await idbPut('trash', cacheKey, list)
           return { ok: true, merged: list }
         }
@@ -1353,19 +1530,23 @@ export const useTasksStore = defineStore('tasks', {
       const cached = await idbGet<RepeatMaster[]>('repeats', repeatsCacheKey(auth.username, projectId))
       if (cached) this.repeats[projectId] = cached
       if (!auth.creds) return
+      const etagKey = `etag:${auth.username}:${projectId}:repeats`
+      const lmKey = lmKeyOf(etagKey)
       try {
         const client = await createOssClient(auth.creds)
-        const etag = await idbGet<string>('kv', `etag:${auth.username}:${projectId}:repeats`)
+        const lm = await idbGet<string>('kv', lmKey)
         const res = await client.get(
           repeatsFilePath(auth.username, projectId),
-          etag ? { headers: { 'If-None-Match': etag } } : undefined,
+          lm ? { headers: { 'If-Modified-Since': lm } } : undefined,
         )
         if (res.res.status !== 304) {
           const remote = JSON.parse(res.content.toString()) as RepeatMaster[]
           this.repeats[projectId] = remote ?? []
           await idbPut('repeats', repeatsCacheKey(auth.username, projectId), this.repeats[projectId])
           const newEtag = versionToken(res.res.headers as Record<string, unknown>, res.content) ?? ''
-          if (newEtag) await idbPut('kv', `etag:${auth.username}:${projectId}:repeats`, newEtag)
+          if (newEtag) await idbPut('kv', etagKey, newEtag)
+          const newLm = lastModifiedOf(res.res.headers as Record<string, unknown>)
+          if (newLm) await idbPut('kv', lmKey, newLm)
         }
       } catch (e) {
         const err = e as { code?: string | number; status?: number }
@@ -1376,7 +1557,8 @@ export const useTasksStore = defineStore('tasks', {
           // 服务端重复模板文件已不存在：本地缓存作废
           this.repeats[projectId] = []
           await idbDel('repeats', repeatsCacheKey(auth.username, projectId))
-          await idbDel('kv', `etag:${auth.username}:${projectId}:repeats`)
+          await idbDel('kv', etagKey)
+          await idbDel('kv', lmKey)
         } else {
           throw new Error(await enrichOssError(e))
         }
@@ -1399,6 +1581,8 @@ export const useTasksStore = defineStore('tasks', {
           const result = await compareAndSwapPut<RepeatMaster[]>(client, key, list, knownEtag)
           if (result.ok) {
             if (result.etag) await idbPut('kv', etagKey, result.etag)
+            // 本地写入成功后清掉 Last-Modified，避免下一轮读路径用旧时间条件 GET 误判 304
+            await idbDel('kv', lmKeyOf(etagKey))
             await idbPut('repeats', repeatsCacheKey(auth.username, projectId), list)
             queueSyncChange(auth.username, 'repeats', projectId)
             return true
@@ -1726,6 +1910,8 @@ export const useTasksStore = defineStore('tasks', {
           const result = await compareAndSwapPut<{ ids: string[] }>(client, key, payload, knownEtag)
           if (result.ok) {
             if (result.etag) await idbPut('kv', etagKey, result.etag)
+            // 本地写入成功后清掉 Last-Modified，避免下一轮读路径用旧时间条件 GET 误判 304
+            await idbDel('kv', lmKeyOf(etagKey))
             await idbPut('kv', todayOrderCacheKey(auth.username), { ids: this.todayOrder })
             queueSyncChange(auth.username, 'today_order', null)
             return true
@@ -2445,6 +2631,7 @@ export const useTasksStore = defineStore('tasks', {
       this.trashShardMonths = {}
       this.trashHasMore = {}
       this.trashLoadedYears = []
+      this.trashYear = null
       this.repeatsLoaded = []
       this.todayOrder = []
       // 清空固定集与 LRU 顺序，避免跨账号残留导致新账号项目无法逐出

@@ -59,16 +59,8 @@ function isExpanded(key: string) {
   return !!expanded.value[key]
 }
 
-/** 展开后正在按需加载回收站文件的项目 id（加载失败可再次点击项目名重试） */
-const loading = ref<Record<string, boolean>>({})
-const loadError = ref<Record<string, boolean>>({})
-
-/** 展开的项目默认展示的月份数（最近 N 个月，最新在前）；更早月份通过「加载更早月份」追加 */
-const MONTHS_VISIBLE = 1
-/** 每个项目当前已展示的月份数 */
-const visibleMonths = ref<Record<string, number>>({})
-/** 「加载更早月份」进行中（按项目） */
-const loadingMore = ref<Record<string, boolean>>({})
+// 注：按年份过滤模式下，所选年份数据在进入/切年时一次性全部加载进内存，
+// 不再需要 per-project 加载态、可见月份数与「加载更早月份」逻辑。
 
 /** 搜索关键词：按项目名 / 已加载项目的任务名与内容过滤 */
 const searchQuery = ref('')
@@ -88,8 +80,8 @@ const searching = computed(() => searchQuery.value.trim().length > 0)
 const editTask = ref<Task | null>(null)
 const editOpen = ref(false)
 
-/** 多视图：当前视图（项目为默认视图），多视图按需加载年份数据 */
-const viewMode = ref<'list' | 'calendar' | 'heatmap' | 'trend'>('list')
+/** 多视图：当前视图（默认落到日历图；数据按所选年份一次性加载进内存，切换视图不触发网络请求） */
+const viewMode = ref<'list' | 'calendar' | 'heatmap' | 'trend'>('calendar')
 const VIEW_TABS: { key: typeof viewMode.value; label: string; icon: string }[] = [
   { key: 'list', label: '项目图', icon: 'menu' },
   { key: 'calendar', label: '日历图', icon: 'calendar' },
@@ -99,57 +91,22 @@ const VIEW_TABS: { key: typeof viewMode.value; label: string; icon: string }[] =
 /** 多视图当前查看的年份 / 月份（默认今年 / 当月） */
 const viewYear = ref(CURRENT_YEAR)
 const viewMonth = ref(CURRENT_YEAR + '-' + String(new Date().getMonth() + 1).padStart(2, '0'))
-/** 多视图按需加载年份进行中：显示「正在下载OSS数据并进行本地计算中......」 */
-const viewLoading = ref(false)
-
-/** 展开项目时只打开当前项目的数据包：仅加载该项目回收站文件，其余保持未加载 */
-async function openGroup(key: string) {
-  if (tasks.trashLoaded.includes(key) || loading.value[key]) return
-  loading.value = { ...loading.value, [key]: true }
-  loadError.value = { ...loadError.value, [key]: false }
-  try {
-    await tasks.loadTrash(key)
-  } catch (e) {
-    loadError.value = { ...loadError.value, [key]: true }
-    ui.toast((e as Error).message || '时间胶囊文件加载失败，请检查网络或 OSS 配置', 'error')
-  } finally {
-    loading.value = { ...loading.value, [key]: false }
-  }
+/** 多视图加载进行中：显示「正在下载OSS数据并进行本地计算中......」（首次进入/切年时为 true） */
+const viewLoading = ref(true)
+/** 年份选择弹窗：可选年份（服务器上确有回收站数据的年份，倒序）与当前选中 */
+const pickerOpen = ref(false)
+const pickerYears = ref<number[]>([])
+const yearPicked = ref(CURRENT_YEAR)
+/** 当前月的 YYYY-MM */
+function currentMonthKey(): string {
+  return `${CURRENT_YEAR}-${String(new Date().getMonth() + 1).padStart(2, '0')}`
 }
 
+/** 折叠/展开项目：所选年份数据已一次性加载进内存，折叠只收拢 UI（不再按需拉取） */
 function toggleGroup(key: string) {
   const next = !isExpanded(key)
   expanded.value = { ...expanded.value, [key]: next }
   localStorage.setItem(expandedKey(), JSON.stringify(expanded.value))
-  if (next) {
-    // 展开时固定该项目（回收站文件常驻内存），折叠/离开时解除固定
-    tasks.pinViewProject(key)
-    void openGroup(key)
-  } else {
-    tasks.unpinViewProject(key)
-  }
-}
-
-/** 「加载更早月份」：展示下一个更早月份的任务；该月尚未拉取时先按需拉取一个月分片 */
-async function loadMoreGroup(key: string) {
-  if (loadingMore.value[key]) return
-  const count = visibleMonths.value[key] ?? MONTHS_VISIBLE
-  const loadedMonths = toMonthGroups(tasks.trash[key] ?? [])
-  // 需要展示的下一个更早月份还没在本地：先拉取一个更早分片
-  const needFetch = loadedMonths.length <= count && !!tasks.trashHasMore[key]
-  if (needFetch) {
-    loadingMore.value = { ...loadingMore.value, [key]: true }
-    try {
-      const got = await tasks.loadMoreTrash(key)
-      if (!got) ui.toast('已加载全部时间胶囊记录')
-    } catch (e) {
-      ui.toast((e as Error).message || '加载更早记录失败，请检查网络或 OSS 配置', 'error')
-      return
-    } finally {
-      loadingMore.value = { ...loadingMore.value, [key]: false }
-    }
-  }
-  visibleMonths.value = { ...visibleMonths.value, [key]: count + 1 }
 }
 
 /** 只读本地基础数据：档案（活跃/已删除项目），不预载任何回收站文件内容 */
@@ -158,19 +115,32 @@ async function loadTrashBase() {
 }
 
 const MOBILE_TITLE = '时间胶囊'
+/** 首次进入 / 切换账号后：静默扫描并加载当前年份数据，直接落到日历图 */
+async function loadCurrentYear() {
+  viewLoading.value = true
+  try {
+    await scanTrashMeta()
+    await tasks.switchTrashYear(CURRENT_YEAR)
+    viewYear.value = CURRENT_YEAR
+    viewMonth.value = currentMonthKey()
+    viewMode.value = 'calendar'
+  } catch (e) {
+    ui.toast((e as Error).message || '时间胶囊加载失败，请检查网络或 OSS 配置', 'error')
+  } finally {
+    viewLoading.value = false
+  }
+}
+
 onMounted(async () => {
   if (mobileActions) mobileActions.title = MOBILE_TITLE
   loadExpanded()
   await loadTrashBase()
+  await loadCurrentYear()
   logAudit('打开时间胶囊')
 })
 onUnmounted(() => {
-  // 离开回收站：解除全部展开项目与全量加载项目的固定，交回 LRU 逐出
-  for (const k of Object.keys(expanded.value)) tasks.unpinViewProject(k)
-  for (const k of fullLoadedKeys) tasks.unpinViewProject(k)
-  fullLoadedKeys.clear()
   if (mobileActions && mobileActions.title === MOBILE_TITLE) mobileActions.title = ''
-  // 退出时间胶囊：释放内存与 IDB 缓存（含多视图加载的年份数据），下次进入重新按需下载
+  // 退出时间胶囊：释放内存 + 清空 IDB 缓存（trash 数据 + etag/lm），下次进入重新下载当前年份
   void tasks.releaseTrashMemory()
 })
 
@@ -183,49 +153,46 @@ watch(
     scanLatest.value = {}
     scanHasUncategorized.value = false
     page.value = 1
-    visibleMonths.value = {}
-    loadingMore.value = {}
+    pickerOpen.value = false
     if (c) {
       loadExpanded()
       await loadTrashBase()
+      await loadCurrentYear()
     }
   },
 )
 
-/** 进行中的扫描 Promise：手动扫描与多视图静默扫描并发时复用，避免重复扫描/读到半成品索引 */
+/** 进行中的扫描 Promise：首屏 / 切年 / 手动点击扫描并发时复用，避免重复扫描/读到半成品索引 */
 let scanInFlight: Promise<void> | null = null
-/** 扫描时间胶囊：只枚举哪些项目存在回收站文件（元数据），不下载任何文件内容。
- *  手动点击按钮扫描完成后直接全量加载全部数据（项目保持折叠，展开时按月展示）；多视图自动加载时传 { confirm: false } 静默扫描，仍按视图动态加载。 */
-async function scanTrash(options?: { confirm?: boolean }): Promise<void> {
+/** 扫描时间胶囊：只枚举哪些项目存在回收站文件（元数据）与分片月份索引，不下载任何文件内容。
+ *  首屏进入与「扫描时间胶囊文件」按钮共用；切年时按所选年份一次性拉取（配合 Last-Modified
+ *  304 缓存，重复进入几乎零流量）。 */
+async function scanTrashMeta(): Promise<void> {
   if (scanInFlight) return scanInFlight
   const p = (async () => {
-  if (scanning.value) return
-  scanning.value = true
-  try {
-    if (!projects.loaded) await projects.load()
-    const res = await tasks.listTrashProjects()
-    if (res.listed) {
-      scanIds.value = res.ids
-      scanLatest.value = res.latestByProject
-      scanHasUncategorized.value = res.hasUncategorized
-    } else {
-      // 无 list 权限：降级为全部已知项目（展开时仍按需加载，空项目展开显示为空）
-      scanIds.value = projects.projects.map((p) => p.id)
-      scanLatest.value = {}
-      scanHasUncategorized.value = true
+    if (scanning.value) return
+    scanning.value = true
+    try {
+      if (!projects.loaded) await projects.load()
+      const res = await tasks.listTrashProjects()
+      if (res.listed) {
+        scanIds.value = res.ids
+        scanLatest.value = res.latestByProject
+        scanHasUncategorized.value = res.hasUncategorized
+      } else {
+        // 无 list 权限：降级为全部已知项目（切年时按分片缺失降级加载）
+        scanIds.value = projects.projects.map((p) => p.id)
+        scanLatest.value = {}
+        scanHasUncategorized.value = true
+      }
+      scanned.value = true
+      page.value = 1
+      logAudit('扫描时间胶囊', `发现 ${scanIds.value.length} 个项目的胶囊数据`)
+    } catch (e) {
+      ui.toast((e as Error).message || '时间胶囊扫描失败，请检查网络或 OSS 配置', 'error')
+    } finally {
+      scanning.value = false
     }
-    scanned.value = true
-    page.value = 1
-    visibleMonths.value = {}
-    loadingMore.value = {}
-    logAudit('扫描时间胶囊', `发现 ${scanIds.value.length} 个项目的胶囊数据`)
-    // 扫描完成：手动点击按钮时直接全量加载全部数据（不展开，展开时按月展示；多视图自动加载不在此加载）
-    if (options?.confirm !== false) await loadAllTrashData()
-  } catch (e) {
-    ui.toast((e as Error).message || '时间胶囊扫描失败，请检查网络或 OSS 配置', 'error')
-  } finally {
-    scanning.value = false
-  }
   })()
   scanInFlight = p
   try {
@@ -235,71 +202,53 @@ async function scanTrash(options?: { confirm?: boolean }): Promise<void> {
   }
 }
 
-/** 全量加载：点击「扫描时间胶囊文件」后下载全部项目全部月份分片进内存（项目保持折叠，
- *  数据固定常驻避免被 LRU 逐出；展开项目时按月展示，不一次性渲染全部任务） */
-const fullLoadedKeys = new Set<string>()
-async function loadAllTrashData() {
+/** 点击「扫描时间胶囊文件」：先刷新元数据，再弹出一次性年份选择框（只列出服务器上确有回收站数据的年份，倒序） */
+async function openYearPicker() {
+  await scanTrashMeta()
+  const years = new Set<number>()
+  for (const months of Object.values(tasks.trashShardMonths)) {
+    for (const m of months) years.add(Number(m.slice(0, 4)))
+  }
+  // today_trash.json 不分片，只能整体拉取后按年份过滤；无法确定历史年份，至少给出当前年
+  if (scanHasUncategorized.value) years.add(CURRENT_YEAR)
+  if (!years.size) {
+    ui.toast('暂未发现可切换的年份数据', 'ok')
+    return
+  }
+  pickerYears.value = [...years].sort((a, b) => b - a)
+  yearPicked.value = viewYear.value
+  pickerOpen.value = true
+}
+
+/** 年份选择框确认：清理上一年的内存与 IDB 缓存 → 一次性加载该年全部数据进内存 → 自动切到日历图 */
+async function confirmYearPick() {
+  const year = yearPicked.value
+  pickerOpen.value = false
+  viewLoading.value = true
   try {
-    const res = await tasks.loadTrashAll()
-    // 数据全部载入内存并固定（离开时间胶囊页时统一解除）
-    for (const g of projectGroups.value) {
-      tasks.pinViewProject(g.key)
-      fullLoadedKeys.add(g.key)
-    }
-    ui.toast(`已全量加载 ${res.projects} 个项目的全部数据（${res.tasks} 条任务）`)
+    const res = await tasks.switchTrashYear(year)
+    viewYear.value = year
+    viewMonth.value = year === CURRENT_YEAR ? currentMonthKey() : `${year}-01`
+    viewMode.value = 'calendar'
+    page.value = 1
+    if (res.projects === 0 && res.tasks === 0) ui.toast('该年份暂无胶囊数据', 'ok')
   } catch (e) {
-    ui.toast((e as Error).message || '全量加载时间胶囊数据失败，请检查网络或 OSS 配置', 'error')
+    ui.toast((e as Error).message || '切换年份失败，请检查网络或 OSS 配置', 'error')
+  } finally {
+    viewLoading.value = false
   }
 }
 
-/** 多视图：确保某年数据已加载（按需）。未扫描过则静默扫描（不弹确认框）；调用方负责 loading 态 */
-async function ensureViewYear(year: number) {
-  if (tasks.trashLoadedYears.includes(year)) return
-  if (!scanned.value) await scanTrash({ confirm: false })
-  if (tasks.trashLoadedYears.includes(year)) return
-  await tasks.loadTrashYear(year)
-}
-
-/** 切换多视图：非项目视图自动加载当前年数据（默认今年，更早年份按需加载） */
-async function switchView(mode: 'list' | 'calendar' | 'heatmap' | 'trend') {
+/** 切换多视图：数据已按所选年份一次性加载进内存，切换视图只改展示，不触发网络请求 */
+function switchView(mode: 'list' | 'calendar' | 'heatmap' | 'trend') {
   viewMode.value = mode
-  if (mode === 'list') return
-  const needsLoad = !tasks.trashLoadedYears.includes(viewYear.value)
-  if (needsLoad) viewLoading.value = true
-  try {
-    await ensureViewYear(viewYear.value)
-  } finally {
-    viewLoading.value = false
-  }
 }
 
-/** 热力图/趋势切换年份：先按需加载该年数据再展示 */
-async function onViewYearChange(year: number) {
-  if (year === viewYear.value) return
-  viewYear.value = year
-  viewMonth.value = year + '-' + viewMonth.value.slice(5, 7)
-  const needsLoad = !tasks.trashLoadedYears.includes(year)
-  if (needsLoad) viewLoading.value = true
-  try {
-    await ensureViewYear(year)
-  } finally {
-    viewLoading.value = false
-  }
-}
-
-/** 日历切换月份：跨年时按需加载新一年 */
-async function onViewMonthChange(month: string) {
+/** 日历切换月份：跨年直接忽略（年份只经由「扫描时间胶囊文件」按钮切换；日历组件已有 min/max 钳制） */
+function onViewMonthChange(month: string) {
+  const y = Number(month.slice(0, 4))
+  if (y !== viewYear.value) return
   viewMonth.value = month
-  const year = Number(month.slice(0, 4))
-  if (year === viewYear.value) return
-  viewYear.value = year
-  const needsLoad = !tasks.trashLoadedYears.includes(year)
-  if (needsLoad) viewLoading.value = true
-  try {
-    await ensureViewYear(year)
-  } finally {
-    viewLoading.value = false
-  }
 }
 
 /** 已完成任务过滤缓存：以回收站数组引用为键（数组整体替换，引用即指纹），避免每次变化都全量 filter */
@@ -344,12 +293,8 @@ interface TrashGroup {
   deleted: boolean
   /** 已删除项目元数据（供「恢复整个项目」使用） */
   deletedProject: DeletedProject | null
-  /** 按月份分组（最新在前），仅包含当前已展示的月份 */
+  /** 按月份分组（最新在前），包含该年份全部已加载月份 */
   monthGroups: { key: string; tasks: Task[] }[]
-  /** 该项目的回收站文件是否已加载 */
-  loaded: boolean
-  /** 是否还有更早记录可加载（已加载但未展示 / OSS 上还有更早分片） */
-  hasMore: boolean
   /** 排序键：回收站最新变动时间（ISO），用于项目名倒序；缺失时为空 */
   updatedAt: string
 }
@@ -390,12 +335,13 @@ function monthLabel(m: string): string {
   const [y, mo] = m.split('-')
   return `${y}年${Number(mo)}月`
 }
-/** 项目时间胶囊任务总数（已载入内存，点击扫描全量加载后即真实总数） */
+/** 项目时间胶囊任务总数（所选年份数据已全部载入内存，即该年份真实总数） */
 function trashTotal(g: TrashGroup): number {
   return tasks.trash[g.key]?.length ?? 0
 }
 
-/** 回收站按项目分组：展开时才加载该项目文件；统一按“回收站最新变动时间”倒序（新回收的排前面） */
+/** 回收站按项目分组：所选年份数据在进入/切年时已一次性全部加载进内存，直接按内存数据分组展示；
+ *  只展示该年份有胶囊任务的项目（活跃 / 已删除 / 未分类 / 孤儿），统一按“回收站最新变动时间”倒序 */
 const projectGroups = computed<TrashGroup[]>(() => {
   if (!scanned.value) return []
   const seen = new Set<string>()
@@ -409,44 +355,33 @@ const projectGroups = computed<TrashGroup[]>(() => {
     if (seen.has(key)) return
     seen.add(key)
     const arr = sortedTrashArr(key)
-    // 默认只展示最近 1 个月；更早月份通过「加载更早月份」追加
+    // 该年份无胶囊数据（switchTrashYear 只把所选年份数据放进内存）的项目不展示
+    if (!arr.length) return
     const monthGroups = toMonthGroups(arr)
-    const shownMonths = visibleMonths.value[key] ?? MONTHS_VISIBLE
     // 排序键：优先扫描到的回收站文件最新变动时间；已删除项目回退到删除时间；
     // 再回退到本地已加载任务的最新时间；全无则为空（排最后，按名称正序）
     const updatedAt =
       scanLatest.value[key] ||
       (deleted && deletedProject ? deletedProject.deletedAt : '') ||
       maxTaskTime(key)
-    groups.push({
-      key,
-      label,
-      deleted,
-      deletedProject,
-      monthGroups: monthGroups.slice(0, shownMonths),
-      loaded: tasks.trashLoaded.includes(key),
-      hasMore: monthGroups.length > shownMonths || !!tasks.trashHasMore[key],
-      updatedAt,
-    })
+    groups.push({ key, label, deleted, deletedProject, monthGroups, updatedAt })
   }
-  // 活跃项目：仅在扫描发现有回收站文件、或本地已加载过其回收站数据时展示
+  // 活跃项目：仅展示该年份内存中有数据的项目
   for (const p of projects.projects) {
-    if (scanIds.value.includes(p.id) || (tasks.trash[p.id]?.length ?? 0) > 0) {
-      push(p.id, p.name, false, null)
-    }
+    if ((tasks.trash[p.id]?.length ?? 0) > 0) push(p.id, p.name, false, null)
   }
-  // 已删除项目：始终展示（支持整项目恢复），即使回收站文件为空
+  // 已删除项目：仅展示该年份内存中有数据的项目（仍支持整项目恢复）
   const deletedList = [...(projects.deletedProjects ?? [])].sort((a, b) => b.deletedAt.localeCompare(a.deletedAt))
-  for (const dp of deletedList) push(dp.id, dp.name, true, dp)
-  // 未分类回收站（today_trash.json）
-  if (scanHasUncategorized.value || (tasks.trash[UNCATEGORIZED]?.length ?? 0) > 0) {
-    push(UNCATEGORIZED, '无分类', false, null)
+  for (const dp of deletedList) {
+    if ((tasks.trash[dp.id]?.length ?? 0) > 0) push(dp.id, dp.name, true, dp)
   }
+  // 未分类回收站（today_trash.json）：切年时已按年份过滤，仅展示有数据的部分
+  if ((tasks.trash[UNCATEGORIZED]?.length ?? 0) > 0) push(UNCATEGORIZED, '无分类', false, null)
   // 扫描发现但不在档案中的历史项目（孤儿回收站）
   for (const pid of scanIds.value) {
     if (projects.byId(pid)) continue
     if ((projects.deletedProjects ?? []).some((x) => x.id === pid)) continue
-    push(pid, `未知项目（${pid.slice(0, 8)}…）`, false, null)
+    if ((tasks.trash[pid]?.length ?? 0) > 0) push(pid, `未知项目（${pid.slice(0, 8)}…）`, false, null)
   }
   // 倒序排序（新回收的排前面）；排序键缺失时按名称正序，保证顺序稳定
   groups.sort((a, b) => {
@@ -457,7 +392,7 @@ const projectGroups = computed<TrashGroup[]>(() => {
     if (!ta && tb) return 1
     return a.label.localeCompare(b.label)
   })
-  // 搜索过滤：项目名包含关键词，或已加载项目中任务名/内容匹配
+  // 搜索过滤：项目名包含关键词，或项目中任务名/内容匹配（该年数据已全部加载，直接全量搜索）
   const q = searchQuery.value.trim().toLowerCase()
   if (!q) return groups
   const out: TrashGroup[] = []
@@ -466,8 +401,6 @@ const projectGroups = computed<TrashGroup[]>(() => {
       out.push(g)
       continue
     }
-    // 只搜已加载过的项目任务（未加载的项目内容不可搜索）
-    if (!g.loaded) continue
     const matched = (tasks.trash[g.key] ?? []).filter((t) => {
       const name = (t.name || '').toLowerCase()
       const desc = (t.description || '').toLowerCase()
@@ -477,12 +410,10 @@ const projectGroups = computed<TrashGroup[]>(() => {
     out.push({
       ...g,
       monthGroups: toMonthGroups(matched.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))),
-      hasMore: false,
     })
   }
   return out
 })
-
 /** 回收站项目名列表分页：每页 20 个；进入/重新扫描回到第 1 页，翻页时收起全部项目 */
 const PAGE_SIZE = 20
 const page = ref(1)
@@ -934,8 +865,8 @@ function onSaved(task: Task) {
         </button>
         <button
           class="inline-flex items-center gap-1.5 shrink-0 px-3 py-1.5 rounded-lg text-xs border border-slate-200 hover:bg-slate-50 disabled:opacity-60"
-          :disabled="scanning"
-          @click="scanTrash()"
+          :disabled="scanning || viewLoading"
+          @click="openYearPicker"
         >
           <AppIcon name="search" :size="13" class="text-slate-500" />
           {{ scanning ? '扫描中…' : '扫描时间胶囊文件' }}
@@ -968,19 +899,18 @@ function onSaved(task: Task) {
         <input
           v-model="searchInput"
           type="text"
-          placeholder="搜索项目名 / 任务名 / 任务内容（仅已加载的项目）"
+          placeholder="搜索项目名 / 任务名 / 任务内容"
           class="w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-700 placeholder:text-slate-400 focus:border-brand focus:outline-none"
         />
       </div>
       <div v-if="searching" class="mt-1.5 text-[11px] text-slate-400">
-        仅搜索已加载的项目与任务；未加载的项目请先展开后再搜索
+        所选年份数据已全部加载，可直接搜索
       </div>
     </div>
 
     <div v-if="!projectGroups.length" class="mt-4 py-16 text-center text-sm text-slate-400">
       <template v-if="searching">未找到匹配的时间胶囊记录</template>
-      <template v-else-if="scanned">未发现时间胶囊数据</template>
-      <template v-else>时间胶囊未扫描，点击右上角「扫描时间胶囊文件」后可见历史任务</template>
+      <template v-else>该年份暂无胶囊数据，可点击右上角「扫描时间胶囊文件」切换年份</template>
     </div>
     <div v-for="g in paginatedGroups" :key="g.key" class="mt-4">
       <div class="flex items-center gap-2 mb-2">
@@ -994,11 +924,7 @@ function onSaved(task: Task) {
           </span>
           <span class="text-sm font-medium text-slate-600 truncate">{{ g.label }}</span>
           <span v-if="g.deleted" class="shrink-0 text-[11px] text-slate-400">已删除项目</span>
-          <span class="shrink-0 text-[11px] text-slate-400">
-            <template v-if="g.loaded">（{{ trashTotal(g) }}）</template>
-            <template v-else-if="loading[g.key]">加载中…</template>
-            <template v-else>（…）</template>
-          </span>
+          <span class="shrink-0 text-[11px] text-slate-400">（{{ trashTotal(g) }}）</span>
         </button>
         <button
           v-if="g.deleted"
@@ -1011,10 +937,7 @@ function onSaved(task: Task) {
         </button>
       </div>
       <div v-if="isExpanded(g.key)" class="space-y-2">
-        <div v-if="loading[g.key]" class="px-0.5 py-2 text-xs text-slate-400">正在加载该项目的时间胶囊数据…</div>
-        <template v-else>
-          <div v-if="loadError[g.key]" class="px-0.5 py-2 text-xs text-red-500">加载失败，点击项目名可重试</div>
-          <div v-for="mg in g.monthGroups" :key="mg.key">
+        <div v-for="mg in g.monthGroups" :key="mg.key">
             <div class="px-0.5 pt-1 pb-0.5 text-xs font-medium text-slate-500">
               {{ monthLabel(mg.key) }} · {{ mg.tasks.length }} 条
             </div>
@@ -1071,20 +994,7 @@ function onSaved(task: Task) {
               </button>
             </div>
             </div>
-          </div>
-          <button
-            v-if="g.hasMore"
-            class="mt-1 w-full py-2 rounded-lg text-xs text-brand border border-brand/30 hover:bg-brand/5 disabled:opacity-60 disabled:cursor-not-allowed"
-            :disabled="loadingMore[g.key]"
-            @click="loadMoreGroup(g.key)"
-          >
-            <AppIcon name="chevron-down" :size="13" class="inline-block -mt-0.5 mr-1" />
-            {{ loadingMore[g.key] ? '加载中…' : '加载更早月份' }}
-          </button>
-          <div v-if="!loadError[g.key] && !trashTotal(g) && !g.hasMore" class="text-xs text-slate-400 px-0.5">
-            {{ g.deleted ? '该项目没有任务' : '该项目时间胶囊为空' }}
-          </div>
-        </template>
+        </div>
       </div>
     </div>
 
@@ -1137,19 +1047,21 @@ function onSaved(task: Task) {
     </div>
     </div>
 
-    <!-- 多视图：日历 / 热力图 / 趋势（按需加载年份数据） -->
+    <!-- 多视图：日历 / 热力图 / 趋势（数据为当前所选年份，切换视图不触发网络请求） -->
     <div v-else class="mt-4">
       <div v-if="viewLoading" class="flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white py-16 text-sm text-slate-500">
         <AppIcon name="refresh" :size="16" class="animate-spin text-brand" />
         正在下载OSS数据并进行本地计算中......
       </div>
       <template v-else>
-        <div class="mb-3 text-[11px] text-slate-400">默认先加载今年数据，查看更早年份/月份时再按需加载；已完成任务按完成时间（updatedAt）归属统计。</div>
+        <div class="mb-3 text-[11px] text-slate-400">当前展示 {{ viewYear }} 年数据；切换年份请点击「扫描时间胶囊文件」。</div>
         <TimeCapsuleCalendar
           v-if="viewMode === 'calendar'"
           :tasks="completedTrashTasks"
           :pending="pendingActiveTasks"
           :month="viewMonth"
+          :min-month="viewYear + '-01'"
+          :max-month="viewYear + '-12'"
           :project-name="projectNameOf"
           @change-month="onViewMonthChange"
           @open-task="openEdit"
@@ -1158,14 +1070,11 @@ function onSaved(task: Task) {
           v-else-if="viewMode === 'heatmap'"
           :tasks="completedTrashTasks"
           :year="viewYear"
-          @change-year="onViewYearChange"
         />
         <TimeCapsuleTrend
           v-else-if="viewMode === 'trend'"
           :tasks="completedTrashTasks"
           :year="viewYear"
-          :years="tasks.trashLoadedYears"
-          @change-year="onViewYearChange"
         />
       </template>
     </div>
@@ -1189,6 +1098,33 @@ function onSaved(task: Task) {
       @confirm="clearTrash"
       @cancel="clearOpen = false"
     />
+
+    <!-- 年份选择弹窗：一次性选择，确认后关闭并切年 -->
+    <div
+      v-if="pickerOpen"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
+      @click.self="pickerOpen = false"
+    >
+      <div class="w-full max-w-sm rounded-2xl bg-white p-5 shadow-xl">
+        <div class="text-base font-semibold text-slate-800">选择胶囊年份</div>
+        <div class="mt-1 text-xs text-slate-400">切换后将只加载该年数据并自动切换到日历图</div>
+        <div class="mt-4 grid grid-cols-4 gap-2">
+          <button
+            v-for="y in pickerYears"
+            :key="y"
+            class="rounded-lg border px-2 py-2 text-sm"
+            :class="y === yearPicked ? 'bg-brand text-white border-brand' : 'border-slate-200 text-slate-600 hover:bg-slate-50'"
+            @click="yearPicked = y"
+          >
+            {{ y }}
+          </button>
+        </div>
+        <div class="mt-5 flex justify-end gap-2">
+          <button class="px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600" @click="pickerOpen = false">取消</button>
+          <button class="px-3 py-1.5 rounded-lg bg-brand text-white" :disabled="!!viewLoading" @click="confirmYearPick">确认切换</button>
+        </div>
+      </div>
+    </div>
 
     <TaskModal
       v-model:open="editOpen"

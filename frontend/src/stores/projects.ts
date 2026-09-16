@@ -5,7 +5,7 @@ import { useUiStore } from './ui'
 import { useTasksStore } from './tasks'
 import { useStatsStore } from './stats'
 import { createOssClient, describeOssError, paths } from '@/utils/oss'
-import { applyDeletedProjectTombstones, compareAndSwapPut, mergeProfile, versionToken } from '@/utils/sync'
+import { applyDeletedProjectTombstones, compareAndSwapPut, lastModifiedOf, lmKeyOf, mergeProfile, versionToken } from '@/utils/sync'
 import { enrichOssError } from '@/utils/ossDiag'
 import { idbGet, idbPut, idbDel } from '@/utils/idb'
 import { queueSyncChange } from '@/utils/syncReport'
@@ -69,10 +69,14 @@ export const useProjectsStore = defineStore('projects', {
       if (auth.creds && !hasPendingProfileSave) {
         try {
           const client = await createOssClient(auth.creds)
-          const etag = await idbGet<string>('kv', `etag:${auth.username}:profile`)
+          const etagKey = `etag:${auth.username}:profile`
+          const lmKey = lmKeyOf(etagKey)
+          // 读路径条件请求用 If-Modified-Since（Last-Modified）：阿里云 OSS 不带 ETag 头，
+          // 只认 Last-Modified 回 304；etag 键保留给写路径 CAS 用，两者互不覆盖。
+          const lm = await idbGet<string>('kv', lmKey)
           const res = await client.get(
             paths.profile(auth.username),
-            etag ? { headers: { 'If-None-Match': etag } } : undefined,
+            lm ? { headers: { 'If-Modified-Since': lm } } : undefined,
           )
           if (res.res.status !== 304) {
             const remote = JSON.parse(res.content.toString()) as Profile
@@ -86,7 +90,9 @@ export const useProjectsStore = defineStore('projects', {
               await idbPut('profile', auth.username, cleanRemote)
             }
             const newEtag = versionToken(res.res.headers as Record<string, unknown>, res.content) ?? ''
-            if (newEtag) await idbPut('kv', `etag:${auth.username}:profile`, newEtag)
+            if (newEtag) await idbPut('kv', etagKey, newEtag)
+            const newLm = lastModifiedOf(res.res.headers as Record<string, unknown>)
+            if (newLm) await idbPut('kv', lmKey, newLm)
           }
         } catch (e) {
           const err = e as { code?: string | number; status?: number }
@@ -100,6 +106,7 @@ export const useProjectsStore = defineStore('projects', {
             this.deletedProjects = []
             await idbDel('profile', auth.username)
             await idbDel('kv', `etag:${auth.username}:profile`)
+            await idbDel('kv', lmKeyOf(`etag:${auth.username}:profile`))
           } else {
             throw new Error(await enrichOssError(e))
           }
@@ -150,6 +157,8 @@ export const useProjectsStore = defineStore('projects', {
         const result = await compareAndSwapPut<Profile>(client, key, profile, knownEtag)
         if (result.ok) {
           if (result.etag) await idbPut('kv', etagKey, result.etag)
+          // 写成功后清掉 Last-Modified，避免旧值导致后续 304 误判（Last-Modified 秒级精度）
+          await idbDel('kv', lmKeyOf(etagKey))
           await idbPut('profile', auth.username, profile)
           if (attempt > 0) useUiStore().toast('检测到其他设备同时修改，已合并项目列表', 'ok')
           return true

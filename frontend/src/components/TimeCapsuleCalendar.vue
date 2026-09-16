@@ -25,8 +25,12 @@ const props = withDefaults(
     month: string
     /** 项目名查询 */
     projectName?: (pid: string) => string
+    /** 可翻页的下限月份（YYYY-MM，按年份过滤时固定为所选年 1 月），缺省不限制 */
+    minMonth?: string
+    /** 可翻页的上限月份（YYYY-MM，按年份过滤时固定为所选年 12 月），缺省不限制 */
+    maxMonth?: string
   }>(),
-  { projectName: (pid: string) => pid, pending: () => [] },
+  { projectName: (pid: string) => pid, pending: () => [], minMonth: '', maxMonth: '' },
 )
 
 const emit = defineEmits<{
@@ -277,21 +281,37 @@ function barTitle(b: CrossBar): string {
   return `${props.projectName(b.task.projectId)} · ${b.task.name}（${b.startKey.slice(5)} → ${b.endKey.slice(5)}，${kind}）`
 }
 
+/** 是否还能上月/下月（按年份过滤时在所选年 1 月/12 月禁用边界按钮） */
+const canPrev = computed(() => !props.minMonth || props.month > props.minMonth)
+const canNext = computed(() => !props.maxMonth || props.month < props.maxMonth)
+
 function changeMonth(delta: number) {
   const d = new Date(year.value, monthIdx.value + delta, 1)
   const pad = (n: number) => String(n).padStart(2, '0')
-  emit('change-month', `${d.getFullYear()}-${pad(d.getMonth() + 1)}`)
+  const next = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`
+  // 跨年（超出所选年份）直接忽略：年份切换只经由「扫描时间胶囊文件」按钮
+  if (props.minMonth && next < props.minMonth) return
+  if (props.maxMonth && next > props.maxMonth) return
+  emit('change-month', next)
 }
 </script>
 
 <template>
   <div>
     <div class="flex items-center justify-between">
-      <button class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50" @click="changeMonth(-1)">
+      <button
+        class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
+        :disabled="!canPrev"
+        @click="changeMonth(-1)"
+      >
         <AppIcon name="chevron-left" :size="15" /> 上月
       </button>
       <div class="text-sm font-semibold text-slate-700">{{ year }}年{{ monthIdx + 1 }}月</div>
-      <button class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50" @click="changeMonth(1)">
+      <button
+        class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
+        :disabled="!canNext"
+        @click="changeMonth(1)"
+      >
         下月 <AppIcon name="chevron-right" :size="15" />
       </button>
     </div>
