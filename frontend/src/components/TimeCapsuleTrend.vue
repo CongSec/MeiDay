@@ -5,15 +5,24 @@
  * 只统计完成任务数量（status=completed，按 updatedAt 归属）。
  * 本周=周一~周日逐日、本月=1号~月末逐日、本年=1~12月逐月。
  */
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { Task } from '@/types'
 import { addDaysKey, dateKeyOf } from '@/utils/time'
 import AppIcon from '@/components/AppIcon.vue'
+import { useHorizontalDrag } from '@/composables/useHorizontalDrag'
 
 const props = defineProps<{
   tasks: Task[]
   year: number
 }>()
+const { scrollEl, onPointerDown, onPointerMove, onPointerEnd, onClickCapture } = useHorizontalDrag()
+
+/** 容器可用宽度：桌面端让 SVG 填满卡片避免右侧留白；移动端仍按最小宽度溢出后可横滑 */
+const containerW = ref(0)
+let ro: ResizeObserver | null = null
+function measureContainer() {
+  if (scrollEl.value) containerW.value = scrollEl.value.clientWidth
+}
 
 // 按年份过滤：不再支持组件内切年（年份切换经由「扫描时间胶囊文件」按钮）
 
@@ -146,6 +155,15 @@ watch(
 )
 onMounted(() => {
   initAnchors()
+  measureContainer()
+  if (typeof ResizeObserver !== 'undefined' && scrollEl.value) {
+    ro = new ResizeObserver(measureContainer)
+    ro.observe(scrollEl.value)
+  }
+})
+onBeforeUnmount(() => {
+  ro?.disconnect()
+  ro = null
 })
 
 /** SVG 折线图 */
@@ -153,7 +171,8 @@ const CHART_H = 180
 const PAD_X = 30
 const PAD_TOP = 26
 const PAD_BOTTOM = 26
-const chartW = computed(() => Math.max(560, activePoints.value.length * 30))
+/** SVG 宽 = 容器宽与最小可读宽度取较大者：桌面填满卡片，手机端超出容器宽度后可左右滑动 */
+const chartW = computed(() => Math.max(containerW.value, Math.max(560, activePoints.value.length * 30)))
 const maxVal = computed(() => Math.max(1, ...activePoints.value.map((p) => p.value)))
 
 interface LinePoint extends Point {
@@ -210,8 +229,21 @@ const gridLines = computed(() => {
       </div>
     </div>
 
+    <div class="mt-3 sm:hidden flex items-center justify-end gap-1 text-[11px] text-slate-400 select-none">
+      <span>左右滑动查看更多</span>
+      <AppIcon name="arrow-right" :size="11" class="shrink-0" />
+    </div>
+
     <div class="mt-3 rounded-lg border border-slate-300 bg-white p-3 sm:p-4">
-      <div class="overflow-x-auto pb-1">
+      <div
+        ref="scrollEl"
+        class="h-scroll pb-1"
+        @pointerdown="onPointerDown"
+        @pointermove="onPointerMove"
+        @pointerup="onPointerEnd"
+        @pointercancel="onPointerEnd"
+        @click.capture="onClickCapture"
+      >
         <svg :width="chartW" :height="CHART_H" class="block">
           <line
             v-for="(g, gi) in gridLines"

@@ -14,6 +14,7 @@ import type { RepeatMaster, Task } from '@/types'
 import { dateKeyOf, todayKey } from '@/utils/time'
 import { formatRepeat, isRepeatDay } from '@/utils/repeat'
 import AppIcon from '@/components/AppIcon.vue'
+import { useHorizontalDrag } from '@/composables/useHorizontalDrag'
 
 const props = withDefaults(
   defineProps<{
@@ -39,6 +40,7 @@ const emit = defineEmits<{
   (e: 'change-month', month: string): void
   (e: 'open-task', task: Task): void
 }>()
+const { scrollEl, onPointerDown, onPointerMove, onPointerEnd, onClickCapture } = useHorizontalDrag()
 
 const WEEK_LABELS = ['一', '二', '三', '四', '五', '六', '日']
 
@@ -497,52 +499,69 @@ function changeMonth(delta: number) {
       </button>
     </div>
 
+    <div class="mt-3 sm:hidden flex items-center justify-end gap-1 text-[11px] text-slate-400 select-none">
+      <span>左右滑动查看更多</span>
+      <AppIcon name="arrow-right" :size="11" class="shrink-0" />
+    </div>
+
     <div class="mt-3 rounded-lg border border-slate-300 bg-white overflow-hidden">
-      <div class="grid grid-cols-7 border-b border-slate-300 bg-slate-50/70">
-        <div v-for="w in WEEK_LABELS" :key="w" class="py-1.5 text-center text-[11px] font-medium text-slate-400">周{{ w }}</div>
-      </div>
       <div
-        v-for="(row, ri) in rows"
-        :key="ri"
-        class="relative flex border-b border-slate-300 last:border-b-0"
-        :style="{ minHeight: row.minH + 'px' }"
+        ref="scrollEl"
+        class="h-scroll"
+        @pointerdown="onPointerDown"
+        @pointermove="onPointerMove"
+        @pointerup="onPointerEnd"
+        @pointercancel="onPointerEnd"
+        @click.capture="onClickCapture"
       >
-        <div
-          v-for="cell in row.cells"
-          :key="cell.key"
-          class="relative flex-1 border-r border-slate-300 p-1.5 last:border-r-0"
-          :class="cell.inMonth ? 'bg-white' : 'bg-slate-50/70'"
-        >
-          <div class="flex items-center justify-between">
-            <span class="text-[11px] leading-4" :class="cell.inMonth ? 'text-slate-600' : 'text-slate-300'">{{ cell.day }}</span>
-            <span v-if="cell.chips.length" class="rounded bg-slate-100 px-1 text-[10px] leading-4 text-slate-500">{{ cell.chips.length }}</span>
+        <div class="min-w-[720px]">
+          <div class="grid grid-cols-7 border-b border-slate-300 bg-slate-50/70">
+            <div v-for="w in WEEK_LABELS" :key="w" class="py-1.5 text-center text-[11px] font-medium text-slate-400">周{{ w }}</div>
           </div>
-          <button
-            v-for="(chip, ci) in cell.chips"
-            :key="chip.task.id + '-' + chip.day + '-' + ci"
-            class="absolute z-10 block h-[20px] truncate rounded px-1 text-center text-[10px] leading-[20px]"
-            :class="chip.kind === 'done' ? 'bg-slate-100 text-slate-600 hover:bg-slate-200' : 'bg-amber-200/90 text-amber-800 hover:bg-amber-300/90'"
-            :style="{ top: CELL_TOP + chip.row * SLOT_H + 'px', left: '6px', right: '6px' }"
-            :title="chipTitle(chip)"
-            @click="emit('open-task', chip.task)"
+          <div
+            v-for="(row, ri) in rows"
+            :key="ri"
+            class="relative flex border-b border-slate-300 last:border-b-0"
+            :style="{ minHeight: row.minH + 'px' }"
           >
-            {{ chip.task.name }}
-          </button>
+            <div
+              v-for="cell in row.cells"
+              :key="cell.key"
+              class="relative flex-1 border-r border-slate-300 p-1.5 last:border-r-0"
+              :class="cell.inMonth ? 'bg-white' : 'bg-slate-50/70'"
+            >
+              <div class="flex items-center justify-between">
+                <span class="text-[11px] leading-4" :class="cell.inMonth ? 'text-slate-600' : 'text-slate-300'">{{ cell.day }}</span>
+                <span v-if="cell.chips.length" class="rounded bg-slate-100 px-1 text-[10px] leading-4 text-slate-500">{{ cell.chips.length }}</span>
+              </div>
+              <button
+                v-for="(chip, ci) in cell.chips"
+                :key="chip.task.id + '-' + chip.day + '-' + ci"
+                class="absolute z-10 block h-[20px] truncate rounded px-1 text-center text-[10px] leading-[20px]"
+                :class="chip.kind === 'done' ? 'bg-slate-100 text-slate-600 hover:bg-slate-200' : 'bg-amber-200/90 text-amber-800 hover:bg-amber-300/90'"
+                :style="{ top: CELL_TOP + chip.row * SLOT_H + 'px', left: '6px', right: '6px' }"
+                :title="chipTitle(chip)"
+                @click="emit('open-task', chip.task)"
+              >
+                {{ chip.task.name }}
+              </button>
+            </div>
+    <!-- 跨天横条：整根固定同一行（无台阶），从开始日延伸到完成/截止日，与对应小块同排 -->
+            <div
+              v-for="(seg, si) in row.segments"
+              :key="seg.bar.task.id + '-' + ri + '-' + si"
+              class="absolute z-0 h-[20px] cursor-pointer rounded-full"
+              :class="seg.bar.kind === 'done' ? 'bg-slate-100 hover:bg-slate-200' : 'bg-amber-200/90 hover:bg-amber-300/90'"
+              :style="{
+                left: (seg.startCol / 7) * 100 + '%',
+                width: ((seg.endCol - seg.startCol + 1) / 7) * 100 + '%',
+                top: CELL_TOP + seg.topRow * SLOT_H + 'px',
+              }"
+              :title="barTitle(seg.bar)"
+              @click="emit('open-task', seg.bar.task)"
+            ></div>
+          </div>
         </div>
-<!-- 跨天横条：整根固定同一行（无台阶），从开始日延伸到完成/截止日，与对应小块同排 -->
-        <div
-          v-for="(seg, si) in row.segments"
-          :key="seg.bar.task.id + '-' + ri + '-' + si"
-          class="absolute z-0 h-[20px] cursor-pointer rounded-full"
-          :class="seg.bar.kind === 'done' ? 'bg-slate-100 hover:bg-slate-200' : 'bg-amber-200/90 hover:bg-amber-300/90'"
-          :style="{
-            left: (seg.startCol / 7) * 100 + '%',
-            width: ((seg.endCol - seg.startCol + 1) / 7) * 100 + '%',
-            top: CELL_TOP + seg.topRow * SLOT_H + 'px',
-          }"
-          :title="barTitle(seg.bar)"
-          @click="emit('open-task', seg.bar.task)"
-        ></div>
       </div>
     </div>
   </div>

@@ -9,11 +9,14 @@ import { computed } from 'vue'
 import type { Task } from '@/types'
 import { dateKeyOf } from '@/utils/time'
 import AppIcon from '@/components/AppIcon.vue'
+import { useHorizontalDrag } from '@/composables/useHorizontalDrag'
 
 const props = defineProps<{
   tasks: Task[]
   year: number
 }>()
+
+const { scrollEl, onPointerDown, onPointerMove, onPointerEnd, onClickCapture } = useHorizontalDrag()
 
 // 按年份过滤：不再支持组件内切年（年份切换经由「扫描时间胶囊文件」按钮）
 
@@ -92,6 +95,11 @@ function colorOf(count: number): string {
       <div class="text-[11px] text-slate-400">切换年份请点击「扫描时间胶囊文件」</div>
     </div>
 
+    <div class="mt-3 sm:hidden flex items-center justify-end gap-1 text-[11px] text-slate-400 select-none">
+      <span>左右滑动查看更多</span>
+      <AppIcon name="arrow-right" :size="11" class="shrink-0" />
+    </div>
+
     <div class="mt-3 rounded-lg border border-slate-300 bg-white p-4">
       <div class="flex">
         <!-- 左侧星期标签：跳过月份标签行高度（pt-4），严格对齐 7 行格子 -->
@@ -99,7 +107,15 @@ function colorOf(count: number): string {
           <div v-for="(lb, li) in WEEK_LABELS" :key="li" class="flex h-[13px] items-center justify-center">{{ lb }}</div>
         </div>
         <!-- 右侧：月份标签 + 格子，仅在格子区域内部横向滚动，白色卡片固定不动 -->
-        <div class="min-w-0 flex-1 overflow-x-auto pb-1">
+        <div
+          ref="scrollEl"
+          class="min-w-0 flex-1 h-scroll pb-1"
+          @pointerdown="onPointerDown"
+          @pointermove="onPointerMove"
+          @pointerup="onPointerEnd"
+          @pointercancel="onPointerEnd"
+          @click.capture="onClickCapture"
+        >
           <div class="min-w-[640px]">
             <div class="relative h-4 text-[10px] leading-4 text-slate-400">
               <span v-for="mp in monthPositions" :key="mp.label" class="absolute" :style="{ left: (mp.col / weeks) * 100 + '%' }">{{ mp.label }}</span>
