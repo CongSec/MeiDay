@@ -222,64 +222,59 @@ function visibleRange(b: CrossBar): { from: string; to: string } {
 }
 
 /**
- * 横条固定行号分配：
- * L = 该横条在所有「当月可见日」里，排它前面的项数（当天时间早于它的普通任务小块 + 其它横条）的最大值。
- * 保证任何一天早于它的项都能排在它上方；早项不够多的天留空行，横条整根不挪动（无台阶）。
- * 最后做冲突兜底：同一天经过的多条横条按当天时间序保证行号严格递增（整体下调，保持直条不重叠）。
+ * 横条固定行号分配（单遍、天然收敛，绝不产生台阶/死循环顶高）：
+ * 所有横条用「完成时间优先、开始/提醒时间兜底、id 再兜底」的同一把尺子定全局顺序，
+ * 保证任意两天横条之间的相对顺序一致（不会因完成日切换排序依据而翻转）。
+ * 每条横条的 lane = 它经过的所有可见日里，以下两者的最大值：
+ *   - 当天时间早于它的普通任务小块数（保证这些小块都能排到它上方）；
+ *   - 同一天经过的、全局顺序更靠前的横条的 lane + 1（保证同天横条行号严格递增、绝不重叠）。
  */
 const laidOutBars = computed<CrossBar[]>(() => {
   const out = allBars.value.map((b) => ({ ...b, lane: 0 }))
+  if (!out.length) return out
+  // 全局一致顺序：完成时间（锚点日语义）优先，开始/提醒时间、任务 id 兜底
+  const ordered = [...out].sort((a, b) => {
+    const ea = taskEnd(a.task) || taskStart(a.task) || ''
+    const eb = taskEnd(b.task) || taskStart(b.task) || ''
+    const sa = taskStart(a.task) || ''
+    const sb = taskStart(b.task) || ''
+    return ea.localeCompare(eb) || sa.localeCompare(sb) || a.task.id.localeCompare(b.task.id)
+  })
+  const rank = new Map<CrossBar, number>(ordered.map((b, i) => [b, i]))
+  // 每个可见日经过的横条（按全局顺序排列）
+  const dayBars = new Map<string, CrossBar[]>()
   for (const b of out) {
     const { from, to } = visibleRange(b)
     if (from > to) continue
-    let maxCount = 0
+    let day = from
+    while (day <= to) {
+      const arr = dayBars.get(day) ?? []
+      arr.push(b)
+      dayBars.set(day, arr)
+      day = nextDay(day)
+    }
+  }
+  for (const arr of dayBars.values()) arr.sort((a, b) => rank.get(a)! - rank.get(b)!)
+  // 按全局顺序单遍分配：先满足「当天早于它的小块数」，再满足「同天更早横条 lane+1」
+  for (const b of ordered) {
+    const { from, to } = visibleRange(b)
+    if (from > to) continue
+    let lane = 0
     let day = from
     while (day <= to) {
       const bt = barTimeOn(b, day)
-      let count = 0
+      let chipCount = 0
       for (const c of chipsByDay.value.get(day) ?? []) {
-        if (earlierThan(chipTime(c), c.task.id, bt, b.task.id)) count++
+        if (earlierThan(chipTime(c), c.task.id, bt, b.task.id)) chipCount++
       }
-      for (const o of out) {
-        if (o === b) continue
-        const r = visibleRange(o)
-        if (day < r.from || day > r.to) continue
-        if (earlierThan(barTimeOn(o, day), o.task.id, bt, b.task.id)) count++
+      lane = Math.max(lane, chipCount)
+      for (const o of dayBars.get(day) ?? []) {
+        if (o === b || rank.get(o)! >= rank.get(b)!) continue
+        lane = Math.max(lane, o.lane + 1)
       }
-      maxCount = Math.max(maxCount, count)
       day = nextDay(day)
     }
-    b.lane = maxCount
-  }
-  // 冲突兜底：同一天内的横条行号严格递增
-  for (let iter = 0; iter < 50; iter++) {
-    const byDay = new Map<string, CrossBar[]>()
-    for (const b of out) {
-      const { from, to } = visibleRange(b)
-      if (from > to) continue
-      let day = from
-      while (day <= to) {
-        const arr = byDay.get(day) ?? []
-        arr.push(b)
-        byDay.set(day, arr)
-        day = nextDay(day)
-      }
-    }
-    let changed = false
-    for (const [day, list] of byDay) {
-      list.sort((a, b) => {
-        const ta = barTimeOn(a, day)
-        const tb = barTimeOn(b, day)
-        return ta === tb ? a.task.id.localeCompare(b.task.id) : ta.localeCompare(tb)
-      })
-      for (let i = 1; i < list.length; i++) {
-        if (list[i].lane <= list[i - 1].lane) {
-          list[i].lane = list[i - 1].lane + 1
-          changed = true
-        }
-      }
-    }
-    if (!changed) break
+    b.lane = lane
   }
   return out
 })
