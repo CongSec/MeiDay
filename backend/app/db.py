@@ -130,14 +130,20 @@ CREATE TABLE IF NOT EXISTS sync_changes (
     project_id TEXT,
     ts TEXT NOT NULL
 );
+-- 提醒 worker 每 60 秒轮询未发送提醒（is_reminded=0）：联合索引避免大表全表扫描
+CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(is_reminded, reminder_time);
 CREATE INDEX IF NOT EXISTS idx_sync_changes_user ON sync_changes(username, id);
 """
 
 
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # WAL：读写不互斥，显著降低并发下的写锁冲突（database is locked）
+    conn.execute("PRAGMA journal_mode = WAL")
+    # busy_timeout：锁等待最多 5 秒，瞬时竞争时等待而不是直接报错
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 
