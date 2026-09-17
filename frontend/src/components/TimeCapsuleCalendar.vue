@@ -296,6 +296,7 @@ const placedByDay = computed(() => {
     items.sort((a, b) => (a.time === b.time ? a.id.localeCompare(b.id) : a.time.localeCompare(b.time)))
     const occupied = new Set(bars.map((b) => b.lane))
     const placed: Chip[] = []
+    let prevRow = -1
     for (const it of items) {
       if (it.kind === 'bar') continue
       const c = it.chip!
@@ -304,29 +305,34 @@ const placedByDay = computed(() => {
       if (ownBar) {
         c.row = ownBar.lane
         placed.push(c)
+        prevRow = c.row
         continue
       }
-      // 早于小块的横条最大行号（小块必须在其下方）；晚于的横条最小行号（小块必须在其上方）
-      let maxEarlier = -1
+      // 晚于小块的横条最小行号：小块必须排在这些横条上方（r < minLater）
       let minLater = Infinity
       for (const b of bars) {
         if (b.task.id === it.id) continue
+        if (!earlierThan(barTimeOn(b, day), b.task.id, it.time, it.id)) minLater = Math.min(minLater, b.lane)
+      }
+      // 早于小块的横条最大行号：小块必须排在其下方。但只信任「未被顶高」的横条——
+      // 跨天横条因经过其他天被整体抬到 minLater 之下的高位 lane 时，不代表当天它应压在该小块上方。
+      let maxEarlier = -1
+      for (const b of bars) {
+        if (b.task.id === it.id || b.lane >= minLater) continue
         if (earlierThan(barTimeOn(b, day), b.task.id, it.time, it.id)) maxEarlier = Math.max(maxEarlier, b.lane)
-        else minLater = Math.min(minLater, b.lane)
       }
       const cap = 100
-      let r = maxEarlier + 1
-      while (r < cap && (occupied.has(r) || r >= minLater)) r++
-      if (r >= minLater || r >= cap) {
-        // 兜底：放到所有横条下方第一个空行（宁可顺序微调，绝不重叠）
-        let base = -1
-        for (const b of bars) base = Math.max(base, b.lane)
-        r = Math.max(maxEarlier, base) + 1
+      let r = Math.max(maxEarlier + 1, prevRow + 1)
+      while (r < minLater && occupied.has(r)) r++
+      if (r >= minLater) {
+        // 空间不足：回到下界，跳过横条找第一个空行（宁可顺序微调，绝不重叠）
+        r = Math.max(maxEarlier + 1, prevRow + 1)
         while (r < cap && occupied.has(r)) r++
       }
       c.row = r
       occupied.add(r)
       placed.push(c)
+      prevRow = r
     }
     map.set(day, placed)
   }
