@@ -59,8 +59,11 @@ function isExpanded(key: string) {
   return !!expanded.value[key]
 }
 
-// 注：按年份过滤模式下，所选年份数据在进入/切年时一次性全部加载进内存，
-// 不再需要 per-project 加载态、可见月份数与「加载更早月份」逻辑。
+/** 展开的项目默认展示的月份数（最近 N 个月，最新在前）；更早月份通过「加载更早月份」追加。
+ *  所选年份数据已一次性全部加载进内存，追加月份只是把内存中已有月份纳入展示，不发起网络请求 */
+const MONTHS_VISIBLE = 1
+/** 每个项目当前已展示的月份数（切年/翻页/重新扫描时重置） */
+const visibleMonths = ref<Record<string, number>>({})
 
 /** 搜索关键词：按项目名 / 已加载项目的任务名与内容过滤 */
 const searchQuery = ref('')
@@ -109,6 +112,16 @@ function toggleGroup(key: string) {
   localStorage.setItem(expandedKey(), JSON.stringify(expanded.value))
 }
 
+/** 展开区展示的月份分组：默认只展示最近 N 个月，更早月份通过「加载更早月份」追加（数据已在内存，纯 UI 切片） */
+function visibleMonthGroups(g: TrashGroup): { key: string; tasks: Task[] }[] {
+  return g.monthGroups.slice(0, visibleMonths.value[g.key] ?? MONTHS_VISIBLE)
+}
+
+/** 「加载更早月份」：把下一个更早月份纳入展示（同步、无网络请求） */
+function loadMoreGroup(key: string) {
+  visibleMonths.value = { ...visibleMonths.value, [key]: (visibleMonths.value[key] ?? MONTHS_VISIBLE) + 1 }
+}
+
 /** 只读本地基础数据：档案（活跃/已删除项目），不预载任何回收站文件内容 */
 async function loadTrashBase() {
   if (!projects.loaded) await projects.load()
@@ -121,6 +134,7 @@ async function loadCurrentYear() {
   try {
     await scanTrashMeta()
     await tasks.switchTrashYear(CURRENT_YEAR)
+    visibleMonths.value = {}
     viewYear.value = CURRENT_YEAR
     viewMonth.value = currentMonthKey()
     viewMode.value = 'calendar'
@@ -153,6 +167,7 @@ watch(
     scanLatest.value = {}
     scanHasUncategorized.value = false
     page.value = 1
+    visibleMonths.value = {}
     pickerOpen.value = false
     if (c) {
       loadExpanded()
@@ -227,6 +242,7 @@ async function confirmYearPick() {
   viewLoading.value = true
   try {
     const res = await tasks.switchTrashYear(year)
+    visibleMonths.value = {}
     viewYear.value = year
     viewMonth.value = year === CURRENT_YEAR ? currentMonthKey() : `${year}-01`
     viewMode.value = 'calendar'
@@ -451,6 +467,7 @@ function goToPage(p: number | '…') {
 /** 收起全部项目（翻页/重新扫描时），并同步到 localStorage 记忆 */
 function collapseAll() {
   expanded.value = {}
+  visibleMonths.value = {}
   localStorage.setItem(expandedKey(), JSON.stringify({}))
 }
 watch(totalPages, (t) => {
@@ -937,7 +954,7 @@ function onSaved(task: Task) {
         </button>
       </div>
       <div v-if="isExpanded(g.key)" class="space-y-2">
-        <div v-for="mg in g.monthGroups" :key="mg.key">
+        <div v-for="mg in visibleMonthGroups(g)" :key="mg.key">
             <div class="px-0.5 pt-1 pb-0.5 text-xs font-medium text-slate-500">
               {{ monthLabel(mg.key) }} · {{ mg.tasks.length }} 条
             </div>
@@ -995,6 +1012,14 @@ function onSaved(task: Task) {
             </div>
             </div>
         </div>
+        <button
+          v-if="(visibleMonths[g.key] ?? MONTHS_VISIBLE) < g.monthGroups.length"
+          class="mt-1 w-full py-2 rounded-lg text-xs text-brand border border-brand/30 hover:bg-brand/5"
+          @click="loadMoreGroup(g.key)"
+        >
+          <AppIcon name="chevron-down" :size="13" class="inline-block -mt-0.5 mr-1" />
+          加载更早月份
+        </button>
       </div>
     </div>
 
