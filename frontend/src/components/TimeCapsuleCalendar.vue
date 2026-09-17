@@ -10,8 +10,8 @@
  * 与对应小块的垂直行号对齐；同一天内普通任务小块与横条按时间排序、上下堆叠，绝不重叠。
  */
 import { computed } from 'vue'
-import type { Task } from '@/types'
-import { dateKeyOf } from '@/utils/time'
+import type { RepeatMaster, Task } from '@/types'
+import { dateKeyOf, todayKey } from '@/utils/time'
 import { formatRepeat, isRepeatDay } from '@/utils/repeat'
 import AppIcon from '@/components/AppIcon.vue'
 
@@ -21,6 +21,8 @@ const props = withDefaults(
     tasks: Task[]
     /** 胶囊外活跃待办（未完成，跨所有已加载项目；组件内筛选有时间/重复的任务并按月份过滤） */
     pending?: Task[]
+    /** 重复模板（已完成重复任务的后续出现；日历图据此补足今天之后的重复日） */
+    repeats?: RepeatMaster[]
     /** 当前查看的月份，YYYY-MM */
     month: string
     /** 项目名查询 */
@@ -30,7 +32,7 @@ const props = withDefaults(
     /** 可翻页的上限月份（YYYY-MM，按年份过滤时固定为所选年 12 月），缺省不限制 */
     maxMonth?: string
   }>(),
-  { projectName: (pid: string) => pid, pending: () => [], minMonth: '', maxMonth: '' },
+  { projectName: (pid: string) => pid, pending: () => [], repeats: () => [], minMonth: '', maxMonth: '' },
 )
 
 const emit = defineEmits<{
@@ -169,10 +171,38 @@ const pendingBars = computed<CrossBar[]>(() => {
   return out
 })
 
-/** 按天分组的全部任务小块（已完成 + 未完成），同一天内按时间排序 */
+/**
+ * 重复模板的未来重复日（已完成重复任务的后续出现）：只补「今天之后还没发生」的重复日。
+ * 完成今天的重复任务后源任务离开待办列表，但后续周期仍按模板推进；
+ * 日历图据此把本月今天之后的重复日继续显示成待办小块（对 daily/weekly/monthly/legalWorkday/dates 全部生效）。
+ */
+const futureRepeatChips = computed<Chip[]>(() => {
+  const today = todayKey()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const out: Chip[] = []
+  const pendingIds = new Set(pendingChips.value.map((c) => c.task.id))
+  for (const master of props.repeats) {
+    const t = master.template
+    const rule = t.repeat
+    if (!rule) continue
+    const anchor = rule.start || dateKeyOf(t.reminderTime || t.endTime || t.startTime) || master.dueDate
+    const time = timeOfDay(t.reminderTime || t.startTime || t.endTime)
+    for (let d = 1; d <= daysInMonth.value; d++) {
+      const key = `${props.month}-${pad(d)}`
+      if (key <= today) continue
+      if (rule.endAfter && key > rule.endAfter) continue
+      if (!isRepeatDay(rule, anchor, key)) continue
+      if (pendingIds.has(t.id)) continue
+      out.push({ task: t, kind: 'pending', day: key, sortKey: `${key}T${time || '00:00'}`, cross: null, row: 0 })
+    }
+  }
+  return out
+})
+
+/** 按天分组的全部任务小块（已完成 + 未完成 + 重复模板未来重复日），同一天内按时间排序 */
 const chipsByDay = computed(() => {
   const map = new Map<string, Chip[]>()
-  for (const c of [...doneChips.value, ...pendingChips.value]) {
+  for (const c of [...doneChips.value, ...pendingChips.value, ...futureRepeatChips.value]) {
     const arr = map.get(c.day) ?? []
     arr.push(c)
     map.set(c.day, arr)
@@ -467,20 +497,20 @@ function changeMonth(delta: number) {
       </button>
     </div>
 
-    <div class="mt-3 rounded-lg border border-slate-200 bg-white overflow-hidden">
-      <div class="grid grid-cols-7 border-b border-slate-200 bg-slate-50/70">
+    <div class="mt-3 rounded-lg border border-slate-300 bg-white overflow-hidden">
+      <div class="grid grid-cols-7 border-b border-slate-300 bg-slate-50/70">
         <div v-for="w in WEEK_LABELS" :key="w" class="py-1.5 text-center text-[11px] font-medium text-slate-400">周{{ w }}</div>
       </div>
       <div
         v-for="(row, ri) in rows"
         :key="ri"
-        class="relative flex border-b border-slate-100 last:border-b-0"
+        class="relative flex border-b border-slate-300 last:border-b-0"
         :style="{ minHeight: row.minH + 'px' }"
       >
         <div
           v-for="cell in row.cells"
           :key="cell.key"
-          class="relative flex-1 border-r border-slate-100 p-1.5 last:border-r-0"
+          class="relative flex-1 border-r border-slate-300 p-1.5 last:border-r-0"
           :class="cell.inMonth ? 'bg-white' : 'bg-slate-50/70'"
         >
           <div class="flex items-center justify-between">
@@ -490,7 +520,7 @@ function changeMonth(delta: number) {
           <button
             v-for="(chip, ci) in cell.chips"
             :key="chip.task.id + '-' + chip.day + '-' + ci"
-            class="absolute z-10 block h-[20px] truncate rounded px-1 text-left text-[10px] leading-[20px]"
+            class="absolute z-10 block h-[20px] truncate rounded px-1 text-center text-[10px] leading-[20px]"
             :class="chip.kind === 'done' ? 'bg-slate-100 text-slate-600 hover:bg-slate-200' : 'bg-amber-200/90 text-amber-800 hover:bg-amber-300/90'"
             :style="{ top: CELL_TOP + chip.row * SLOT_H + 'px', left: '6px', right: '6px' }"
             :title="chipTitle(chip)"

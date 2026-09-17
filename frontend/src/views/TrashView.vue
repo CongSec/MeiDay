@@ -82,6 +82,8 @@ const searching = computed(() => searchQuery.value.trim().length > 0)
 /** 编辑弹窗状态（任务详情页已废弃，所有视图点击任务直接进编辑） */
 const editTask = ref<Task | null>(null)
 const editOpen = ref(false)
+/** 重复模板 master id：非空时编辑的是「未来重复日」小块，保存走未来任务流程 */
+const editTemplateMasterId = ref<string | null>(null)
 
 /** 多视图：当前视图（默认落到日历图；数据按所选年份一次性加载进内存，切换视图不触发网络请求） */
 const viewMode = ref<'list' | 'calendar' | 'heatmap' | 'trend'>('calendar')
@@ -297,6 +299,8 @@ const pendingActiveTasks = computed(() => {
   }
   return out
 })
+/** 重复模板（已完成重复任务的后续出现）：扁平列表，供日历图补足今天之后的重复日 */
+const repeatMastersForCalendar = computed(() => Object.values(tasks.repeats).flat())
 /** 项目名（多视图组件展示用） */
 function projectNameOf(pid: string): string {
   if (!pid || pid === UNCATEGORIZED) return '无分类'
@@ -831,10 +835,21 @@ function durationText(t: Task): string {
 /** 编辑弹窗：胶囊内任务用胶囊编辑（保留完成/入舱时间），胶囊外待办用普通编辑 */
 const editCapsule = ref(true)
 
+/** 查找某 id 对应的重复模板 master（repeats 中 template.id 匹配）；非模板返回 undefined */
+function findMasterByTemplateId(taskId: string) {
+  for (const pid of Object.keys(tasks.repeats)) {
+    const m = (tasks.repeats[pid] ?? []).find((x) => x.template.id === taskId)
+    if (m) return m
+  }
+  return undefined
+}
+
 /** 打开任务编辑弹窗（任务详情页已废弃：列表/日历点击任务都直接进编辑） */
 function openEdit(t: Task) {
   editTask.value = t
   editCapsule.value = t.status !== 'pending'
+  // 日历图点开的「未来重复日」小块（重复模板）：编辑保存走未来任务流程
+  editTemplateMasterId.value = findMasterByTemplateId(t.id)?.id ?? null
   editOpen.value = true
 }
 
@@ -842,6 +857,7 @@ function openEdit(t: Task) {
 function onSaved(task: Task) {
   editOpen.value = false
   editTask.value = null
+  editTemplateMasterId.value = null
   ui.toast(task.status === 'pending' ? '任务已保存' : '已保存到时间胶囊')
 }
 </script>
@@ -1084,6 +1100,7 @@ function onSaved(task: Task) {
           v-if="viewMode === 'calendar'"
           :tasks="completedTrashTasks"
           :pending="pendingActiveTasks"
+          :repeats="repeatMastersForCalendar"
           :month="viewMonth"
           :min-month="viewYear + '-01'"
           :max-month="viewYear + '-12'"
@@ -1155,6 +1172,7 @@ function onSaved(task: Task) {
       v-model:open="editOpen"
       :task="editTask"
       :capsule-edit="editCapsule"
+      :template-master-id="editTemplateMasterId"
       @saved="onSaved"
     />
   </div>
