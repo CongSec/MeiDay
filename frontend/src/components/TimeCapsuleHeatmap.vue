@@ -92,7 +92,7 @@ function colorOf(count: number): string {
       <div class="text-[11px] text-slate-400">切换年份请点击「扫描时间胶囊文件」</div>
     </div>
 
-    <div class="mt-3 rounded-lg border border-slate-200 bg-white p-4">
+    <div class="mt-3 rounded-lg border border-slate-300 bg-white p-4">
       <div class="flex">
         <!-- 左侧星期标签：跳过月份标签行高度（pt-4），严格对齐 7 行格子 -->
         <div class="mr-1.5 flex w-4 shrink-0 flex-col gap-[3px] pt-4 text-[10px] leading-none text-slate-400">
@@ -109,7 +109,7 @@ function colorOf(count: number): string {
                 <div
                   v-for="(cell, ri) in week"
                   :key="cell.dateKey"
-                  class="h-[13px] w-full shrink-0 rounded-[2px]"
+                  class="h-[13px] w-full shrink-0 rounded-[2px] border border-slate-300"
                   :class="cell.inYear ? '' : 'opacity-0'"
                   :style="{ backgroundColor: colorOf(cell.count) }"
                   :title="cell.inYear ? `${cell.dateKey}：完成 ${cell.count} 个任务` : ''"

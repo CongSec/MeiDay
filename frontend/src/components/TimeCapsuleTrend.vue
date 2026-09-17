@@ -210,7 +210,7 @@ const gridLines = computed(() => {
       </div>
     </div>
 
-    <div class="mt-3 rounded-lg border border-slate-200 bg-white p-3 sm:p-4">
+    <div class="mt-3 rounded-lg border border-slate-300 bg-white p-3 sm:p-4">
       <div class="overflow-x-auto pb-1">
         <svg :width="chartW" :height="CHART_H" class="block">
           <line
@@ -220,7 +220,7 @@ const gridLines = computed(() => {
             :x2="chartW - PAD_X"
             :y1="g.y"
             :y2="g.y"
-            stroke="#EEF0F4"
+            stroke="#CBD5E1"
             stroke-width="1"
           />
           <polyline
