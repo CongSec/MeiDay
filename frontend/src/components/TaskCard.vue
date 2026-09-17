@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { useNow } from '@/composables/useNow'
-import { formatTodayTitle, todayKey } from '@/utils/time'
+import { dateKeyOf, formatTodayTitle, todayKey } from '@/utils/time'
 import { formatRepeat, isNewStyleRepeat, isRepeatDay } from '@/utils/repeat'
 import type { Project, Subtask, Task } from '@/types'
 import AppIcon from '@/components/AppIcon.vue'
@@ -57,8 +57,9 @@ const subProgress = computed(() => {
   return { done: subs.filter((s) => s.completed).length, total: subs.length }
 })
 
+/** 提醒时间显示：当天只显示「时:分」，非当天显示「月-日 时:分」 */
 function timeStr(t: string) {
-  return formatTodayTitle(t).slice(6)
+  return dateKeyOf(t) === todayKey() ? formatTodayTitle(t).slice(6) : formatTodayTitle(t)
 }
 
 function dateStr(t: string) {
