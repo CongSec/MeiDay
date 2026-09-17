@@ -128,4 +128,6 @@ frontend/apk/
 
 # ===== 临时调试脚本 =====
 _tmp_pw/
+seed_real.py
+verify_real.py
 
