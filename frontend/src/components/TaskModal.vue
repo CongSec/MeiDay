@@ -319,6 +319,7 @@ function saveCapsuleSubEdit() {
     endTime: fromLocalInput(f.endTime),
     reminderTime: fromLocalInput(f.reminderTime) || null,
     completed: existing?.completed ?? false,
+    sort: existing?.sort,
     // 编辑保留原创建/更新时间与附件；新增子任务用当前时间
     createdAt: existing?.createdAt ?? now,
     updatedAt: existing?.updatedAt ?? now,
