@@ -593,6 +593,7 @@ async function submit() {
       endTime: fromLocalInput(end.value),
       reminderTime: reminder.value ? fromLocalInput(reminder.value) : null,
       completed: props.subtask?.completed ?? false,
+      sort: props.subtask?.sort,
       createdAt: props.subtask?.createdAt ?? now,
       updatedAt: now,
       attachments: attachments.value,

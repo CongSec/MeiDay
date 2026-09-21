@@ -9,8 +9,8 @@
  * - touchStartThreshold 忽略过小的位移，避免轻微触碰就误触发拖拽；
  *   fallbackTolerance 让克隆贴手前先等手指真正移动，消除起步跳动。
  * - 交互控件(input/button/label…)用 filter 排除，避免误拖；preventOnFilter=false
- *   保证控件点击/勾选不受影响。
- * - ghost/chosen/drag 类名提供拖拽过程中的视觉反馈（样式见 style.css）。
+ *   保证控件点击/勾选不受影响；整卡拖拽还排除子任务拖拽手柄（.sub-drag-handle），
+ *   抓住手柄拖动的是子任务，而不是整张卡。
  */
 
 /** 是否以触摸为主要交互的设备（手机/平板）；触屏笔记本以鼠标为主，按桌面处理 */
@@ -26,6 +26,8 @@ function isTouchDevice(): boolean {
 
 /** 交互控件：这些区域不触发整卡拖拽（但仍可正常点击/勾选） */
 const DRAG_FILTER = 'input, button, a, select, textarea, label, [contenteditable]'
+/** 子任务拖拽手柄：整卡拖拽时应排除（抓住手柄是拖动子任务，不是拖整张卡） */
+const SUBTASK_HANDLE_FILTER = '.sub-drag-handle'
 
 /** 当前是否有拖拽正在进行（供 LayoutView 识别“长按拖动”，避免误开侧栏） */
 let dragging = false
@@ -66,8 +68,8 @@ export function getDragOptions(opts: DragOptions = {}) {
     touchStartThreshold: 6,
     // 目标项过半即让位，实现实时“占位排斥”
     swapThreshold: 0.5,
-    // 交互控件不参与整卡拖拽，点击/勾选不受影响
-    filter: DRAG_FILTER,
+    // 交互控件不参与整卡拖拽，点击/勾选不受影响；整卡拖拽还排除子任务拖拽手柄
+    filter: opts.wholeCard ? `${DRAG_FILTER}, ${SUBTASK_HANDLE_FILTER}` : DRAG_FILTER,
     preventOnFilter: false,
   }
   // 触屏整卡：轻点=点击，长按≥300ms 才进入拖拽

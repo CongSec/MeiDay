@@ -5,6 +5,10 @@ import { useNow } from '@/composables/useNow'
 import { dateKeyOf, formatTodayTitle, todayKey } from '@/utils/time'
 import { formatRepeat, isNewStyleRepeat, isRepeatDay } from '@/utils/repeat'
 import type { Project, Subtask, Task } from '@/types'
+import { VueDraggable } from 'vue-draggable-plus'
+import { getDragOptions, setDragging } from '@/utils/drag'
+import { useTasksStore } from '@/stores/tasks'
+import { sortSubtasks } from '@/utils/task'
 import AppIcon from '@/components/AppIcon.vue'
 
 const props = defineProps<{ task: Task; project?: Project; future?: boolean; warm?: boolean }>()
@@ -19,6 +23,7 @@ const emit = defineEmits<{
 }>()
 
 const auth = useAuthStore()
+const tasks = useTasksStore()
 
 // 全局共享时钟（单一 30s 定时器，替代每个卡片各自 setInterval）
 const { now } = useNow()
@@ -74,6 +79,28 @@ function subOverdue(s: Subtask) {
 function onAddSubtask() {
   expanded.value = true
   emit('addSubtask', props.task)
+}
+
+/** 子任务本地排序副本：进入/新增/同步合并时按「提醒 > 开始 > 更新时间」自动排序；
+ *  拖拽过即写入 sort 手动顺序优先，新子任务无 sort 自动补末尾（与主任务拖拽语义一致） */
+const subDragList = ref<Subtask[]>([])
+watch(
+  () => [props.task.subtasks, props.task.updatedAt],
+  () => {
+    subDragList.value = sortSubtasks(props.task.subtasks ?? [])
+  },
+  { immediate: true },
+)
+/** 子任务拖拽参数：仅手柄可拖（与整卡拖拽互不干扰） */
+const subDragOptions = { ...getDragOptions({ wholeCard: false }), handle: '.sub-drag-handle' }
+
+function onSubDragStart() {
+  setDragging(true)
+}
+
+function onSubDragEnd() {
+  setDragging(false)
+  tasks.setSubtaskOrder(props.task.projectId, props.task.id, subDragList.value)
 }
 </script>
 
@@ -201,9 +228,9 @@ function onAddSubtask() {
           <span class="inline-flex items-center gap-1"><AppIcon name="plus" :size="11" />添加子任务</span>
         </button>
       </div>
-      <div class="space-y-1.5">
+      <VueDraggable v-model="subDragList" v-bind="subDragOptions" item-key="id" class="space-y-1.5" @start="onSubDragStart" @end="onSubDragEnd">
         <div
-          v-for="s in task.subtasks"
+          v-for="s in subDragList"
           :key="s.id"
           class="group/sub rounded-lg border border-slate-100 bg-slate-50/70 px-2.5 py-2 transition hover:border-slate-200"
           :class="s.completed ? 'opacity-75' : ''"
@@ -258,6 +285,7 @@ function onAddSubtask() {
             >
               <AppIcon name="close" :size="14" />
             </button>
+            <span class="sub-drag-handle shrink-0 text-slate-300 cursor-grab select-none inline-flex items-center px-1" title="拖拽子任务排序"><AppIcon name="grip" :size="13" /></span>
           </div>
           <p v-if="s.description" class="mt-1 pl-6 text-[11px] text-slate-400 break-all clamp-2">
             {{ s.description }}
@@ -273,7 +301,7 @@ function onAddSubtask() {
             </span>
           </div>
         </div>
+      </VueDraggable>
       </div>
-    </div>
   </div>
 </template>

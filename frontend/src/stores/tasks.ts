@@ -7,7 +7,7 @@ import { useStatsStore } from './stats'
 import { createOssClient, describeOssError, paths } from '@/utils/oss'
 import { applyDeletedTombstones, compareAndSwapPut, filterTasksForProject, lastModifiedOf, lmKeyOf, mergeDeletedTombstones, mergeTasks, versionToken } from '@/utils/sync'
 import { enrichOssError } from '@/utils/ossDiag'
-import { idbClearTrashUserCache, idbGet, idbPut, idbDel } from '@/utils/idb'
+import { idbClearTrashUserCache, idbGet, idbListKeys, idbPut, idbDel } from '@/utils/idb'
 import { debounce, type Debounced } from '@/utils/debounce'
 import { queueSyncChange } from '@/utils/syncReport'
 import { dateKeyOf, diffDaysKey, nowIso, todayKey } from '@/utils/time'
@@ -16,7 +16,7 @@ import { buildReminderPayload, buildRepeatOccurrence, nextRepeatDate, shiftTaskT
 import { api } from '@/api/client'
 import { logAudit, safeDetail } from '@/utils/audit'
 import { UNCATEGORIZED, type AttachmentMeta, type RepeatMaster, type Subtask, type Task } from '@/types'
-import { newSubtask, normalizeTask, normalizeTasks, pendingSubtaskReminders } from '@/utils/task'
+import { compareSortTime, newSubtask, normalizeTask, normalizeTasks, pendingSubtaskReminders, taskEffectiveEndTime, taskEffectiveSortTime } from '@/utils/task'
 import { deleteAttachments } from '@/utils/attachments'
 const saveDebouncers = new Map<string, Debounced<[]>>()
 const trashDebouncers = new Map<string, Debounced<[]>>()
@@ -113,27 +113,12 @@ function isServerEmptyError(e: unknown): boolean {
 /**
  * 排序活跃任务：pending 在前、其余置后。
  * 项目一旦被拖拽排序（存在 sort 值）就按 sort 升序排列（未分配 sort 的新任务补到末尾），
- * 让手动拖拽顺序在加载/同步合并后保持；从未拖拽过的项目退化为按截止时间升序（旧行为）。
+ * 让手动拖拽顺序在加载/同步合并后保持；从未拖拽过的项目退化为按截止时间升序（旧行为，
+ * 截止时间取主任务 + 未完成子任务最早 endTime）。
  */
-/** 任务排序参考时间：提醒时间 > 开始时间（都没有返回 null，无时间任务排最后） */
-function taskSortTime(t: Task): { iso: string; day: string; rank: 1 | 2 } | null {
-  if (t.reminderTime) return { iso: t.reminderTime, day: dateKeyOf(t.reminderTime), rank: 1 }
-  if (t.startTime) return { iso: t.startTime, day: dateKeyOf(t.startTime), rank: 2 }
-  return null
-}
-
-/** 新建任务插入比较：同一天按「提醒 > 开始」类型优先级；不同一天所有时间同一级别，按实际时间先后（无时间排最后） */
+/** 新建任务插入比较：主任务 + 未完成子任务取最早（地位同等）；同一天按「提醒 > 开始」类型优先级；不同一天按实际时间先后（无时间排最后） */
 function compareTaskSort(a: Task, b: Task): number {
-  const ta = taskSortTime(a)
-  const tb = taskSortTime(b)
-  if (!ta && !tb) return 0
-  if (!ta) return 1
-  if (!tb) return -1
-  if (ta.day === tb.day) {
-    if (ta.rank !== tb.rank) return ta.rank - tb.rank
-    return ta.iso.localeCompare(tb.iso)
-  }
-  return ta.iso.localeCompare(tb.iso)
+  return compareSortTime(taskEffectiveSortTime(a), taskEffectiveSortTime(b))
 }
 function sortActiveList(list: Task[]): Task[] {
   const hasSort = list.some((t) => t.sort !== undefined)
@@ -141,9 +126,9 @@ function sortActiveList(list: Task[]): Task[] {
     ? (a: Task, b: Task) => {
         const sa = a.sort ?? Number.MAX_SAFE_INTEGER
         const sb = b.sort ?? Number.MAX_SAFE_INTEGER
-        return sa !== sb ? sa - sb : (a.endTime || '').localeCompare(b.endTime || '')
+        return sa !== sb ? sa - sb : taskEffectiveEndTime(a).localeCompare(taskEffectiveEndTime(b))
       }
-    : (a: Task, b: Task) => (a.endTime || '').localeCompare(b.endTime || '')
+    : (a: Task, b: Task) => taskEffectiveEndTime(a).localeCompare(taskEffectiveEndTime(b))
   const pending = list.filter((t) => t.status === 'pending').sort(cmp)
   const rest = list.filter((t) => t.status !== 'pending').sort(cmp)
   return [...pending, ...rest]
@@ -203,6 +188,51 @@ function filterStaleAcrossProjects(
   return tasks.filter(
     (t) => !others.some((o) => o.id === t.id && (o.updatedAt || '').localeCompare(t.updatedAt || '') > 0),
   )
+}
+/**
+ * 跨项目去重（异步版）：在同步写回 / CAS 冲突合并 / 保存前，除内存中已加载项目外，
+ * 再从本地 IDB 缓存读取「未加载 / 已被 LRU 逐出」项目的任务副本做比对：
+ * 若其它项目缓存里存在比本份 updatedAt 更新的同 id 副本（任务已被移到其它项目），
+ * 则本份视为过期副本丢弃，避免把已移走的任务旧副本写回源项目（BUG：移动任务被复制一份）。
+ *
+ * 只查本设备已有缓存的项目——从未缓存过目标项目的设备无法感知移动，但一旦同步/加载过
+ * 目标项目即可拦截；与内存版 filterStaleAcrossProjects 语义一致，IDB 不可用/无其它缓存时
+ * 退化为纯内存比对，不改变原行为。读取仅取 id/updatedAt 做轻量比对，不改写缓存。
+ */
+async function filterStaleAcrossProjectsAsync(
+  allTasks: Record<string, Task[]>,
+  projectId: string,
+  tasks: Task[],
+  username: string,
+): Promise<Task[]> {
+  const result = filterStaleAcrossProjects(allTasks, projectId, tasks)
+  if (!result.length || !username) return result
+  const loadedPids = new Set(Object.keys(allTasks))
+  let cachedPids: string[] = []
+  try {
+    const prefix = `tasks:${username}:`
+    const keys = await idbListKeys('tasks', prefix)
+    for (const key of keys) {
+      const pid = key.slice(prefix.length)
+      // 未分类缓存（pid 为空）不承载活跃任务；已加载项目由内存版比对，跳过
+      if (pid && pid !== projectId && !loadedPids.has(pid)) cachedPids.push(pid)
+    }
+  } catch {
+    return result // IDB 不可用时退化为内存比对
+  }
+  if (!cachedPids.length) return result
+  const byId = new Map(result.map((t) => [t.id, t]))
+  const staleIds = new Set<string>()
+  for (const pid of cachedPids) {
+    const cached = await idbGet<Task[]>('tasks', taskCacheKey(username, pid))
+    if (!cached || !cached.length) continue
+    for (const t of cached) {
+      const cur = byId.get(t.id)
+      if (cur && (t.updatedAt || '').localeCompare(cur.updatedAt || '') > 0) staleIds.add(t.id)
+    }
+  }
+  if (!staleIds.size) return result
+  return result.filter((t) => !staleIds.has(t.id))
 }
 /** 有界并发 map：限制同时执行的异步任务数，避免回收站分片全量拉取时一次性打满网络/连接池。 */
 async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
@@ -470,10 +500,11 @@ export const useTasksStore = defineStore('tasks', {
         normalizeTasks(cached)
         const { active, deleted } = splitDeleted(cached)
         // 丢弃 projectId 与所在项目不一致的过期副本（跨项目移动残留），防止本地缓存复活
-        const cachedActive = filterStaleAcrossProjects(
+        const cachedActive = await filterStaleAcrossProjectsAsync(
           this.tasks,
           projectId,
           filterTasksForProject(active, projectId),
+          auth.username,
         )
         this.tasks[projectId] = cachedActive
         await idbPut('tasks', taskCacheKey(auth.username, projectId), cachedActive)
@@ -501,10 +532,11 @@ export const useTasksStore = defineStore('tasks', {
           normalizeTasks(remote)
           const { active, deleted } = splitDeleted(remote)
           this.tasks[projectId] = sortActiveList(
-            filterStaleAcrossProjects(
+            await filterStaleAcrossProjectsAsync(
               this.tasks,
               projectId,
               filterTasksForProject(active, projectId),
+              auth.username,
             ),
           )
           // 跨天归档：非当天完成的已完成任务稍后由 sweepCompleted 统一移入回收站
@@ -1189,15 +1221,17 @@ export const useTasksStore = defineStore('tasks', {
       // 丢弃任务文件里 projectId 与所在项目不一致的过期副本（跨项目移动残留），
       // 并跨项目去重（其它已加载项目里有更新的同 id 副本时本份视为过期），
       // 防止轮询合并把已移走的任务“复活”回源项目（BUG：移动任务被复制一份）
-      const remoteActive = filterStaleAcrossProjects(
+      const remoteActive = await filterStaleAcrossProjectsAsync(
         this.tasks,
         projectId,
         filterTasksForProject(rawRemoteActive, projectId),
+        auth.username,
       )
-      const local = filterStaleAcrossProjects(
+      const local = await filterStaleAcrossProjectsAsync(
         this.tasks,
         projectId,
         filterTasksForProject(this.tasks[projectId] ?? [], projectId),
+        auth.username,
       )
       const localTombstones = this.trash[projectId] ?? []
       const remoteTrash = await fetchRemoteTrash(client, auth.username, projectId)
@@ -1280,6 +1314,21 @@ export const useTasksStore = defineStore('tasks', {
       const client = await createOssClient(auth.creds)
       // 使用快照，避免登出/重置竞态下读到被清空的 store
       let list = (snapshot ?? this.tasks[projectId] ?? []).slice()
+      // 写回前跨项目去重：丢弃本项目内存里已被移到其它项目（其它项目缓存有更新副本）的
+      // 过期任务，防止把已移走的任务旧副本写回源项目（BUG：移动任务被复制一份）。
+      // 仅对非快照的常规保存生效：快照（回滚/同步写回）是上游已过滤的结果，不应再次裁剪。
+      if (!snapshot) {
+        const filteredList = await filterStaleAcrossProjectsAsync(
+          this.tasks,
+          projectId,
+          filterTasksForProject(list, projectId),
+          auth.username,
+        )
+        if (filteredList.length !== list.length) {
+          list = filteredList
+          this.tasks[projectId] = filteredList
+        }
+      }
       const key = tasksFilePath(auth.username, projectId)
       const etagKey = `etag:${auth.username}:${projectId}`
       let knownEtag = await idbGet<string>('kv', etagKey)
@@ -1303,10 +1352,11 @@ export const useTasksStore = defineStore('tasks', {
           const { active: remoteActive, deleted: remoteDeleted } = splitDeleted(remoteList)
           // 冲突合并同样丢弃源项目文件里 projectId 不一致/其它已加载项目有更新副本的
           // 过期任务，避免复活已移走任务（BUG：移动任务被复制一份）
-          const filteredRemote = filterStaleAcrossProjects(
+          const filteredRemote = await filterStaleAcrossProjectsAsync(
             this.tasks,
             projectId,
             filterTasksForProject(remoteActive, projectId),
+            auth.username,
           )
           const localTombstones = this.trash[projectId] ?? []
           const remoteTrash = await fetchRemoteTrash(client, auth.username, projectId)
@@ -1884,6 +1934,33 @@ export const useTasksStore = defineStore('tasks', {
       this.tasks[projectId] = ordered
       this._persist(projectId)
       logAudit('调整任务顺序', safeDetail(`项目ID：${projectId}，共 ${ordered.filter((t) => t.status === 'pending').length} 项`))
+    },
+    /**
+     * 拖拽子任务排序：整体替换某主任务的子任务数组（顺序即展示顺序）。
+     * 写入每个子任务的 sort=下标，并仅对「位置发生变化」的子任务更新 updatedAt，
+     * 同时刷新主任务 updatedAt，使本端子任务顺序在跨设备合并（mergeTasks 按 updatedAt 取新）时胜出；
+     * 未移动的子任务保持原 updatedAt，避免覆盖其他设备对子任务内容的编辑。
+     */
+    setSubtaskOrder(projectId: string, taskId: string, orderedSubtasks: Subtask[]) {
+      const task = (this.tasks[projectId] ?? []).find((t) => t.id === taskId)
+      if (!task) return
+      const prev = task.subtasks ?? []
+      const prevIndex = new Map(prev.map((s, i) => [s.id, i]))
+      const now = nowIso()
+      let moved = false
+      for (let i = 0; i < orderedSubtasks.length; i++) {
+        const s = orderedSubtasks[i]
+        const oldIdx = prevIndex.get(s.id)
+        if (oldIdx === undefined || oldIdx !== i || s.sort !== i) {
+          s.updatedAt = now
+          moved = true
+        }
+        s.sort = i
+      }
+      task.subtasks = orderedSubtasks
+      if (moved) task.updatedAt = now
+      this._persist(projectId)
+      logAudit('调整子任务顺序', safeDetail(`任务ID：${taskId}，项目ID：${projectId}，共 ${orderedSubtasks.length} 项`))
     },
     /**
      * 保存今日视图的跨项目拖拽顺序（任务 id 全局有序）。

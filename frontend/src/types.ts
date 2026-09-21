@@ -19,6 +19,8 @@ export interface Subtask {
   completed: boolean
   createdAt: string
   updatedAt: string
+  /** 排序位置（手动拖拽子任务后写入；缺失时按时间规则自动排序，与主任务 sort 语义一致） */
+  sort?: number
   /** 附件列表（旧数据可能缺失，读取时统一补空数组） */
   attachments: AttachmentMeta[]
 }

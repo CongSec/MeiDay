@@ -63,6 +63,23 @@ export async function idbDel(store: string, key: string): Promise<void> {
   })
 }
 
+/** 返回 store 中 key 以给定前缀开头的所有 key（例如按用户名枚举 tasks 缓存的项目 id，
+ *  无需预先知道完整 key 列表；仅遍历 key 不读值，开销小）。 */
+export async function idbListKeys(store: string, prefix: string): Promise<string[]> {
+  const db = await openDb()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readonly')
+    const req = tx.objectStore(store).openCursor()
+    const keys: string[] = []
+    req.onsuccess = () => {
+      const cursor = req.result
+      if (!cursor) return resolve(keys)
+      if (typeof cursor.key === 'string' && cursor.key.startsWith(prefix)) keys.push(cursor.key)
+      cursor.continue()
+    }
+    req.onerror = () => reject(req.error)
+  })
+}
 /** 删除某个 store 中 key 以给定前缀开头的所有记录 */
 function idbDeletePrefix(store: IDBObjectStore, prefix: string): void {
   const req = store.openCursor()

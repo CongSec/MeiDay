@@ -1,6 +1,7 @@
 import type { RepeatMaster, RepeatRule, Subtask, Task } from '@/types'
 import { addDaysKey, dateKeyOf } from './time'
 import { isNewStyleRepeat, isRepeatDay } from './repeat'
+import { taskEffectiveSortTime } from './task'
 
 /** 今日/未来某天可见判断所需的公共字段（主任务与子任务共用同一套核心逻辑） */
 interface TodayCandidate {
@@ -92,11 +93,10 @@ export function nextVisibleDateInWindow(t: Task, today: string, windowDays = 30)
  *    重复规则命中、子任务同规则），30 天窗口外才开始/提醒的任务不收集；
  *  - 重复模板（完成重复任务后生成）：dueDate 落在窗口内，且按今日视图规则当天会显示
  *    才收集（物化后即成为当天可见的待办任务）。 */
-/** 未来任务排序参考时间：提醒时间 > 开始时间 > 下次任务生成日（生成日按当天 00:00 参与跨天比较） */
+/** 未来任务排序参考时间：主任务 + 未完成子任务取最早（地位同等）；无任何时间退回「下次任务生成日」按当天 00:00 参与跨天比较 */
 function futureSortTime(x: { task: Task; date: string }): { iso: string; day: string; rank: 1 | 2 | 3 } {
-  const t = x.task
-  if (t.reminderTime) return { iso: t.reminderTime, day: dateKeyOf(t.reminderTime), rank: 1 }
-  if (t.startTime) return { iso: t.startTime, day: dateKeyOf(t.startTime), rank: 2 }
+  const eff = taskEffectiveSortTime(x.task)
+  if (eff) return { iso: eff.iso, day: eff.day, rank: eff.rank }
   return { iso: `${x.date}T00:00:00+08:00`, day: x.date, rank: 3 }
 }
 
