@@ -125,17 +125,19 @@ class MeResponse(BaseModel):
 
 
 class SmtpPlain(BaseModel):
+    """SMTP 配置（发件邮箱 / 授权码 / 收件邮箱）。
+
+    三项均允许为空：全空表示“不配置邮件”（不发提醒、不发安全通知）。
+    是否真正落库/清除由路由层按“全空 = 未配置”判断，此处只做 trim。
+    """
     smtp_user: str
     smtp_pass: str
     notify_email: str
 
     @field_validator("smtp_user", "smtp_pass", "notify_email", mode="before")
     @classmethod
-    def _nonempty(cls, v):
-        v = _strip(v)
-        if not v:
-            raise ValueError("SMTP 字段不能为空")
-        return v
+    def _strip_value(cls, v):
+        return _strip(v)
 
 
 class OssCheckRequest(BaseModel):

@@ -96,6 +96,8 @@ export const useAuthStore = defineStore('auth', {
     async saveCredentials(fields: CredFields) {
       if (!this.userKey) throw new Error('会话密钥缺失，请重新登录')
       const encrypted = await encryptCreds(this.userKey, fields)
+      // 发件邮箱 / SMTP 授权码 / 收件邮箱可留空：必须始终携带 smtp_plain（含空字符串），
+      // 后端才能区分“未配置邮件”（全空 → 清除旧 SMTP 配置）与“未提交该字段”（null → 不动）。
       await api.updateCredentials({
         encrypted_creds: encrypted,
         smtp_plain: {

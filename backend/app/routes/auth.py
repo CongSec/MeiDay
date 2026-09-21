@@ -94,7 +94,7 @@ def register(body: RegisterRequest, request: Request = None):
                 "INSERT INTO users (username, argon2_hash, salt, encrypted_creds, auth_version) VALUES (?,?,?,?,?)",
                 (username, hash_verifier(body.passwordHash), username, body.encrypted_creds, 1),
             )
-            if body.smtp_plain:
+            if body.smtp_plain and body.smtp_plain.smtp_user and body.smtp_plain.smtp_pass and body.smtp_plain.notify_email:
                 conn.execute(
                     "INSERT INTO smtp_creds (username, smtp_user, smtp_pass, notify_email) VALUES (?,?,?,?)",
                     (username, body.smtp_plain.smtp_user, body.smtp_plain.smtp_pass, body.smtp_plain.notify_email),

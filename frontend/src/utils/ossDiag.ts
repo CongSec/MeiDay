@@ -8,7 +8,7 @@ import type { CredFields } from '@/types'
  * 根据后端诊断结果生成一个用户可读的中文提示。
  * 已知错误码映射为固定文案，其余情况亮出真实 code/status/message，方便用户直接核对。
  */
-function hintFromDiag(diag: OssCheckResult): string {
+export function hintFromDiag(diag: OssCheckResult): string {
   if (diag.ok) return 'OSS 连接正常'
   const code = String(diag.code ?? '')
   const detail = [

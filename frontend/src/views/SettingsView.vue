@@ -8,6 +8,7 @@ import { useStatsStore } from '@/stores/stats'
 import { api } from '@/api/client'
 import type { NotifyPrefs } from '@/api/client'
 import { logAudit, safeDetail } from '@/utils/audit'
+import { hintFromDiag } from '@/utils/ossDiag'
 import type { CredFields } from '@/types'
 
 const auth = useAuthStore()
@@ -56,14 +57,14 @@ async function setNotifyPref(key: 'login_success' | 'login_failed', val: boolean
 
 const mobileActions = inject<{ title: string } | null>('mobile-actions', null)
 
-const FIELDS: { key: keyof CredFields; label: string; hint?: string }[] = [
+const FIELDS: { key: keyof CredFields; label: string; hint?: string; optional?: boolean }[] = [
   { key: 'ossAk', label: 'OSS AccessKey', hint: 'RAM 子账号 AccessKey' },
   { key: 'ossSk', label: 'OSS SecretKey', hint: 'RAM 子账号 SecretKey' },
   { key: 'bucket', label: 'OSS Bucket 名称' },
   { key: 'endpoint', label: 'OSS Endpoint', hint: 'S3 兼容地址：oss-cn-beijing.aliyuncs.com / cos.ap-shanghai.myqcloud.com / obs.cn-north-4.myhuaweicloud.com / MinIO' },
-  { key: 'smtpUser', label: '发件邮箱 (QQ)' },
-  { key: 'smtpPass', label: 'SMTP 授权码', hint: 'QQ 邮箱设置 → 账号 → 开启 SMTP 获取' },
-  { key: 'notifyEmail', label: '收件邮箱', hint: '默认同发件邮箱，可独立填写' },
+  { key: 'smtpUser', label: '发件邮箱 (QQ)', hint: '可留空，留空则不发送邮件', optional: true },
+  { key: 'smtpPass', label: 'SMTP 授权码', hint: 'QQ 邮箱设置 → 账号 → 开启 SMTP 获取；可留空', optional: true },
+  { key: 'notifyEmail', label: '收件邮箱', hint: '默认同发件邮箱，可独立填写；可留空', optional: true },
 ]
 
 const form = reactive<Record<keyof CredFields, string>>({
@@ -156,11 +157,68 @@ async function changePassword() {
   }
 }
 
+/** OSS 配置测试：用表单当前填写的 AK/SK/Bucket/Endpoint 调用后端直连诊断（绕过 CORS），
+ *  返回真实错误码（如 NoSuchBucket / SignatureDoesNotMatch）。AK/SK 仅用于本次诊断，不落库、不打印。 */
+const ossTesting = ref(false)
+const ossTestMsg = ref<{ ok: boolean; text: string } | null>(null)
+
+async function testOss() {
+  ossTestMsg.value = null
+  const ak = form.ossAk.trim()
+  const sk = form.ossSk.trim()
+  const bucket = form.bucket.trim()
+  let endpoint = form.endpoint.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '')
+  if (!ak || !sk || !bucket || !endpoint) {
+    ossTestMsg.value = { ok: false, text: '请先填写 OSS AccessKey、SecretKey、Bucket 与 Endpoint' }
+    return
+  }
+  if (!/^[a-zA-Z0-9.-]+(?::\d{1,5})?(?:\/[^\s]*)?$/.test(endpoint)) {
+    ossTestMsg.value = { ok: false, text: 'OSS Endpoint 格式不正确，请输入存储服务地址，如 cos.ap-shanghai.myqcloud.com' }
+    return
+  }
+  endpoint = form.endpoint.trim()
+  // 后端 oss-check 出于 SSRF 防护只对“HTTPS + 公网域名（无端口、非 IP/内网）”执行在线探测；
+  // 自建 MinIO / 内网 / http 明文等场景无法在线测试，先给出说明，避免返回晦涩的 422 校验错误。
+  const raw = endpoint
+  const scheme = raw.toLowerCase().match(/^https?:\/\//)?.[0] ?? ''
+  const hostRaw = raw.slice(scheme.length).split('/')[0]
+  const host = hostRaw.replace(/^\[|\]$/g, '')
+  const hasHttp = scheme.startsWith('http:')
+  const hasPort = /:\d{1,5}$/.test(hostRaw)
+  const isIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || /^[0-9a-fA-F:]+$/.test(host)
+  const isLocal = host === 'localhost' || host.endsWith('.local') || host.endsWith('.internal')
+  if (hasHttp || hasPort || isIp || isLocal) {
+    const why = hasHttp ? '当前为 http 明文地址' : hasPort ? '当前地址带端口' : isIp ? '当前为 IP 地址' : '当前为内网/本机地址'
+    ossTestMsg.value = {
+      ok: false,
+      text: `${why}，后端出于安全限制（防 SSRF）只对 HTTPS 公网域名执行在线探测，无法在线测试。请确认保存后实际读写是否正常。`,
+    }
+    return
+  }
+  ossTesting.value = true
+  logAudit('测试OSS配置', safeDetail('点击测试 OSS 配置连接'))
+  try {
+    const diag = await api.checkOss({ oss_ak: ak, oss_sk: sk, bucket, endpoint })
+    const ok = !!diag.ok
+    ossTestMsg.value = {
+      ok,
+      text: ok ? 'OSS 连接正常，配置可用 ✅' : hintFromDiag(diag),
+    }
+    ui.toast(ok ? 'OSS 配置测试通过' : 'OSS 配置测试失败', ok ? undefined : 'error')
+  } catch (e) {
+    ossTestMsg.value = { ok: false, text: (e as Error).message || '测试失败，请稍后再试' }
+    ui.toast('OSS 配置测试失败', 'error')
+  } finally {
+    ossTesting.value = false
+  }
+}
+
 async function save() {
   err.value = ''
-  // 收件邮箱默认同发件邮箱：必须在必填校验之前，否则空 notifyEmail 会直接报必填错误，默认逻辑永不执行（BUG-14）
+  // 收件邮箱默认同发件邮箱：必须在提交之前补默认，避免空 notifyEmail 时后端收到空收件人
   if (!form.notifyEmail) form.notifyEmail = form.smtpUser
-  const missing = FIELDS.filter((f) => !form[f.key].trim())
+  // 发件邮箱 / SMTP 授权码 / 收件邮箱为可选项（optional），留空 = 不配置邮件
+  const missing = FIELDS.filter((f) => !f.optional && !form[f.key].trim())
   if (missing.length) {
     err.value = `请填写：${missing.map((f) => f.label).join('、')}`
     return
@@ -255,11 +313,24 @@ async function save() {
               {{ visible[f.key] ? '隐藏' : '显示' }}
             </button>
           </div>
+          <div v-if="f.key === 'endpoint'" class="pt-1">
+            <button
+              type="button"
+              class="w-full py-2.5 rounded-lg text-sm font-medium border border-brand text-brand hover:bg-brand/5 disabled:opacity-60"
+              :disabled="ossTesting || busy"
+              @click="testOss"
+            >
+              {{ ossTesting ? '测试中…' : '测试 OSS 配置' }}
+            </button>
+            <div v-if="ossTestMsg" class="mt-2 text-sm whitespace-pre-wrap" :class="ossTestMsg.ok ? 'text-green-600' : 'text-red-500'">
+              {{ ossTestMsg.text }}
+            </div>
+          </div>
         </div>
 
         <div v-if="err" class="text-sm text-red-500">{{ err }}</div>
         <div class="text-[11px] text-slate-400 leading-relaxed">
-          保存后 OSS AK/SK/Bucket/Endpoint 仅以密文存于服务器，永不可被服务器解密；SMTP 授权码与收件邮箱将明文发送给后端用于后端离线提醒（服务器沦陷仅影响邮箱，不影响 OSS 数据）。
+          保存后 OSS AK/SK/Bucket/Endpoint 仅以密文存于服务器，永不可被服务器解密；SMTP 授权码与收件邮箱将明文发送给后端用于后端离线提醒（服务器沦陷仅影响邮箱，不影响 OSS 数据）。发件邮箱、SMTP 授权码、收件邮箱均可留空，留空则不会发送邮件提醒与安全通知。
         </div>
 
         <button

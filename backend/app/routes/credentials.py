@@ -59,19 +59,26 @@ def update_credentials(
             "UPDATE users SET encrypted_creds=?, creds_updated_at=? WHERE username=?",
             (body.encrypted_creds, now, username),
         )
-        if body.smtp_plain:
-            conn.execute(
-                """
-                INSERT INTO smtp_creds (username, smtp_user, smtp_pass, notify_email, updated_at)
-                VALUES (?,?,?,?,?)
-                ON CONFLICT(username) DO UPDATE SET
-                    smtp_user=excluded.smtp_user,
-                    smtp_pass=excluded.smtp_pass,
-                    notify_email=excluded.notify_email,
-                    updated_at=excluded.updated_at
-                """,
-                (username, body.smtp_plain.smtp_user, body.smtp_plain.smtp_pass, body.smtp_plain.notify_email, now),
-            )
+        if body.smtp_plain is not None:
+            # 发件邮箱 / SMTP 授权码 / 收件邮箱均允许为空：三项全空 = 未配置邮件，
+            # 删除旧配置（不再发提醒/安全通知），避免残留旧邮箱继续发信；
+            # 全部非空才落库；任一项为空视为未配置（全有或全无，避免存出残缺配置）。
+            smtp = body.smtp_plain
+            if smtp.smtp_user and smtp.smtp_pass and smtp.notify_email:
+                conn.execute(
+                    """
+                    INSERT INTO smtp_creds (username, smtp_user, smtp_pass, notify_email, updated_at)
+                    VALUES (?,?,?,?,?)
+                    ON CONFLICT(username) DO UPDATE SET
+                        smtp_user=excluded.smtp_user,
+                        smtp_pass=excluded.smtp_pass,
+                        notify_email=excluded.notify_email,
+                        updated_at=excluded.updated_at
+                    """,
+                    (username, smtp.smtp_user, smtp.smtp_pass, smtp.notify_email, now),
+                )
+            else:
+                conn.execute("DELETE FROM smtp_creds WHERE username=?", (username,))
     if old_smtp and old_smtp.get("notify_email"):
         # 用修改前的旧 SMTP 配置发“临终”邮件（响应后异步发送，不影响保存响应速度）
         background_tasks.add_task(notify_cred_change_email, username, old_smtp, ip, ua)
