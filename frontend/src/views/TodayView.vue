@@ -17,6 +17,7 @@ import { pinOverdueFirst } from '@/utils/task'
 import type { Subtask, Task } from '@/types'
 import { useSync } from '@/composables/useSync'
 import { useNow } from '@/composables/useNow'
+import { taskCompleteFeedback, vibrateSubtaskComplete } from '@/utils/taskFeedback'
 
 const auth = useAuthStore()
 const projects = useProjectsStore()
@@ -224,6 +225,7 @@ async function onToggle(id: string) {
   const completing = !!t && t.status !== 'completed'
   const ok = await tasks.toggleCompleteConfirmed(id)
   if (!ok) return
+  if (completing) taskCompleteFeedback()
   ui.toast(completing ? '任务已完成，已同步到服务端' : '已取消完成，已同步到服务端')
 }
 
@@ -247,7 +249,11 @@ function onSavedSubtask() {
 }
 
 function onToggleSubtask(taskId: string, subId: string) {
+  const t = tasks.all.find((x) => x.id === taskId)
+  const sub = t?.subtasks?.find((s) => s.id === subId)
+  const completing = !!sub && !sub.completed
   tasks.toggleSubtask(taskId, subId)
+  if (completing) void vibrateSubtaskComplete()
 }
 
 function onRemoveSubtask(taskId: string, subId: string) {

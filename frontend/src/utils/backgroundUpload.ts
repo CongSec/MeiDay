@@ -93,8 +93,9 @@ function emitGlobal() {
 function notify(uid: string, item: BackgroundUploadState) {
   const set = listeners.get(uid)
   if (set) for (const fn of set) fn(item)
-}
+  // 每次状态变化都刷新全局提示条，避免上传完成后提示条不消失（原来挂在函数外的 emitGlobal 只在加载时执行一次）
   emitGlobal()
+}
 
 function nextPending(): BackgroundUploadState | undefined {
   for (const item of items.values()) {
@@ -289,6 +290,28 @@ export function getActiveUploadCount(uid: string): number {
     if (item && !item.cancelled && (item.state === 'pending' || item.state === 'uploading')) n++
   }
   return n
+}
+
+/** 会话内正在排队 / 上传中的文件（弹窗附件区据此显示“等待上传…/正在上传…”行） */
+export interface InFlightUpload {
+  /** 上传项唯一 id（与 BackgroundUploadItem.id 一致） */
+  id: string
+  fileName: string
+  size: number
+  state: "pending" | "uploading"
+}
+
+export function getSessionInflight(uid: string): InFlightUpload[] {
+  const ids = byUid.get(uid)
+  if (!ids?.size) return []
+  const out: InFlightUpload[] = []
+  for (const id of ids) {
+    const item = items.get(id)
+    if (item && !item.cancelled && (item.state === "pending" || item.state === "uploading")) {
+      out.push({ id: item.id, fileName: item.file.name, size: item.file.size, state: item.state })
+    }
+  }
+  return out
 }
 
 /** 订阅某个会话的上传状态变化（弹窗用于把完成的上传加入附件展示列表） */

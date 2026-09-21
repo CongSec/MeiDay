@@ -1,6 +1,30 @@
-import { createOssClient, paths } from './oss'
+import { createOssClient, describeOssError, paths } from './oss'
 import { nowIso } from './time'
 import type { AttachmentMeta, CredFields } from '@/types'
+
+/** 单个附件上传的总超时：防止 OSS 请求因弱网/挂起而无限等待，导致“一直显示正在上传中” */
+const UPLOAD_TIMEOUT_MS = 5 * 60 * 1000
+
+function isTimeoutError(e: unknown): boolean {
+  return e instanceof Error && /上传超时/.test(e.message)
+}
+
+/** 给 promise 加超时：超时后 reject（底层请求可能仍在进行，失败不影响业务） */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`上传超时（${Math.round(ms / 1000)} 秒内无响应）`)), ms)
+    promise.then(
+      (v) => {
+        clearTimeout(timer)
+        resolve(v)
+      },
+      (e) => {
+        clearTimeout(timer)
+        reject(e)
+      },
+    )
+  })
+}
 
 /** 上传一个附件到用户 OSS：浏览器直传（不经服务器），原始字节不加密；
  *  元数据（id/名称/大小/类型/OSS key）存于任务/子任务 JSON。 */
@@ -14,7 +38,12 @@ export async function uploadAttachment(
   const client = await createOssClient(creds)
   const key = paths.attachment(username, taskId, id)
   // 原始文件直传，Content-Type 保持文件原始类型（便于直接预览 / 下载）
-  await client.put(key, file)
+  // 加总超时与统一错误文案：避免弱网/挂起时一直停在“上传中”
+  try {
+    await withTimeout(client.put(key, file), UPLOAD_TIMEOUT_MS)
+  } catch (e) {
+    throw new Error(isTimeoutError(e) ? "附件上传超时，请检查网络后重试" : describeOssError(e))
+  }
   return {
     id,
     name: file.name,

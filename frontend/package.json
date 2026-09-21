@@ -16,6 +16,7 @@
   "dependencies": {
     "@capacitor/android": "^8.5.0",
     "@capacitor/core": "^8.5.0",
+    "@capacitor/haptics": "^8.0.2",
     "aws4fetch": "^1.0.20",
     "jszip": "^3.10.1",
     "pinia": "^3.0.3",

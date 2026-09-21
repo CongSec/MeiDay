@@ -6,7 +6,8 @@ import { useTasksStore } from '@/stores/tasks'
 import { fromLocalInput, nowIso, toLocalInput, todayKey } from '@/utils/time'
 import { useUiStore } from '@/stores/ui'
 import { deleteAttachments, downloadAttachment, formatSize, isPreviewable } from '@/utils/attachments'
-import { cancelSessionUploads, cancelUploadByMetaId, commitUploads, enqueueUploads, getActiveUploadCount, subscribeUploads, type BackgroundUploadState } from '@/utils/backgroundUpload'
+import { base64ToFile, imageFileName, imageFingerprint, MAX_SHOWN_IMAGES, readRecentImages, type RecentImageData } from '@/utils/recentImages'
+import { cancelSessionUploads, cancelUploadByMetaId, commitUploads, enqueueUploads, getActiveUploadCount, getSessionInflight, subscribeUploads, type BackgroundUploadState, type InFlightUpload } from '@/utils/backgroundUpload'
 import AttachmentPreviewModal from './AttachmentPreviewModal.vue'
 import { ensureLegalCalendar } from '@/utils/legalWorkday'
 import { currentOrNextOccurrence, firstOccurrenceDate, isNewStyleRepeat } from '@/utils/repeat'
@@ -155,6 +156,8 @@ const savedFlag = ref(false)
 const saving = ref(false)
 const uploading = ref(false)
 const activeUploadCount = ref(0)
+/** 本次打开弹窗中正在排队 / 上传中的文件（附件区显示“等待上传…/正在上传…”行） */
+const inflightUploads = ref<InFlightUpload[]>([])
 /** 附件后台上传队列的会话标识：每次打开弹窗一个新会话（选择文件即入队上传，保存不等待） */
 const sessionUid = ref('')
 let unsubUploads: (() => void) | null = null
@@ -162,6 +165,8 @@ let unsubUploads: (() => void) | null = null
 const localSubtaskId = ref('')
 const uploadErr = ref('')
 const previewMeta = ref<AttachmentMeta | null>(null)
+/** 附件区小提示条候选：相册最近新增图片（截图/照片），勾选后加入附件列表并移除 */
+const recentImageOffers = ref<RecentImageData[]>([])
 const fileInput = ref<HTMLInputElement | null>(null)
 /** 描述文本框引用：内容变多时自动增高 */
 const descriptionRef = ref<HTMLTextAreaElement | null>(null)
@@ -182,7 +187,11 @@ function autoResizeDescription() {
 watch(
   () => props.open,
   (v) => {
-    if (!v) return
+    if (!v) {
+      recentImageOffers.value = []
+      inflightUploads.value = []
+      return
+    }
     // 新会话：重置后台上传队列订阅（旧会话已由保存/取消清理，这里只换订阅）
     sessionUid.value = crypto.randomUUID()
     unsubUploads?.()
@@ -232,6 +241,8 @@ watch(
     // 新建任务/子任务：光标默认聚焦到名称输入框；编辑已有任务时不自动聚焦
     const isCreating = isSub ? !s : !t
     if (isCreating) void nextTick(() => nameInputRef.value?.focus())
+    // App 端：检测相册最近新增图片（截图/照片），新建/编辑任务、新建子任务都会提示
+    void offerRecentImages()
   },
 )
 
@@ -358,7 +369,7 @@ function uploadFiles(files: File[]): boolean {
     // BUG-28: 限制附件大小与数量，避免大文件全量 base64 进内存导致浏览器卡死
     const oversized = files.find((f) => f.size > MAX_ATTACH_SIZE)
     if (oversized) throw new Error(`附件「${oversized.name}」超过 50MB 上限，请压缩后重试`)
-    if (attachments.value.length + files.length > MAX_ATTACH_COUNT) {
+    if (attachments.value.length + inflightUploads.value.length + files.length > MAX_ATTACH_COUNT) {
       throw new Error(`单个任务最多 ${MAX_ATTACH_COUNT} 个附件`)
     }
     // 选中的文件立即进入后台队列上传（不阻塞弹窗操作）；保存任务时未传完的部分由
@@ -409,6 +420,41 @@ function pasteImagesToAttachments(e: ClipboardEvent) {
   }
 }
 
+/** 是否为“已在附件里”的图片：相册图片没有稳定 id，用字节大小近似判断（重编码后同源图片大小一致） */
+function isImageAlreadyAttached(item: RecentImageData): boolean {
+  return attachments.value.some((a) => a.type.startsWith('image/') && a.size === item.size)
+}
+
+/** 打开任务弹窗时：App 端读取相册最近新增图片，更新附件区小提示条候选（已作为附件的自动排除） */
+async function offerRecentImages() {
+  if (!auth.creds || !auth.username) return
+  const res = await readRecentImages()
+  if (res.status === 'denied') {
+    ui.toast('未获得相册读取权限，无法识别最近的图片')
+    return
+  }
+  if (res.status !== 'ok') return
+  recentImageOffers.value = res.items.filter((it) => !isImageAlreadyAttached(it))
+}
+
+/** 附件列表变化时：若某张候选图已成为附件（大小匹配），从提示条移除，避免重复添加 */
+watch(
+  attachments,
+  () => {
+    recentImageOffers.value = recentImageOffers.value.filter((it) => !isImageAlreadyAttached(it))
+  },
+  { deep: true },
+)
+
+/** 点击小缩略图：把图片加入附件列表（与手动选附件一致，随「保存」一起提交上传） */
+function onCheckRecentImage(item: RecentImageData) {
+  if (!recentImageOffers.value.includes(item)) return
+  if (uploadFiles([base64ToFile(item, imageFileName(item.mime))])) {
+    recentImageOffers.value = recentImageOffers.value.filter((x) => x !== item)
+    ui.toast(`已将「${item.name}」添加到附件`)
+  }
+}
+
 /** 拖文件到弹窗：松开时把文件上传到附件（与文件选择共用校验与上传队列） */
 function onDragEnter() {
   dragDepth++
@@ -439,6 +485,7 @@ function onBackgroundUpload(item: BackgroundUploadState) {
 }
 
 function refreshUploading() {
+  inflightUploads.value = getSessionInflight(sessionUid.value)
   activeUploadCount.value = getActiveUploadCount(sessionUid.value)
   uploading.value = activeUploadCount.value > 0
 }
@@ -998,8 +1045,43 @@ onUnmounted(() => {
             </button>
           </div>
           <input ref="fileInput" type="file" multiple class="hidden" @change="onPickFiles" />
+          <!-- 附件区小提示条：相册最近新增图片（截图/照片），点击缩略图即加入附件列表 -->
+          <div
+            v-if="recentImageOffers.length"
+            class="mb-1 flex flex-wrap items-center gap-1.5 rounded-lg border border-brand/30 bg-brand/5 px-2 py-1.5"
+          >
+            <span class="shrink-0 text-xs text-slate-500">检测到 {{ recentImageOffers.length }} 张新图片：</span>
+            <button
+              v-for="item in recentImageOffers.slice(0, MAX_SHOWN_IMAGES)"
+              :key="imageFingerprint(item)"
+              type="button"
+              class="shrink-0 cursor-pointer overflow-hidden rounded-md border border-slate-200 transition hover:ring-2 hover:ring-brand"
+              :title="`${item.name}（${formatSize(item.size)}）`"
+              @click="onCheckRecentImage(item)"
+            >
+              <img
+                :src="`data:${item.mime};base64,${item.base64}`"
+                class="h-10 w-10 object-cover"
+                alt="新图片预览"
+              />
+            </button>
+            <span v-if="recentImageOffers.length > MAX_SHOWN_IMAGES" class="shrink-0 text-xs text-slate-400">
+              +{{ recentImageOffers.length - MAX_SHOWN_IMAGES }}
+            </span>
+          </div>
+
           <div v-if="uploadErr" class="text-xs text-red-500 mb-1">{{ uploadErr }}</div>
-          <div v-if="attachments.length" class="space-y-1">
+          <div v-if="attachments.length || inflightUploads.length" class="space-y-1">
+            <!-- 先上传后绑定：正在上传的附件先占位显示，完成后变更为正式附件 -->
+            <div
+              v-for="u in inflightUploads"
+              :key="u.id"
+              class="flex items-center gap-2 rounded-lg border border-brand/20 bg-brand/5 px-2.5 py-1 text-xs"
+            >
+              <span class="w-3.5 h-3.5 rounded-full border-2 border-brand/30 border-t-brand animate-spin shrink-0" />
+              <span class="flex-1 min-w-0 truncate text-slate-600" :title="u.fileName">{{ u.fileName }}</span>
+              <span class="shrink-0 text-brand">{{ u.state === "uploading" ? "正在上传…" : "等待上传…" }}</span>
+            </div>
             <div
               v-for="a in attachments"
               :key="a.id"
