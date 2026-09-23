@@ -3,14 +3,14 @@ import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useProjectsStore } from '@/stores/projects'
 import { useAuthStore } from '@/stores/auth'
 import { useTasksStore } from '@/stores/tasks'
-import { fromLocalInput, nowIso, toLocalInput, todayKey } from '@/utils/time'
+import { dateKeyOf, fromLocalInput, nowIso, toLocalInput, todayKey } from '@/utils/time'
 import { useUiStore } from '@/stores/ui'
 import { deleteAttachments, downloadAttachment, formatSize, isPreviewable } from '@/utils/attachments'
 import { base64ToFile, imageFileName, imageFingerprint, MAX_SHOWN_IMAGES, readRecentImages, type RecentImageData } from '@/utils/recentImages'
 import { cancelSessionUploads, cancelUploadByMetaId, commitUploads, enqueueUploads, getActiveUploadCount, getSessionInflight, subscribeUploads, type BackgroundUploadState, type InFlightUpload } from '@/utils/backgroundUpload'
 import AttachmentPreviewModal from './AttachmentPreviewModal.vue'
 import { ensureLegalCalendar } from '@/utils/legalWorkday'
-import { currentOrNextOccurrence, firstOccurrenceDate, isNewStyleRepeat } from '@/utils/repeat'
+import { currentOrNextOccurrence, firstOccurrenceDate, isNewStyleRepeat, repeatShapeEquals } from '@/utils/repeat'
 import { REPEAT_TYPES } from '@/types'
 import type { AttachmentMeta, RepeatRule, RepeatType, Subtask, Task } from '@/types'
 import AppIcon from '@/components/AppIcon.vue'
@@ -112,17 +112,6 @@ const isNewStyleRepeatTask = computed(() => {
   if (props.task?.repeat) return isNewStyleRepeat(props.task.repeat)
   return repeatEnabled.value
 })
-
-/** 重复规则的「形状」是否一致（不含 endAfter：改结束日期不重置相位） */
-function sameRepeatShape(a: RepeatRule, b: RepeatRule): boolean {
-  return (
-    a.type === b.type &&
-    a.interval === b.interval &&
-    JSON.stringify(a.weekdays ?? []) === JSON.stringify(b.weekdays ?? []) &&
-    (a.monthDay ?? 0) === (b.monthDay ?? 0) &&
-    JSON.stringify(a.dates ?? []) === JSON.stringify(b.dates ?? [])
-  )
-}
 
 /** 勾选/取消重复任务：提醒时间在「仅时分」与「完整日期时间」输入间切换 */
 watch(repeatEnabled, (v) => {
@@ -707,15 +696,19 @@ async function submit() {
     if (isNewModel) {
       const today = todayKey()
       // 编辑时重复规则形状未变则保留原 start（相位锚点），避免每次保存重置周期相位
-      const keepStart = wasNewStyle && !!oldRepeat?.start && sameRepeatShape(oldRepeat, repeat)
+      const keepStart = wasNewStyle && !!oldRepeat?.start && repeatShapeEquals(oldRepeat, repeat)
       repeat.start = keepStart ? oldRepeat!.start : firstOccurrenceDate(repeat, today)
     }
   }
   // 提醒时间：新模型只保留时分，日期取“当前/下一次重复日”（相位以 rule.start 为准）
+  // 编辑已有任务时沿用原任务日期（reminderTime/startTime/endTime），绝不把提醒拉回今天，
+  // 否则完成态源任务 / 未来模板编辑会被「今天」参与生成重复任务；仅新建任务才取今天/下一次重复日。
   let reminderTime: string | null = null
   if (reminder.value) {
     if (isNewModel && repeat) {
-      const occDate = currentOrNextOccurrence(repeat, repeat.start ?? todayKey(), todayKey())
+      const occDate = props.task
+        ? (dateKeyOf(props.task.reminderTime || props.task.startTime || props.task.endTime) || repeat.start || todayKey())
+        : currentOrNextOccurrence(repeat, repeat.start ?? todayKey(), todayKey())
       reminderTime = fromLocalInput(`${occDate}T${reminder.value}`)
     } else {
       // 兼容从重复模式切回遗留的纯时分值：补当天日期，避免存非法 ISO

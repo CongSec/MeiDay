@@ -174,6 +174,19 @@ export function firstOccurrenceDate(rule: RepeatRule, today: string): string {
   return currentOrNextOccurrence(rule, today, today)
 }
 
+/** 两个重复规则的「形状」是否一致（不含 start 相位锚点、不含 endAfter 结束日期）。
+ *  编辑时仅改内容 / 只改 start / 只改 endAfter 都不视为规则变化，避免每次保存重置周期相位；
+ *  改 type / interval / 星期 / 每月日 / 指定日期列表 视为规则变化，需按新规则重排后续出现。 */
+export function repeatShapeEquals(a: RepeatRule, b: RepeatRule): boolean {
+  return (
+    a.type === b.type &&
+    a.interval === b.interval &&
+    JSON.stringify(a.weekdays ?? []) === JSON.stringify(b.weekdays ?? []) &&
+    (a.monthDay ?? 0) === (b.monthDay ?? 0) &&
+    JSON.stringify(a.dates ?? []) === JSON.stringify(b.dates ?? [])
+  )
+}
+
 export function buildReminderPayload(task: Task): RepeatRule | undefined {
   const rule = task.repeat
   if (!rule) return undefined
@@ -204,10 +217,12 @@ export function shiftTaskTimes(task: Task, days: number): Task {
 }
 
 /**
- * 计算重复任务的下一次出现（模板 + 显示日期 dueDate）。
+ * 计算重复任务的「下一次出现」（模板 + 显示日期 dueDate）。
  * - 模板属性与源任务完全一致（名称/描述/项目/附件/子任务），仅日期按周期顺延；
- * - 过期多日自动跳过缺失周期，保留“今天”这一次；
- * - endAfter 已过或规则无法推进时返回 null。
+ * - 统一返回严格晚于 today 的最近一次重复日：今天已完成/物化的这一次绝不重复生成
+ *   （dates 取列表中 > today 的最近日期；新模型以 rule.start 为相位锚点求 > today 的下一次）；
+ * - 老模型（无 rule.start）从锚点逐周期推进并跳过缺失周期；
+ * - endAfter 已过或规则无法推进时返回 null（链条自然结束，不再生成模板）。
  */
 export function buildRepeatOccurrence(task: Task, today: string): { template: Task; dueDate: string } | null {
   const rule = task.repeat
@@ -244,9 +259,19 @@ export function buildRepeatOccurrence(task: Task, today: string): { template: Ta
   }
   if (!date) return null
   if (rule.endAfter && date > rule.endAfter) return null
+  return buildOccurrenceTemplate(task, rule, anchorKey, date)
+}
+
+/** 由（源任务、重复规则、相位锚日期、出现日）构造下一次出现的任务模板：
+ *  时间按 offset 顺延、子任务重置未完成、附件浅拷贝、规则原样保留。 */
+export function buildOccurrenceTemplate(
+  task: Task,
+  rule: RepeatRule,
+  anchorKey: string,
+  date: string,
+): { template: Task; dueDate: string } {
   const offset = diffDaysKey(anchorKey, date)
   const now = nowIso()
-  const shift = (iso: string | null): string | null => (iso ? addDays(iso, offset) : iso)
   const template: Task = {
     ...task,
     id: crypto.randomUUID(),

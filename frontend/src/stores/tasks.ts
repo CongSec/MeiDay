@@ -10,9 +10,9 @@ import { enrichOssError } from '@/utils/ossDiag'
 import { idbClearTrashUserCache, idbGet, idbListKeys, idbPut, idbDel } from '@/utils/idb'
 import { debounce, type Debounced } from '@/utils/debounce'
 import { queueSyncChange } from '@/utils/syncReport'
-import { dateKeyOf, diffDaysKey, nowIso, todayKey } from '@/utils/time'
+import { addDaysKey, dateKeyOf, diffDaysKey, nowIso, todayKey } from '@/utils/time'
 import { isTaskVisibleToday } from '@/utils/todayFilter'
-import { buildReminderPayload, buildRepeatOccurrence, nextRepeatDate, shiftTaskTimes } from '@/utils/repeat'
+import { buildOccurrenceTemplate, buildReminderPayload, buildRepeatOccurrence, nextRepeatDate, repeatShapeEquals, shiftTaskTimes } from '@/utils/repeat'
 import { api } from '@/api/client'
 import { logAudit, safeDetail } from '@/utils/audit'
 import { UNCATEGORIZED, type AttachmentMeta, type RepeatMaster, type Subtask, type Task } from '@/types'
@@ -470,6 +470,11 @@ export const useTasksStore = defineStore('tasks', {
       const set = new Set<string>()
       for (const id of projectIds) {
         if ((s.tasks[id] ?? []).some((t) => isTaskVisibleToday(t, today))) set.add(id)
+        // 重复模板：未来 30 天内到期（含今天）的模板也纳入「今日相关」。
+        // 否则「项目里只有重复模板、没有其他今日可见任务」时该项目不会被加载，
+        // 到期模板无法物化，今日/未来任务区也就不会出现对应任务（BUG）。
+        const last = addDaysKey(today, 30)
+        if ((s.repeats[id] ?? []).some((m) => m.dueDate <= last)) set.add(id)
       }
       return [...set]
     },
@@ -598,6 +603,12 @@ export const useTasksStore = defineStore('tasks', {
             this.trash[id] = mergeUnique(this.trash[id] ?? [], deleted)
             await idbPut('trash', trashCacheKey(auth.username, id), this.trash[id])
           }
+        }
+        // 重复模板：顺带读本地缓存（不标记 repeatsLoaded，加载项目时仍会从 OSS 刷新），
+        // 供 todayRelevantProjectIds 识别「只有模板到期」的项目，触发物化
+        if (this.repeats[id] === undefined) {
+          const cachedRepeats = await idbGet<RepeatMaster[]>('repeats', repeatsCacheKey(auth.username, id))
+          if (cachedRepeats) this.repeats[id] = cachedRepeats
         }
       }
       return cachedIds
@@ -1775,35 +1786,186 @@ export const useTasksStore = defineStore('tasks', {
         this._persistRepeats(pid)
       }
     },
-    /** 编辑源任务后同步重复模板：保持后续周期属性一致；移除重复则删除模板（周期提醒停止） */
-    _syncRepeatMasterForTask(task: Task) {
-      for (const pid of Object.keys(this.repeats)) {
-        const masters = this.repeats[pid] ?? []
-        const idx = masters.findIndex((m) => m.sourceTaskId === task.id)
-        if (idx < 0) continue
-        if (!task.repeat) {
-          // 重复规则被移除：删除模板（源任务若仍有一次性提醒，由 syncReminders 注册）
-          this.repeats[pid] = masters.filter((m) => m.id !== masters[idx].id)
-          this._persistRepeats(pid)
-          return
+    /** 编辑「时间胶囊」里的重复任务后同步其重复模板（确认式：立即落盘，成功才返回 true）：
+     *  与今日任务编辑（saveTaskConfirmed/upsert）和未来任务编辑（saveFutureOccurrenceConfirmed）
+     *  共用统一的 _syncRepeatMasterForTask，这里只负责落盘与失败回滚。
+     *  - 规则被移除 → 删除模板（周期停止）；
+     *  - 规则保留 → 更新/创建模板（严格晚于今天的下一次出现）；
+     *  - 今天的已完成任务保持完成、留在胶囊内不变，绝不额外生成一个「今天」的未完成任务。
+     *  跨项目移动时把旧项目里的同源模板一并清除（周期链迁移到新项目）。 */
+    async syncRepeatMasterForCapsuleTask(task: Task, prevProjectId?: string): Promise<boolean> {
+      const auth = useAuthStore()
+      const pid = task.projectId
+      if (!pid || pid === UNCATEGORIZED) return true
+      if (!this.repeatsLoaded.includes(pid)) await this.loadRepeats(pid)
+      // 可能受影响的模板项目 = 目标项目 + 旧项目 + 内存里存在该任务同源模板的项目，全部快照以便回滚
+      const snapPids = new Set<string>([pid])
+      if (prevProjectId && prevProjectId !== pid) snapPids.add(prevProjectId)
+      for (const [p, ms] of Object.entries(this.repeats)) {
+        if ((ms ?? []).some((m) => m.sourceTaskId === task.id)) snapPids.add(p)
+      }
+      const repeatsSnap = new Map<string, RepeatMaster[]>()
+      for (const p of snapPids) {
+        if (!this.repeatsLoaded.includes(p)) await this.loadRepeats(p)
+        repeatsSnap.set(p, (this.repeats[p] ?? []).slice())
+      }
+      // 统一同步逻辑（只改内存 + 返回触及项目）：已完成胶囊任务会创建/更新模板（> 今天），
+      // 今天的已完成记录保持完成，不会物化出「今天」的新任务
+      const touched = this._syncRepeatMasterForTask(task)
+      const results = await Promise.all([...touched].map((p) => this.saveRepeatsNow(p)))
+      if (results.every(Boolean)) {
+        this._syncReminders()
+        return true
+      }
+      // 失败回滚：恢复内存 + IDB，并尽力把已写入 OSS 的模板文件还原为保存前快照
+      for (const [p, list] of repeatsSnap) {
+        this.repeats[p] = list
+        await idbPut('repeats', repeatsCacheKey(auth.username, p), list)
+        await this.saveRepeats(p, list).catch(() => {})
+      }
+      return false
+    },
+    /**
+     * 统一「编辑任务」后的重复模板同步（今日任务 / 时间胶囊 / 未来任务三处共用，杜绝各自独立逻辑）：
+     * - 无 task.repeat → 删除 sourceTaskId === task.id 的全部模板（含旧项目残留，跨项目迁移时清旧项目）；
+     * - 有 task.repeat：
+     *   · 找到既有模板（opts.masterId 优先 / sourceTaskId === task.id）：
+     *     - 规则形状未变（repeatShapeEquals，不含 start/endAfter）→ 保留模板 dueDate/相位，
+     *       仅按新内容用 buildOccurrenceTemplate 重建（沿用原 template.id），周期相位不重置；
+     *     - 规则形状变化 / 老模型 → 按新规则重算「严格晚于今天」的下一次出现
+     *       （buildRepeatOccurrence 只取 > 今天，绝不把今天物化成新的未完成任务）：
+     *       有出现 → 替换模板（保留原 id/sourceTaskId）；无出现 / 结束日期已过 → 删除模板；
+     *   · 未找到模板：仅当任务已完成（时间胶囊/完成态源任务）或显式传入 masterId 时才创建，
+     *     活跃的待办任务不提前生成模板（完成时由 _flipComplete 生成，避免编辑普通任务就生成模板）；
+     * - 只改内存并返回触及的项目 id（调用方负责落盘，失败自行回滚）。
+     */
+    _syncRepeatMasterForTask(task: Task, opts?: { masterId?: string }): Set<string> {
+      const touched = new Set<string>()
+      const rule = task.repeat
+      if (!rule) {
+        // 移除重复：删除同源全部模板（跨项目迁移时一并清旧项目残留）
+        for (const pid of Object.keys(this.repeats)) {
+          const masters = this.repeats[pid] ?? []
+          if (!masters.some((m) => m.sourceTaskId === task.id)) continue
+          this.repeats[pid] = masters.filter((m) => m.sourceTaskId !== task.id)
+          touched.add(pid)
         }
-        const occ = buildRepeatOccurrence(task, todayKey())
-        if (!occ) {
-          this.repeats[pid] = masters.filter((m) => m.id !== masters[idx].id)
-          this._persistRepeats(pid)
-          return
+        return touched
+      }
+      const today = todayKey()
+      // 定位既有模板：未来任务编辑按 masterId（模板 id），其余按 sourceTaskId（源任务 id）
+      let pid: string | undefined
+      let idx = -1
+      const findMaster = (pred: (m: RepeatMaster) => boolean): { pid?: string; idx: number } => {
+        for (const k of Object.keys(this.repeats)) {
+          const i = (this.repeats[k] ?? []).findIndex(pred)
+          if (i >= 0) return { pid: k, idx: i }
         }
-        this.repeats[pid] = [...masters]
-        this.repeats[pid][idx] = {
-          ...masters[idx],
-          projectId: task.projectId,
-          dueDate: occ.dueDate,
-          template: occ.template,
+        return { idx: -1 }
+      }
+      if (opts?.masterId) {
+        const f = findMaster((m) => m.id === opts.masterId)
+        if (f.pid) {
+          pid = f.pid
+          idx = f.idx
+        }
+      }
+      if (!pid) {
+        const f = findMaster((m) => m.sourceTaskId === task.id)
+        if (f.pid) {
+          pid = f.pid
+          idx = f.idx
+        }
+      }
+      let targetPid = pid ?? task.projectId
+      if (!targetPid || targetPid === UNCATEGORIZED) return touched
+      // 跨项目迁移：既有模板位于其它项目（编辑时改了所属项目）时，先把模板从旧项目移到目标项目，
+      // 使今日任务 / 时间胶囊 / 未来任务三处编辑共用同一套「模板只跟源任务项目走」的语义，
+      // 避免旧项目残留模板导致「编辑后仍显示在旧项目 / 重复生成」。
+      const destPid = task.projectId && task.projectId !== UNCATEGORIZED ? task.projectId : targetPid
+      if (idx >= 0 && pid && destPid !== pid) {
+        const oldList = this.repeats[pid] ?? []
+        const moving = oldList[idx]
+        this.repeats[pid] = oldList.filter((m) => m.id !== moving.id)
+        touched.add(pid)
+        const destList = this.repeats[destPid] ?? []
+        const exist = destList.findIndex((m) => m.id === moving.id || m.sourceTaskId === task.id)
+        if (exist >= 0) {
+          destList[exist] = { ...moving, projectId: destPid, updatedAt: nowIso() }
+          idx = exist
+        } else {
+          destList.push({ ...moving, projectId: destPid, updatedAt: nowIso() })
+          idx = destList.length - 1
+        }
+        this.repeats[destPid] = destList
+        touched.add(destPid)
+        pid = destPid
+        targetPid = destPid
+      }
+      const masters = this.repeats[targetPid] ?? []
+      if (idx < 0) {
+        // 未找到既有模板：
+        // - 未来任务编辑（masterId）却找不到模板 → 模板已被删，忽略；
+        // - 未完成活跃任务 → 不提前生成（完成时由 _flipComplete 生成）；
+        // - 已完成任务（时间胶囊编辑 / 完成态源任务）→ 创建模板（严格 > 今天）
+        if (opts?.masterId) return touched
+        if (task.status !== 'completed') return touched
+        const occ = buildRepeatOccurrence(task, today)
+        if (!occ) return touched
+        const now = nowIso()
+        this.repeats[targetPid] = [
+          ...masters,
+          {
+            id: task.id,
+            projectId: targetPid,
+            sourceTaskId: task.id,
+            dueDate: occ.dueDate,
+            template: occ.template,
+            createdAt: now,
+            updatedAt: now,
+          },
+        ]
+        touched.add(targetPid)
+        return touched
+      }
+      const master = masters[idx]
+      const oldRule = master.template.repeat
+      if (oldRule && repeatShapeEquals(oldRule, rule)) {
+        // 规则形状未变：保留模板 dueDate / 相位，仅按新内容重建模板（沿用原 template.id 稳定 id）
+        const anchor =
+          task.reminderTime || task.endTime || task.startTime
+            ? dateKeyOf(task.reminderTime || task.endTime || task.startTime)
+            : (rule.start ?? master.dueDate)
+        const occ = buildOccurrenceTemplate(task, rule, anchor, master.dueDate)
+        const next = [...masters]
+        next[idx] = {
+          ...master,
+          projectId: targetPid,
+          template: { ...occ.template, id: master.template.id },
           updatedAt: nowIso(),
         }
-        this._persistRepeats(pid)
-        return
+        this.repeats[targetPid] = next
+        touched.add(targetPid)
+        return touched
       }
+      // 规则形状变化 / 老模型：按新规则重算「严格 > 今天」的下一次出现
+      const occ = buildRepeatOccurrence(task, today)
+      if (!occ) {
+        this.repeats[targetPid] = masters.filter((m) => m.id !== master.id)
+        touched.add(targetPid)
+        return touched
+      }
+      const next = [...masters]
+      next[idx] = {
+        ...master,
+        projectId: targetPid,
+        dueDate: occ.dueDate,
+        template: occ.template,
+        updatedAt: nowIso(),
+      }
+      this.repeats[targetPid] = next
+      touched.add(targetPid)
+      return touched
     },
     _syncReminders() {
       if (syncReminderTimer) window.clearTimeout(syncReminderTimer)
@@ -1910,8 +2072,11 @@ export const useTasksStore = defineStore('tasks', {
       }
       this.tasks[target] = list
       this._persist(target)
-      // 编辑源任务后同步重复模板：保持后续周期属性一致；移除重复则删除模板（周期提醒随之停止）
-      this._syncRepeatMasterForTask(task)
+      // 编辑源任务后同步重复模板（与时间胶囊 / 未来任务编辑同一套统一逻辑）：
+      // 保持后续周期属性一致；移除重复则删除模板（周期提醒随之停止）。
+      // 统一方法只改内存并返回触及项目，这里按原行为防抖落盘。
+      const touchedRepeats = this._syncRepeatMasterForTask(task)
+      for (const pid of touchedRepeats) this._persistRepeats(pid)
       logAudit(isNew ? '新增任务' : '修改任务', safeDetail(`任务ID：${task.id}，项目ID：${target}`))
     },
     /**
@@ -2359,13 +2524,25 @@ export const useTasksStore = defineStore('tasks', {
       }
       const tasksSnap = new Map<string, Task[]>()
       const repeatsSnap = new Map<string, RepeatMaster[]>()
+      const repeatsBefore = new Map<string, string>()
+      // 重复模板可能受影响的项目 = 本次保存涉及的项目 + 内存里已加载模板的所有项目
+      // （跨项目迁移 / 移除重复时会清掉旧项目里的同源模板），全部快照以便确认式落盘与失败回滚
+      const repeatsCandidates = new Set<string>([...touchPids, ...Object.keys(this.repeats)])
       for (const pid of touchPids) {
         tasksSnap.set(pid, (this.tasks[pid] ?? []).slice())
+      }
+      for (const pid of repeatsCandidates) {
         repeatsSnap.set(pid, (this.repeats[pid] ?? []).slice())
+        repeatsBefore.set(pid, JSON.stringify(this.repeats[pid] ?? []))
       }
       this.upsert(task)
-      const results = await Promise.all([...touchPids].map((pid) => this.saveProjectNow(pid)))
-      if (results.every(Boolean)) return true
+      const okTasks = (await Promise.all([...touchPids].map((pid) => this.saveProjectNow(pid)))).every(Boolean)
+      // 编辑重复任务 / 移除重复 / 新生成模板都会改 repeats：按确认式立即落盘，成功才返回 true
+      const changedRepeats = [...repeatsBefore.keys()].filter(
+        (pid) => JSON.stringify(this.repeats[pid] ?? []) !== repeatsBefore.get(pid),
+      )
+      const okRepeats = (await Promise.all(changedRepeats.map((pid) => this.saveRepeatsNow(pid)))).every(Boolean)
+      if (okTasks && okRepeats) return true
       // 失败回滚：恢复内存 + IDB，并尽力把已写入 OSS 的文件还原为保存前快照，
       // 避免“目标项目多了一条、源项目没删”的脏数据残留在远端（半成功写入无法靠内存回滚撤销）
       for (const [pid, list] of tasksSnap) {
@@ -2376,6 +2553,7 @@ export const useTasksStore = defineStore('tasks', {
       for (const [pid, list] of repeatsSnap) {
         this.repeats[pid] = list
         await idbPut('repeats', repeatsCacheKey(auth.username, pid), list)
+        await this.saveRepeats(pid, list).catch(() => {})
       }
       return false
     },
@@ -2474,7 +2652,9 @@ export const useTasksStore = defineStore('tasks', {
 
     /**
      * 确认式保存“未来任务”中的重复出现（模板编辑）：
-     * - 保留重复规则：只更新 repeats 中的模板内容并重算下一次出现日期，不落入主任务列表；
+     * - 保留重复规则：统一走 _syncRepeatMasterForTask（与今日任务 / 时间胶囊编辑同一套逻辑），
+     *   只更新 repeats 中的模板内容并重算下一次出现，不落入主任务列表；
+     *   今天的已完成源任务保持完成，绝不额外生成「今天」的新任务；
      * - 移除重复规则：删除模板，把本次出现转为普通一次性任务（upsert 到主列表）；
      * 立即写盘，全部成功才返回 true，失败回滚内存与 IDB 并返回 false。
      */
@@ -2497,20 +2677,14 @@ export const useTasksStore = defineStore('tasks', {
       if (idx < 0) return false
       normalizeTask(task)
       task.updatedAt = nowIso()
-      const master = masters[idx]
       if (!task.repeat) {
         // 移除重复：删除模板，本次出现转为普通一次性任务
         this.repeats[pid] = masters.filter((m) => m.id !== masterId)
         this._persistRepeats(pid)
         this.upsert(task)
       } else {
-        const dueDate = task.reminderTime || task.startTime || task.endTime
-          ? dateKeyOf(task.reminderTime || task.startTime || task.endTime)
-          : master.dueDate
-        const next = [...masters]
-        next[idx] = { ...master, template: task, dueDate, updatedAt: nowIso() }
-        this.repeats[pid] = next
-        this._persistRepeats(pid)
+        // 保留重复：统一同步逻辑（与今日任务 / 时间胶囊编辑一致），只改内存，下方统一落盘
+        this._syncRepeatMasterForTask(task, { masterId })
       }
       const okTasks = !task.repeat ? await this.saveProjectNow(pid) : true
       const okRepeats = await this.saveRepeatsNow(pid)
@@ -2606,10 +2780,15 @@ export const useTasksStore = defineStore('tasks', {
       if (sourcePid === undefined) return false
       const targetPid = task.projectId || sourcePid
       normalizeTask(task)
-      // 快照涉及项目（跨项目移动时新旧两个都要）
+      // 快照涉及项目（跨项目移动时新旧两个都要）；tasks 与 repeats 一并快照，
+      // 同步重复模板失败（或胶囊写盘失败）时统一回滚
+      const tasksSnap = new Map<string, Task[]>()
       const trashSnap = new Map<string, Task[]>()
+      const repeatsSnap = new Map<string, RepeatMaster[]>()
       for (const pid of new Set([sourcePid, targetPid])) {
+        tasksSnap.set(pid, (this.tasks[pid] ?? []).slice())
         trashSnap.set(pid, (this.trash[pid] ?? []).slice())
+        repeatsSnap.set(pid, (this.repeats[pid] ?? []).slice())
       }
       // 从源项目胶囊移除旧任务，写入目标项目胶囊（同项目时即原位替换）
       this.trash[sourcePid] = (this.trash[sourcePid] ?? []).filter((t) => t.id !== task.id)
@@ -2629,12 +2808,24 @@ export const useTasksStore = defineStore('tasks', {
             /* 枚举失败不影响保存结果 */
           }
         }
-        logAudit('编辑时间胶囊任务', safeDetail(`任务ID：${task.id}，项目ID：${targetPid}`))
-        return true
+        // 同步重复模板：改到今天/未来 → 今日/未来任务区立即出现对应任务；模板保存失败则整体回滚
+        const okRepeats = await this.syncRepeatMasterForCapsuleTask(task, sourcePid === targetPid ? undefined : sourcePid)
+        if (okRepeats) {
+          logAudit('编辑时间胶囊任务', safeDetail(`任务ID：${task.id}，项目ID：${targetPid}`))
+          return true
+        }
+      }
+      for (const [pid, list] of tasksSnap) {
+        this.tasks[pid] = list
+        await idbPut('tasks', taskCacheKey(auth.username, pid), list)
       }
       for (const [pid, list] of trashSnap) {
         this.trash[pid] = list
         await idbPut('trash', trashCacheKey(auth.username, pid), list)
+      }
+      for (const [pid, list] of repeatsSnap) {
+        this.repeats[pid] = list
+        await idbPut('repeats', repeatsCacheKey(auth.username, pid), list)
       }
       return false
     },
