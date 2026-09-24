@@ -400,6 +400,7 @@ async function confirmDelete() {
               :key="ft.task.id"
               :task="ft.task"
               :project="projectOf(ft.task.projectId)"
+              :future-date="ft.date"
               future
               warm
               @edit="openFutureEdit"

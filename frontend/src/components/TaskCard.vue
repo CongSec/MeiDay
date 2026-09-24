@@ -11,7 +11,7 @@ import { useTasksStore } from '@/stores/tasks'
 import { sortSubtasks } from '@/utils/task'
 import AppIcon from '@/components/AppIcon.vue'
 
-const props = defineProps<{ task: Task; project?: Project; future?: boolean; warm?: boolean }>()
+const props = defineProps<{ task: Task; project?: Project; future?: boolean; warm?: boolean; futureDate?: string }>()
 const emit = defineEmits<{
   edit: [Task]
   toggle: [string]
@@ -70,6 +70,14 @@ function timeStr(t: string) {
 function dateStr(t: string) {
   return t.slice(5, 10)
 }
+
+/** 未来任务「下一次出现」标签：MM-DD 周X（如 09-29 周二） */
+const WEEKDAY_NAMES = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+const futureDateLabel = computed(() => {
+  if (!props.futureDate) return ''
+  const wd = new Date(`${props.futureDate}T00:00:00+08:00`).getDay()
+  return `${props.futureDate.slice(5, 10)} ${WEEKDAY_NAMES[wd]}`
+})
 
 /** 子任务是否已过提醒时间（未完成） */
 function subOverdue(s: Subtask) {
@@ -158,12 +166,17 @@ function onSubDragEnd() {
         </div>
         <p v-if="task.description" class="mt-1 text-xs text-slate-500 clamp-2">{{ task.description }}</p>
         <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1.5 text-[11px] text-slate-400">
-          <span v-if="task.startTime" class="inline-flex items-center gap-1">
-            <AppIcon name="calendar" :size="12" />{{ dateStr(task.startTime) }}
+          <span v-if="futureDate" class="inline-flex items-center gap-1" :class="warm ? 'text-amber-600' : 'text-brand/90'" title="下一次出现时间">
+            <AppIcon name="calendarFuture" :size="12" />下次 {{ futureDateLabel }}
           </span>
-          <span v-if="task.endTime" class="inline-flex items-center gap-1">
-            <AppIcon name="clock" :size="12" />{{ dateStr(task.endTime) }}
-          </span>
+          <template v-else>
+            <span v-if="task.startTime" class="inline-flex items-center gap-1">
+              <AppIcon name="calendar" :size="12" />{{ dateStr(task.startTime) }}
+            </span>
+            <span v-if="task.endTime" class="inline-flex items-center gap-1">
+              <AppIcon name="clock" :size="12" />{{ dateStr(task.endTime) }}
+            </span>
+          </template>
           <span v-if="task.reminderTime" class="inline-flex items-center gap-1">
             <AppIcon name="bell" :size="12" />{{ timeStr(task.reminderTime) }}
           </span>
