@@ -30,6 +30,18 @@ const navClass = (active: boolean) =>
 const navTodayClass = computed(() => navClass(route.path === '/today'))
 const navSettingsClass = computed(() => navClass(route.path === '/settings'))
 
+/** 侧栏「今日任务」：无论当前在哪个页面，点击都进入今日任务页并整页刷新。
+ *  浏览器卡住 / 全屏无刷新按钮时，点这里就等于点浏览器的刷新按钮；
+ *  即使已在今日页，也整页刷新以拉取最新数据（未来任务 / 日历图随之更新）。
+ *  hash 路由下刷新后 URL hash 仍是 #/today，即落在今日任务页。 */
+async function goToday() {
+  ui.closeDrawer()
+  if (route.path !== '/today') {
+    await router.push('/today')
+  }
+  window.location.reload()
+}
+
 async function onLogout() {
   await auth.logout()
   ui.closeDrawer()
@@ -102,7 +114,7 @@ function onActiveDragEnd() {
 
     <div class="flex-1 overflow-y-auto px-3 py-3">
       <div class="mb-1 text-xs text-slate-400 px-3">视图</div>
-      <router-link :to="'/today'" :class="navTodayClass" @click="ui.closeDrawer()">
+      <router-link :to="'/today'" :class="navTodayClass" @click.prevent="goToday">
         <span
           class="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-4 rounded-r-full bg-brand transition-opacity"
           :class="route.path === '/today' ? 'opacity-100' : 'opacity-0'"

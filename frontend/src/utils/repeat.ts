@@ -192,6 +192,26 @@ export function repeatShapeEquals(a: RepeatRule, b: RepeatRule): boolean {
   )
 }
 
+/** 从候选日期 date 起，跳过已被「单日处理」的重复日（repeatProcessed 中已 completed/deleted），
+ *  返回下一个仍未处理的重复日；无剩余可生成的重复日返回 null。
+ *  用于生成下一次出现时避免新模板 dueDate 落在已处理日上（否则未来任务区 / 日历图会把自己过滤掉，
+ *  表现为「完成今天的重复任务后下一次迟迟不出现，要多刷新几次才出现」）。 */
+export function skipProcessedRepeatDays(
+  rule: RepeatRule,
+  date: string,
+  processed?: Record<string, string>,
+): string | null {
+  if (!processed) return date
+  let d = date
+  let guard = 0
+  while (processed[d] && guard < 400) {
+    const nd = nextRepeatDate(rule, d)
+    if (!nd || nd <= d) return null
+    d = nd
+    guard++
+  }
+  return processed[d] ? null : d
+}
 export function buildReminderPayload(task: Task): RepeatRule | undefined {
   const rule = task.repeat
   if (!rule) return undefined
@@ -262,6 +282,11 @@ export function buildRepeatOccurrence(task: Task, today: string): { template: Ta
       }
     }
   }
+  if (!date) return null
+  // 跳过错过的 / 已单日处理（提前完成/入舱）的重复日：生成下一次出现时，dueDate 绝不落在
+  // repeatProcessed 上，否则新模板会把自己过滤掉——表现为「完成今天的重复任务后，
+  // 未来任务区 / 日历图的下一次迟迟不出现，要多刷新几次才出现」。
+  date = skipProcessedRepeatDays(rule, date, task.repeatProcessed)
   if (!date) return null
   if (rule.endAfter && date > rule.endAfter) return null
   return buildOccurrenceTemplate(task, rule, anchorKey, date)

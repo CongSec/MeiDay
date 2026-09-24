@@ -12,7 +12,7 @@ import { debounce, type Debounced } from '@/utils/debounce'
 import { queueSyncChange } from '@/utils/syncReport'
 import { addDaysKey, dateKeyOf, diffDaysKey, nowIso, todayKey } from '@/utils/time'
 import { isTaskVisibleToday } from '@/utils/todayFilter'
-import { buildOccurrenceTemplate, buildReminderPayload, buildRepeatOccurrence, nextRepeatDate, repeatShapeEquals, rootIdOf, shiftTaskTimes } from '@/utils/repeat'
+import { buildOccurrenceTemplate, buildReminderPayload, buildRepeatOccurrence, nextRepeatDate, repeatShapeEquals, rootIdOf, shiftTaskTimes, skipProcessedRepeatDays } from '@/utils/repeat'
 import { api } from '@/api/client'
 import { logAudit, safeDetail } from '@/utils/audit'
 import { UNCATEGORIZED, type AttachmentMeta, type RepeatMaster, type Subtask, type Task } from '@/types'
@@ -1949,15 +1949,29 @@ export const useTasksStore = defineStore('tasks', {
       const oldRule = master.template.repeat
       if (oldRule && repeatShapeEquals(oldRule, rule)) {
         // 规则形状未变：保留模板 dueDate / 相位，仅按新内容重建模板（沿用原 template.id 稳定 id）
+        // 若既有 dueDate 已被单日处理（提前完成/入舱），推进到下一个未处理重复日，
+        // 避免重建后的模板再次把自己过滤掉（未来任务区 / 日历图看不到下一次）。
+        let dueDate = master.dueDate
+        if (task.repeatProcessed?.[dueDate]) {
+          const advanced = skipProcessedRepeatDays(rule, dueDate, task.repeatProcessed)
+          if (!advanced || (rule.endAfter && advanced > rule.endAfter)) {
+            // 剩余重复日全部已处理或已过结束日：删除模板，链条自然结束
+            this.repeats[targetPid] = masters.filter((m) => m.id !== master.id)
+            touched.add(targetPid)
+            return touched
+          }
+          dueDate = advanced
+        }
         const anchor =
           task.reminderTime || task.endTime || task.startTime
             ? dateKeyOf(task.reminderTime || task.endTime || task.startTime)
-            : (rule.start ?? master.dueDate)
-        const occ = buildOccurrenceTemplate(task, rule, anchor, master.dueDate)
+            : (rule.start ?? dueDate)
+        const occ = buildOccurrenceTemplate(task, rule, anchor, dueDate)
         const next = [...masters]
         next[idx] = {
           ...master,
           projectId: targetPid,
+          dueDate,
           template: { ...occ.template, id: master.template.id },
           updatedAt: nowIso(),
         }
@@ -2879,6 +2893,30 @@ export const useTasksStore = defineStore('tasks', {
       }
       // 生成单日已删除记录（入回收站，按当天分片）
       const occTime = source.reminderTime ?? source.startTime ?? source.endTime ?? `${day}T00:00:00+08:00`
+      // 单日处理（入舱/删除）后，若该重复模板的 dueDate 恰好在已处理日上，立即推进到下一个未处理重复日：
+      // 否则未来任务区 / 日历图会一直看不到下一次，直到下次加载/同步触发物化才推进。
+      // 无剩余未处理重复日则删除模板（链条自然结束）。
+      if (masterPid !== undefined) {
+        const mlist = this.repeats[masterPid] ?? []
+        const mi = mlist.findIndex((m) => m.template.id === source.id)
+        if (mi >= 0 && source.repeatProcessed?.[mlist[mi].dueDate]) {
+          const mrule = source.repeat
+          const advanced = mrule
+            ? skipProcessedRepeatDays(mrule, mlist[mi].dueDate, source.repeatProcessed)
+            : null
+          if (advanced && !(mrule?.endAfter && advanced > mrule.endAfter)) {
+            mlist[mi] = {
+              ...mlist[mi],
+              dueDate: advanced,
+              template: shiftTaskTimes(mlist[mi].template, diffDaysKey(mlist[mi].dueDate, advanced)),
+              updatedAt: nowIso(),
+            }
+          } else {
+            mlist.splice(mi, 1)
+          }
+          this.repeats[masterPid] = [...mlist]
+        }
+      }
       const deletedRecord = normalizeTask({
         ...source,
         id: `${rootId}::${day}`,
@@ -2984,6 +3022,30 @@ export const useTasksStore = defineStore('tasks', {
       }
       const occTime =
         source.reminderTime ?? source.startTime ?? source.endTime ?? `${day}T00:00:00+08:00`
+      // 单日处理后，若该重复模板的 dueDate 恰好在已处理日上，立即推进到下一个未处理重复日：
+      // 否则未来任务区 / 日历图会一直看不到下一次，直到下次加载/同步触发物化才推进
+      // （即用户感受到的「要多刷新几次才更新」）。无剩余未处理重复日则删除模板（链条自然结束）。
+      if (masterPid !== undefined) {
+        const mlist = this.repeats[masterPid] ?? []
+        const mi = mlist.findIndex((m) => m.template.id === source.id)
+        if (mi >= 0 && source.repeatProcessed?.[mlist[mi].dueDate]) {
+          const mrule = source.repeat
+          const advanced = mrule
+            ? skipProcessedRepeatDays(mrule, mlist[mi].dueDate, source.repeatProcessed)
+            : null
+          if (advanced && !(mrule?.endAfter && advanced > mrule.endAfter)) {
+            mlist[mi] = {
+              ...mlist[mi],
+              dueDate: advanced,
+              template: shiftTaskTimes(mlist[mi].template, diffDaysKey(mlist[mi].dueDate, advanced)),
+              updatedAt: nowIso(),
+            }
+          } else {
+            mlist.splice(mi, 1)
+          }
+          this.repeats[masterPid] = [...mlist]
+        }
+      }
       const completedRecord = normalizeTask({
         ...source,
         id: `${rootId}::${day}`,
