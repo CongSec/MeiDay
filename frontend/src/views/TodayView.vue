@@ -34,6 +34,8 @@ const deleteTarget = ref<Task | null>(null)
 const defaultStart = ref('')
 /** 正在编辑的重复模板对应的 master id（非模板编辑为 null） */
 const templateMasterId = ref<string | null>(null)
+/** 从「未来任务」卡打开编辑时记住对应那一天：存入时间胶囊只删除该天，不碰其它未来日 */
+const editFutureDate = ref<string | null>(null)
 
 /** 手机端头部「新建任务」由本页注册（随路由切换） */
 const mobileActions = inject<
@@ -207,13 +209,21 @@ function findMasterByTemplateId(taskId: string) {
   return undefined
 }
 
-function openEdit(task: Task) {
+function openEdit(task: Task, futureDate?: string | null) {
   templateMasterId.value = findMasterByTemplateId(task.id)?.id ?? null
   editing.value = task
+  // 未来任务卡：记住对应那一天，供「存入时间胶囊」单日删除（只删该天）
+  editFutureDate.value = futureDate ?? null
   // 主任务编辑：退出子任务模式，避免弹窗复用上次编辑的子任务内容
   subtaskParent.value = null
   editingSubtask.value = null
   modalOpen.value = true
+}
+
+/** 未来任务卡编辑：记录该卡对应的未来日期，存入时间胶囊时只处理那一天 */
+function openFutureEdit(task: Task) {
+  const ft = futureTasks.value.find((x) => x.task.id === task.id)
+  openEdit(task, ft?.date)
 }
 
 function onSaved() {
@@ -263,12 +273,22 @@ function onRemoveSubtask(taskId: string, subId: string) {
 function onDelete(id: string) {
   const t = tasks.all.find((x) => x.id === id)
   if (t) deleteTarget.value = t
+  else {
+    // 未来任务/重复模板未来出现（不在 tasks.all）：仅记录 id，
+    // 确认后由 store 解析并按「对应那一天」单日存入时间胶囊
+    deleteTarget.value = { id } as Task
+  }
 }
 
-/** 未来任务删除：普通未来任务或重复模板未来出现，统一解析后移入回收站。
- *  未来卡片可能来自重复模板（不在 tasks.all），仅记录 id，删除逻辑由 store 内部解析。 */
-function onFutureDelete(id: string) {
-  deleteTarget.value = (tasks.all.find((x) => x.id === id) ?? { id }) as Task
+/** 未来任务提前完成：只完成对应那一天（单日处理），不触碰其它未来出现与已完成历史日 */
+async function onFutureToggle(id: string) {
+  const ft = futureTasks.value.find((x) => x.task.id === id)
+  if (!ft) return
+  const ok = await tasks.completeFutureOccurrence(ft.task.id, ft.date)
+  if (ok) {
+    taskCompleteFeedback()
+    ui.toast('任务已完成')
+  }
 }
 
 async function confirmDelete() {
@@ -276,7 +296,8 @@ async function confirmDelete() {
   const t = deleteTarget.value
   // 确认按钮前端立即生效：关弹窗；保存结果由回显后的 toast 提示
   deleteTarget.value = null
-  const ok = await tasks.deleteFutureTaskConfirmed(t.id)
+  const ok = await tasks.deleteFutureTaskConfirmed(t.id, editFutureDate.value ?? undefined)
+  editFutureDate.value = null
   if (ok) ui.toast('已存入时间胶囊')
 }
 </script>
@@ -381,8 +402,8 @@ async function confirmDelete() {
               :project="projectOf(ft.task.projectId)"
               future
               warm
-              @edit="openEdit"
-              @delete="onFutureDelete"
+              @edit="openFutureEdit"
+              @toggle="onFutureToggle"
             />
           </div>
         </div>

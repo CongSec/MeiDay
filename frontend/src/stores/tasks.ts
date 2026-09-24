@@ -12,7 +12,7 @@ import { debounce, type Debounced } from '@/utils/debounce'
 import { queueSyncChange } from '@/utils/syncReport'
 import { addDaysKey, dateKeyOf, diffDaysKey, nowIso, todayKey } from '@/utils/time'
 import { isTaskVisibleToday } from '@/utils/todayFilter'
-import { buildOccurrenceTemplate, buildReminderPayload, buildRepeatOccurrence, nextRepeatDate, repeatShapeEquals, shiftTaskTimes } from '@/utils/repeat'
+import { buildOccurrenceTemplate, buildReminderPayload, buildRepeatOccurrence, nextRepeatDate, repeatShapeEquals, rootIdOf, shiftTaskTimes } from '@/utils/repeat'
 import { api } from '@/api/client'
 import { logAudit, safeDetail } from '@/utils/audit'
 import { UNCATEGORIZED, type AttachmentMeta, type RepeatMaster, type Subtask, type Task } from '@/types'
@@ -26,6 +26,7 @@ const tasksSaving = new Map<string, Promise<boolean>>()
 const trashSaving = new Map<string, Promise<boolean>>()
 const repeatsSaving = new Map<string, Promise<boolean>>()
 const toggleSaving = new Set<string>()
+const occurrenceSaving = new Set<string>()
 /** 正在进行中的保存（含防抖触发的保存执行中）：期间禁止逐出该项目，避免 OSS 写一半被清内存 */
 const savingNow = new Set<string>()
 /** 内存常驻项目上限：超过上限的“最近最少使用”非固定项目会被逐出（仅内存，IDB 缓存保留，下次访问按需重载） */
@@ -1724,6 +1725,18 @@ export const useTasksStore = defineStore('tasks', {
             dueDate = nd
             guard++
           }
+          // 单日已处理（提前完成/入舱）的重复日：跳过该日并推进到下一次，
+          // 已经完成/入舱的那一天绝不重新物化生成或覆盖；未处理日不受影响
+          const rootId = master.rootTaskId ?? master.template.repeatRootId ?? master.id
+          const root = this.all.find((x) => x.id === rootId) ?? this.allTrash.find((x) => x.id === rootId)
+          const processed = root?.repeatProcessed ?? master.template.repeatProcessed
+          while (processed?.[dueDate] && guard < 400) {
+            const nd = nextRepeatDate(rule, dueDate)
+            if (!nd || nd <= dueDate) break
+            dueDate = nd
+            guard++
+          }
+          if (processed?.[dueDate]) continue
           if (endAfter && dueDate > endAfter) {
             // 结束日期已过：不再生成，删除模板（周期提醒随之停止）
             changed = true
@@ -1794,6 +1807,9 @@ export const useTasksStore = defineStore('tasks', {
      *  - 今天的已完成任务保持完成、留在胶囊内不变，绝不额外生成一个「今天」的未完成任务。
      *  跨项目移动时把旧项目里的同源模板一并清除（周期链迁移到新项目）。 */
     async syncRepeatMasterForCapsuleTask(task: Task, prevProjectId?: string): Promise<boolean> {
+      // 单日记录（提前完成/入舱生成的 per-day 回收站记录）：编辑它时不再同步重复模板，
+      // 避免用 per-day 合成 id 生成/覆盖重复 master，也绝不改动其它未完成出现
+      if (task.repeatOccurrence) return true
       const auth = useAuthStore()
       const pid = task.projectId
       if (!pid || pid === UNCATEGORIZED) return true
@@ -1919,6 +1935,7 @@ export const useTasksStore = defineStore('tasks', {
             id: task.id,
             projectId: targetPid,
             sourceTaskId: task.id,
+            rootTaskId: rootIdOf(task),
             dueDate: occ.dueDate,
             template: occ.template,
             createdAt: now,
@@ -2200,6 +2217,7 @@ export const useTasksStore = defineStore('tasks', {
                 id: task.id,
                 projectId: task.projectId,
                 sourceTaskId: task.id,
+                rootTaskId: rootIdOf(task),
                 dueDate: occ.dueDate,
                 template: occ.template,
                 createdAt: now,
@@ -2305,6 +2323,57 @@ export const useTasksStore = defineStore('tasks', {
         }
       }
       if (!task) return
+      // 单日记录（提前完成/入舱生成的 per-day 回收站记录）：恢复时清除根任务/模板上该日的
+      // 已处理标记，让该重复日重新作为待办出现；不生成合成 id 的活跃任务
+      if (task.repeatOccurrence) {
+        const { rootId, date } = task.repeatOccurrence
+        const root = this.all.find((x) => x.id === rootId) ?? this.allTrash.find((x) => x.id === rootId)
+        if (root?.repeatProcessed?.[date]) {
+          root.repeatProcessed = { ...root.repeatProcessed }
+          delete root.repeatProcessed[date]
+          if (!Object.keys(root.repeatProcessed).length) root.repeatProcessed = undefined
+          root.updatedAt = nowIso()
+          if (root.status === 'completed') this._persistTrash(root.projectId, true)
+          else this._persist(root.projectId)
+        }
+        // 同时清除重复模板上该日的标记（模板承载日历未来重复日显示）
+        for (const [p, ms] of Object.entries(this.repeats)) {
+          const list = ms ?? []
+          let changed = false
+          const next = list.map((m) => {
+            if (m.template.repeatProcessed?.[date] && (m.rootTaskId ?? m.template.repeatRootId ?? m.id) === rootId) {
+              const tp = { ...(m.template.repeatProcessed ?? {}) }
+              delete tp[date]
+              changed = true
+              return {
+                ...m,
+                template: {
+                  ...m.template,
+                  repeatProcessed: Object.keys(tp).length ? tp : undefined,
+                },
+                updatedAt: nowIso(),
+              }
+            }
+            return m
+          })
+          if (changed) {
+            this.repeats[p] = next
+            this._persistRepeats(p)
+          }
+        }
+        // 从回收站/活跃列表移除该单日记录，不进入活跃列表
+        if (trashPid !== undefined) {
+          this.trash[trashPid] = (this.trash[trashPid] ?? []).filter((t) => t.id !== id)
+          this._persistTrash(trashPid, true)
+        } else {
+          for (const [pid, list] of Object.entries(this.tasks)) {
+            this.tasks[pid] = list.filter((t) => t.id !== id)
+            this._persist(pid)
+          }
+        }
+        logAudit('恢复任务', safeDetail(`任务ID：${id}，项目ID：${task.projectId}`))
+        return
+      }
       const oldPid = task.projectId
       // 已删除项目的任务恢复时重新归属到有效项目，避免成为刷新后不可见的“孤儿”
       if (toProjectId) task.projectId = toProjectId
@@ -2421,6 +2490,43 @@ export const useTasksStore = defineStore('tasks', {
       const target =
         (this.tasks[projectId] ?? []).find((t) => t.id === id) ??
         (this.trash[projectId] ?? []).find((t) => t.id === id)
+      // 永久删除单日记录：清除根任务/模板上该日的已处理标记，该重复日重新作为待办出现
+      if (target?.repeatOccurrence) {
+        const { rootId, date } = target.repeatOccurrence
+        const root = this.all.find((x) => x.id === rootId) ?? this.allTrash.find((x) => x.id === rootId)
+        if (root?.repeatProcessed?.[date]) {
+          root.repeatProcessed = { ...root.repeatProcessed }
+          delete root.repeatProcessed[date]
+          if (!Object.keys(root.repeatProcessed).length) root.repeatProcessed = undefined
+          root.updatedAt = nowIso()
+          if (root.status === 'completed') this._persistTrash(root.projectId, true)
+          else this._persist(root.projectId)
+        }
+        for (const [p, ms] of Object.entries(this.repeats)) {
+          const list = ms ?? []
+          let changed = false
+          const next = list.map((m) => {
+            if (m.template.repeatProcessed?.[date] && (m.rootTaskId ?? m.template.repeatRootId ?? m.id) === rootId) {
+              const tp = { ...(m.template.repeatProcessed ?? {}) }
+              delete tp[date]
+              changed = true
+              return {
+                ...m,
+                template: {
+                  ...m.template,
+                  repeatProcessed: Object.keys(tp).length ? tp : undefined,
+                },
+                updatedAt: nowIso(),
+              }
+            }
+            return m
+          })
+          if (changed) {
+            this.repeats[p] = next
+            this._persistRepeats(p)
+          }
+        }
+      }
       this.tasks[projectId] = (this.tasks[projectId] ?? []).filter((t) => t.id !== id)
       this.trash[projectId] = (this.trash[projectId] ?? []).filter((t) => t.id !== id)
       this._persist(projectId)
@@ -2696,63 +2802,302 @@ export const useTasksStore = defineStore('tasks', {
       return false
     },
     /**
-     * 删除“未来任务”：
-     * - 若 id 是重复模板（repeats 中 master.template.id），软删其源任务（入回收站），
-     *   重复模板与周期提醒随之停止；源任务异常缺失时仅删除该未来出现模板；
+     * 删除“未来任务”中的某一次重复出现（单日处理）：
+     * - 若 id 是重复模板（repeats 中 master.template.id），只把「对应那一天」的重复出现存入时间胶囊：
+     *   生成 status=deleted 的单日回收站记录，并在根任务与模板上标记 repeatProcessed[day]='deleted'；
+     *   其它未来出现、已完成的历史重复日与源任务都不受影响；date 缺省用该模板的到期日；
      * - 普通未来/今日任务走软删（入回收站）。
      */
-    async deleteFutureTaskConfirmed(taskId: string): Promise<boolean> {
+    async deleteFutureTaskConfirmed(taskId: string, date?: string): Promise<boolean> {
+      let masterPid: string | undefined
+      let master: RepeatMaster | undefined
       for (const pid of Object.keys(this.repeats)) {
-        const masters = this.repeats[pid] ?? []
-        const m = masters.find((x) => x.template.id === taskId)
-        if (!m) continue
-        const src = this.all.find((x) => x.id === m.id)
-        if (src) return this.softDeleteConfirmed(src.id)
-        // 源任务不在主列表（异常兜底）：仅删除该未来出现模板
-        const auth = useAuthStore()
-        const repeatsSnap = (this.repeats[pid] ?? []).slice()
-        this.repeats[pid] = masters.filter((x) => x.id !== m.id)
-        this._persistRepeats(pid)
-        const ok = await this.saveRepeatsNow(pid)
-        if (ok) return true
-        this.repeats[pid] = repeatsSnap
-        await idbPut('repeats', repeatsCacheKey(auth.username, pid), repeatsSnap)
-        return false
+        const m = (this.repeats[pid] ?? []).find((x) => x.template.id === taskId)
+        if (m) {
+          masterPid = pid
+          master = m
+          break
+        }
+      }
+      if (master && masterPid !== undefined) {
+        const rootId = master.rootTaskId ?? master.template.repeatRootId ?? master.id ?? taskId
+        const root = this.all.find((x) => x.id === rootId) ?? this.allTrash.find((x) => x.id === rootId)
+        const trashPid = master.template.projectId || masterPid
+        return await this._deleteOccurrence(
+          taskId,
+          date ?? master.dueDate,
+          rootId,
+          root,
+          master.template,
+          masterPid,
+          trashPid,
+        )
+      }
+      // 活跃待办重复任务的「未来重复日」单日删除：只在对应那一天生成 deleted 记录并标记已处理，
+      // 绝不动今天、其它未来日与已完成历史日；date 缺省且无法确定目标日时退化为整任务软删。
+      const active = this.all.find((x) => x.id === taskId)
+      if (active?.repeat && active.status === 'pending' && date) {
+        const rootId = rootIdOf(active)
+        return await this._deleteOccurrence(taskId, date, rootId, active, active, undefined, active.projectId)
       }
       return this.softDeleteConfirmed(taskId)
     },
+    /** 单日删除共用逻辑：标记根任务/模板 repeatProcessed[date]='deleted'，生成单日已删除回收站记录并落盘。
+     *  成功返回 true；失败回滚内存与 IDB 返回 false。 */
+    async _deleteOccurrence(
+      taskId: string,
+      day: string,
+      rootId: string,
+      root: Task | undefined,
+      source: Task,
+      masterPid: string | undefined,
+      trashPid: string,
+    ): Promise<boolean> {
+      const auth = useAuthStore()
+      const rootActivePid = Object.entries(this.tasks).find(([, l]) => l.some((x) => x.id === rootId))?.[0]
+      const rootInTrash = Object.entries(this.trash).find(([, l]) => l.some((x) => x.id === rootId))?.[0]
+      await this.loadTrash(trashPid)
+      if (rootInTrash && rootInTrash !== trashPid) await this.loadTrash(rootInTrash)
+      // 快照：涉及项目的 tasks（浅拷贝）/ repeats（深拷贝，模板会被原地改）/ trash + 根任务深拷贝
+      const tasksSnap = new Map<string, Task[]>()
+      const repeatsSnap = new Map<string, RepeatMaster[]>()
+      const trashSnap = new Map<string, Task[]>()
+      if (rootActivePid) tasksSnap.set(rootActivePid, (this.tasks[rootActivePid] ?? []).slice())
+      if (masterPid) repeatsSnap.set(masterPid, JSON.parse(JSON.stringify(this.repeats[masterPid] ?? [])))
+      trashSnap.set(trashPid, (this.trash[trashPid] ?? []).slice())
+      if (rootInTrash && rootInTrash !== trashPid) trashSnap.set(rootInTrash, (this.trash[rootInTrash] ?? []).slice())
+      const rootSnap = root ? JSON.parse(JSON.stringify(root)) : undefined
+      const sourceSnap = source !== root ? JSON.parse(JSON.stringify(source)) : undefined
+      // 标记该重复日为已删除：根任务与模板的 repeatProcessed 都写入，
+      // 保证物化 / 日历 / 未来任务区都不再显示这一天
+      if (root) {
+        root.repeatProcessed = { ...(root.repeatProcessed ?? {}), [day]: 'deleted' }
+        root.updatedAt = nowIso()
+      }
+      if (source && source !== root) {
+        source.repeatProcessed = { ...(source.repeatProcessed ?? {}), [day]: 'deleted' }
+      }
+      // 生成单日已删除记录（入回收站，按当天分片）
+      const occTime = source.reminderTime ?? source.startTime ?? source.endTime ?? `${day}T00:00:00+08:00`
+      const deletedRecord = normalizeTask({
+        ...source,
+        id: `${rootId}::${day}`,
+        status: 'deleted' as const,
+        updatedAt: occTime,
+        projectId: trashPid,
+        repeatOccurrence: { rootId, date: day, kind: 'deleted' },
+      })
+      this.trash[trashPid] = mergeUnique(this.trash[trashPid] ?? [], [deletedRecord])
+      if (!this.trashLoaded.includes(trashPid)) this.trashLoaded.push(trashPid)
+      // 立即落盘全部涉及项目
+      const jobs: Promise<boolean>[] = []
+      if (rootActivePid) jobs.push(this.saveProjectNow(rootActivePid))
+      if (masterPid) jobs.push(this.saveRepeatsNow(masterPid))
+      jobs.push(this.saveTrashNow(trashPid))
+      if (rootInTrash && rootInTrash !== trashPid) jobs.push(this.saveTrashNow(rootInTrash))
+      const ok = (await Promise.all(jobs)).every(Boolean)
+      if (ok) {
+        this._syncReminders()
+        logAudit('存入时间胶囊', safeDetail(`任务ID：${rootId}，日期：${day}，项目ID：${trashPid}`))
+        return true
+      }
+      // 失败回滚：内存 + IDB
+      const objs: Array<{ ref: Task | RepeatMaster; snap: unknown }> = []
+      if (root) objs.push({ ref: root, snap: rootSnap })
+      if (sourceSnap !== undefined) objs.push({ ref: source, snap: sourceSnap })
+      await this._rollbackOccurrence(auth, tasksSnap, repeatsSnap, trashSnap, objs)
+      return false
+    },
+    /** 提前完成“未来任务”/日历中的某一次重复出现（单日处理）：
+     *  只完成对应那一天：在根任务与模板上标记 repeatProcessed[date]='completed'，
+     *  并生成 status=completed 的单日回收站记录；其它未来出现、已完成历史日与源任务都不受影响，
+     *  绝不会一次完成全部周期。
+     *  - 重复模板（taskId = master.template.id）或活跃重复任务的未来重复日 → 单日完成；
+     *  - 任务自己所属的那一天 / 非重复任务 → 走正常完成（toggleCompleteConfirmed）。 */
+    async completeFutureOccurrence(taskId: string, date: string): Promise<boolean> {
+      const key = `${taskId}:${date}`
+      if (occurrenceSaving.has(key)) return false
+      occurrenceSaving.add(key)
+      try {
+        // 1) 重复模板未来出现：按模板解析根任务与单日记录
+        let masterPid: string | undefined
+        let master: RepeatMaster | undefined
+        for (const pid of Object.keys(this.repeats)) {
+          const m = (this.repeats[pid] ?? []).find((x) => x.template.id === taskId)
+          if (m) {
+            masterPid = pid
+            master = m
+            break
+          }
+        }
+        if (master && masterPid !== undefined) {
+          const rootId = master.rootTaskId ?? master.template.repeatRootId ?? master.id ?? taskId
+          const root = this.all.find((x) => x.id === rootId) ?? this.allTrash.find((x) => x.id === rootId)
+          const trashPid = master.template.projectId || masterPid
+          return await this._completeOccurrence(taskId, date, rootId, root, master.template, masterPid, trashPid)
+        }
+        // 2) 活跃任务：非重复任务走正常完成；重复任务只把「未来重复日」单日完成，
+        //    任务自己所属的那一天仍走正常完成（翻转状态 + 生成未来模板）
+        const active = this.all.find((x) => x.id === taskId)
+        if (!active) return false
+        if (!active.repeat) return this.toggleCompleteConfirmed(taskId)
+        const ownDay = dateKeyOf(active.reminderTime || active.startTime || active.endTime)
+        if (!ownDay || date === ownDay) return this.toggleCompleteConfirmed(taskId)
+        const rootId = rootIdOf(active)
+        const root = this.all.find((x) => x.id === rootId) ?? this.allTrash.find((x) => x.id === rootId)
+        return await this._completeOccurrence(taskId, date, rootId, root, active, undefined, active.projectId)
+      } finally {
+        occurrenceSaving.delete(key)
+      }
+    },
+    /** 单日完成共用逻辑：标记根任务/模板 repeatProcessed[date]='completed'，生成单日已完成回收站记录并落盘。
+     *  成功返回 true；失败回滚内存与 IDB 返回 false。 */
+    async _completeOccurrence(
+      taskId: string,
+      day: string,
+      rootId: string,
+      root: Task | undefined,
+      source: Task,
+      masterPid: string | undefined,
+      trashPid: string,
+    ): Promise<boolean> {
+      const auth = useAuthStore()
+      const rootActivePid = Object.entries(this.tasks).find(([, l]) => l.some((x) => x.id === rootId))?.[0]
+      const rootInTrash = Object.entries(this.trash).find(([, l]) => l.some((x) => x.id === rootId))?.[0]
+      await this.loadTrash(trashPid)
+      if (rootInTrash && rootInTrash !== trashPid) await this.loadTrash(rootInTrash)
+      const tasksSnap = new Map<string, Task[]>()
+      const repeatsSnap = new Map<string, RepeatMaster[]>()
+      const trashSnap = new Map<string, Task[]>()
+      if (rootActivePid) tasksSnap.set(rootActivePid, (this.tasks[rootActivePid] ?? []).slice())
+      if (masterPid) repeatsSnap.set(masterPid, JSON.parse(JSON.stringify(this.repeats[masterPid] ?? [])))
+      trashSnap.set(trashPid, (this.trash[trashPid] ?? []).slice())
+      if (rootInTrash && rootInTrash !== trashPid) trashSnap.set(rootInTrash, (this.trash[rootInTrash] ?? []).slice())
+      const rootSnap = root ? JSON.parse(JSON.stringify(root)) : undefined
+      const sourceSnap = source !== root ? JSON.parse(JSON.stringify(source)) : undefined
+      if (root) {
+        root.repeatProcessed = { ...(root.repeatProcessed ?? {}), [day]: 'completed' }
+        root.updatedAt = nowIso()
+      }
+      if (source && source !== root) {
+        source.repeatProcessed = { ...(source.repeatProcessed ?? {}), [day]: 'completed' }
+      }
+      const occTime =
+        source.reminderTime ?? source.startTime ?? source.endTime ?? `${day}T00:00:00+08:00`
+      const completedRecord = normalizeTask({
+        ...source,
+        id: `${rootId}::${day}`,
+        status: 'completed' as const,
+        updatedAt: occTime,
+        projectId: trashPid,
+        repeatOccurrence: { rootId, date: day, kind: 'completed' },
+      })
+      this.trash[trashPid] = mergeUnique(this.trash[trashPid] ?? [], [completedRecord])
+      if (!this.trashLoaded.includes(trashPid)) this.trashLoaded.push(trashPid)
+      const jobs: Promise<boolean>[] = []
+      if (rootActivePid) jobs.push(this.saveProjectNow(rootActivePid))
+      if (masterPid) jobs.push(this.saveRepeatsNow(masterPid))
+      jobs.push(this.saveTrashNow(trashPid))
+      if (rootInTrash && rootInTrash !== trashPid) jobs.push(this.saveTrashNow(rootInTrash))
+      const ok = (await Promise.all(jobs)).every(Boolean)
+      if (ok) {
+        await useStatsStore().addDelta(1, root?.id ?? rootId, day)
+        this._syncReminders()
+        logAudit('完成任务', safeDetail(`任务ID：${rootId}，日期：${day}，项目ID：${trashPid}`))
+        return true
+      }
+      const objs: Array<{ ref: Task | RepeatMaster; snap: unknown }> = []
+      if (root) objs.push({ ref: root, snap: rootSnap })
+      if (sourceSnap !== undefined) objs.push({ ref: source, snap: sourceSnap })
+      await this._rollbackOccurrence(auth, tasksSnap, repeatsSnap, trashSnap, objs)
+      return false
+    },
+    /** 回滚单日完成/删除操作：恢复 tasks（浅拷贝数组）/ repeats（深拷贝）/ trash 数组与原地改过的对象，
+     *  内存与 IDB 一并还原。 */
+    async _rollbackOccurrence(
+      auth: ReturnType<typeof useAuthStore>,
+      tasks: Map<string, Task[]>,
+      repeats: Map<string, RepeatMaster[]>,
+      trash: Map<string, Task[]>,
+      objs: Array<{ ref: Task | RepeatMaster; snap: unknown }>,
+    ): Promise<void> {
+      for (const { ref, snap } of objs) Object.assign(ref, snap as object)
+      for (const [pid, list] of tasks) {
+        this.tasks[pid] = list
+        await idbPut('tasks', taskCacheKey(auth.username, pid), list)
+      }
+      for (const [pid, list] of repeats) {
+        this.repeats[pid] = list
+        await idbPut('repeats', repeatsCacheKey(auth.username, pid), list)
+      }
+      for (const [pid, list] of trash) {
+        this.trash[pid] = list
+        await idbPut('trash', trashCacheKey(auth.username, pid), list)
+      }
+    },
 
-    /** 确认式恢复任务：跨项目时同时保存新旧项目，成功才返回 true；失败回滚并返回 false */
+    /** 确认式恢复任务：跨项目时同时保存新旧项目；单日记录恢复会清除根任务/模板上的
+     *  repeatProcessed 并写回根任务所在项目，因此把可能触及的项目一并快照与落盘，
+     *  成功才返回 true；失败回滚并返回 false。 */
     async restoreConfirmed(id: string, toProjectId?: string): Promise<boolean> {
       const auth = useAuthStore()
       let sourcePid: string | undefined
+      let task: Task | undefined
       for (const [pid, list] of Object.entries(this.trash)) {
-        if (list.some((t) => t.id === id)) {
+        const t = list.find((x) => x.id === id)
+        if (t) {
           sourcePid = pid
+          task = t
           break
         }
       }
       if (sourcePid === undefined) {
         for (const [pid, list] of Object.entries(this.tasks)) {
-          if (list.some((t) => t.id === id)) {
+          const t = list.find((x) => x.id === id && x.status === 'completed')
+          if (t) {
             sourcePid = pid
+            task = t
             break
           }
         }
       }
       if (sourcePid === undefined) return false
       const targetPid = toProjectId ?? sourcePid
+      // 单日记录恢复会清除根任务/模板上的该日标记并写回其所在项目：纳入快照与落盘范围。
+      // tasks/trash 涉及源/目标/根项目；repeats 只涉及内存中已加载且含该根同源模板的项目，
+      // 避免把未加载项目的 repeats 文件写成空数组。
+      const affected = new Set<string>([sourcePid, targetPid])
+      const affectedRepeats = new Set<string>()
+      if (task?.repeatOccurrence) {
+        const rootId = task.repeatOccurrence.rootId
+        const root = this.all.find((x) => x.id === rootId) ?? this.allTrash.find((x) => x.id === rootId)
+        if (root) affected.add(root.projectId)
+        for (const [p, ms] of Object.entries(this.repeats)) {
+          if ((ms ?? []).some((m) => (m.rootTaskId ?? m.template.repeatRootId ?? m.id) === rootId)) affectedRepeats.add(p)
+        }
+      }
       const tasksSnap = new Map<string, Task[]>()
       const trashSnap = new Map<string, Task[]>()
-      for (const pid of new Set([sourcePid, targetPid])) {
+      const repeatsSnap = new Map<string, RepeatMaster[]>()
+      for (const pid of affected) {
         tasksSnap.set(pid, (this.tasks[pid] ?? []).slice())
         trashSnap.set(pid, (this.trash[pid] ?? []).slice())
       }
+      for (const pid of affectedRepeats) {
+        repeatsSnap.set(pid, JSON.parse(JSON.stringify(this.repeats[pid] ?? [])))
+      }
+      const taskSnap = task ? JSON.parse(JSON.stringify(task)) : undefined
       this.restore(id, toProjectId)
-      const okTarget = await this.saveProjectNow(targetPid)
-      const okSource = sourcePid === targetPid ? true : await this.saveProjectNow(sourcePid)
-      const okTrash = await this.saveTrashNow(sourcePid)
-      if (okTarget && okSource && okTrash) return true
+      const jobs: Promise<boolean>[] = []
+      for (const pid of affected) {
+        jobs.push(this.saveProjectNow(pid))
+        jobs.push(this.saveTrashNow(pid))
+      }
+      for (const pid of affectedRepeats) jobs.push(this.saveRepeatsNow(pid))
+      const ok = (await Promise.all(jobs)).every(Boolean)
+      if (ok) return true
+      // 失败回滚：内存 + IDB（恢复任务对象原地改过，需用深拷贝还原）
+      if (task && taskSnap) Object.assign(task, taskSnap)
       for (const [pid, list] of tasksSnap) {
         this.tasks[pid] = list
         await idbPut('tasks', taskCacheKey(auth.username, pid), list)
@@ -2760,6 +3105,10 @@ export const useTasksStore = defineStore('tasks', {
       for (const [pid, list] of trashSnap) {
         this.trash[pid] = list
         await idbPut('trash', trashCacheKey(auth.username, pid), list)
+      }
+      for (const [pid, list] of repeatsSnap) {
+        this.repeats[pid] = list
+        await idbPut('repeats', repeatsCacheKey(auth.username, pid), list)
       }
       return false
     },
@@ -2829,21 +3178,58 @@ export const useTasksStore = defineStore('tasks', {
       }
       return false
     },
-    /** 确认式永久删除：立即写盘任务+回收站，成功才返回 true；失败回滚并返回 false */
+    /** 确认式永久删除：立即写盘任务+回收站（单日记录还会清除根任务/模板上的该日标记并写回其所在项目），
+     *  成功才返回 true；失败回滚并返回 false */
     async permanentDeleteConfirmed(projectId: string, id: string): Promise<boolean> {
       const auth = useAuthStore()
-      const tasksSnap = (this.tasks[projectId] ?? []).slice()
-      const trashSnap = (this.trash[projectId] ?? []).slice()
-      const repeatsSnap = (this.repeats[projectId] ?? []).slice()
+      const target =
+        (this.tasks[projectId] ?? []).find((t) => t.id === id) ??
+        (this.trash[projectId] ?? []).find((t) => t.id === id)
+      const affected = new Set<string>([projectId])
+      const affectedRepeats = new Set<string>()
+      let root: Task | undefined
+      if (target?.repeatOccurrence) {
+        const rootId = target.repeatOccurrence.rootId
+        root = this.all.find((x) => x.id === rootId) ?? this.allTrash.find((x) => x.id === rootId)
+        if (root) affected.add(root.projectId)
+        for (const [p, ms] of Object.entries(this.repeats)) {
+          if ((ms ?? []).some((m) => (m.rootTaskId ?? m.template.repeatRootId ?? m.id) === rootId)) affectedRepeats.add(p)
+        }
+      }
+      const tasksSnap = new Map<string, Task[]>()
+      const trashSnap = new Map<string, Task[]>()
+      const repeatsSnap = new Map<string, RepeatMaster[]>()
+      for (const pid of affected) {
+        tasksSnap.set(pid, (this.tasks[pid] ?? []).slice())
+        trashSnap.set(pid, (this.trash[pid] ?? []).slice())
+      }
+      for (const pid of affectedRepeats) {
+        repeatsSnap.set(pid, JSON.parse(JSON.stringify(this.repeats[pid] ?? [])))
+      }
+      const rootSnap = root ? JSON.parse(JSON.stringify(root)) : undefined
       this.permanentDelete(projectId, id)
-      const [okTasks, okTrash] = await Promise.all([this.saveProjectNow(projectId), this.saveTrashNow(projectId)])
-      if (okTasks && okTrash) return true
-      this.tasks[projectId] = tasksSnap
-      this.trash[projectId] = trashSnap
-      this.repeats[projectId] = repeatsSnap
-      await idbPut('tasks', taskCacheKey(auth.username, projectId), tasksSnap)
-      await idbPut('trash', trashCacheKey(auth.username, projectId), trashSnap)
-      await idbPut('repeats', repeatsCacheKey(auth.username, projectId), repeatsSnap)
+      const jobs: Promise<boolean>[] = []
+      for (const pid of affected) {
+        jobs.push(this.saveProjectNow(pid))
+        jobs.push(this.saveTrashNow(pid))
+      }
+      for (const pid of affectedRepeats) jobs.push(this.saveRepeatsNow(pid))
+      const ok = (await Promise.all(jobs)).every(Boolean)
+      if (ok) return true
+      // 失败回滚：内存 + IDB（根任务对象被原地改过，需用深拷贝还原）
+      if (root && rootSnap) Object.assign(root, rootSnap)
+      for (const [pid, list] of tasksSnap) {
+        this.tasks[pid] = list
+        await idbPut('tasks', taskCacheKey(auth.username, pid), list)
+      }
+      for (const [pid, list] of trashSnap) {
+        this.trash[pid] = list
+        await idbPut('trash', trashCacheKey(auth.username, pid), list)
+      }
+      for (const [pid, list] of repeatsSnap) {
+        this.repeats[pid] = list
+        await idbPut('repeats', repeatsCacheKey(auth.username, pid), list)
+      }
       return false
     },
     /** 确认式批量导入：立即写盘涉及的全部项目，成功才返回 true；失败回滚并返回 false */
@@ -2886,6 +3272,7 @@ export const useTasksStore = defineStore('tasks', {
       trashSaving.clear()
       repeatsSaving.clear()
       toggleSaving.clear()
+      occurrenceSaving.clear()
       if (syncReminderTimer) {
         window.clearTimeout(syncReminderTimer)
         syncReminderTimer = undefined

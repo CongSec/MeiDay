@@ -38,7 +38,8 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   (e: 'change-month', month: string): void
-  (e: 'open-task', task: Task): void
+  /** day：任务小块归属日（YYYY-MM-DD），跨天横条传锚点日；父组件据此按当天完成重复出现 */
+  (e: 'open-task', task: Task, day: string): void
 }>()
 const { scrollEl, onPointerDown, onPointerMove, onPointerEnd, onClickCapture } = useHorizontalDrag()
 
@@ -141,6 +142,8 @@ const pendingChips = computed<Chip[]>(() => {
         const key = `${props.month}-${pad(d)}`
         if (rule.endAfter && key > rule.endAfter) continue
         if (!isRepeatDay(rule, anchor, key)) continue
+        // 已处理（完成/删除）的某次重复出现：不再显示成待办小块
+        if (t.repeatProcessed?.[key]) continue
         out.push({
           task: t,
           kind: 'pending',
@@ -195,6 +198,8 @@ const futureRepeatChips = computed<Chip[]>(() => {
       if (rule.endAfter && key > rule.endAfter) continue
       if (!isRepeatDay(rule, anchor, key)) continue
       if (pendingIds.has(t.id)) continue
+      // 已处理（完成/删除）的某次未来重复日：不再补成待办小块
+      if (t.repeatProcessed?.[key]) continue
       out.push({ task: t, kind: 'pending', day: key, sortKey: `${key}T${time || '00:00'}`, cross: null, row: 0 })
     }
   }
@@ -541,7 +546,7 @@ function changeMonth(delta: number) {
                 :class="chip.kind === 'done' ? 'bg-slate-100 text-slate-600 hover:bg-slate-200' : 'bg-amber-200/90 text-amber-800 hover:bg-amber-300/90'"
                 :style="{ top: CELL_TOP + chip.row * SLOT_H + 'px', left: '6px', right: '6px' }"
                 :title="chipTitle(chip)"
-                @click="emit('open-task', chip.task)"
+                @click="emit('open-task', chip.task, chip.day)"
               >
                 {{ chip.task.name }}
               </button>
@@ -558,7 +563,7 @@ function changeMonth(delta: number) {
                 top: CELL_TOP + seg.topRow * SLOT_H + 'px',
               }"
               :title="barTitle(seg.bar)"
-              @click="emit('open-task', seg.bar.task)"
+              @click="emit('open-task', seg.bar.task, seg.bar.anchorDay)"
             ></div>
           </div>
         </div>

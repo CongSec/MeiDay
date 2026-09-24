@@ -150,6 +150,11 @@ export function isNewStyleRepeat(rule?: RepeatRule | null): boolean {
   return !!rule?.start
 }
 
+/** 重复链根任务 id：新模型下每个出现都归属同一根任务；旧数据缺失时回退任务自身 id。 */
+export function rootIdOf(task: Task): string {
+  return task.repeatRootId ?? task.id
+}
+
 /** 以 anchor 为相位锚点，求 >= today 的最近一个重复日（today 匹配则返回 today；today 早于锚点则返回锚点）。
  *  与 nextRepeatDate 相比，本函数相位固定于 anchor（不随 today 漂移），用于编辑已有任务时计算下一次提醒/出现。 */
 export function currentOrNextOccurrence(rule: RepeatRule, anchor: string, today: string): string {
@@ -295,6 +300,9 @@ export function buildOccurrenceTemplate(
     })),
     attachments: [...(task.attachments ?? [])],
     repeat: { ...rule },
+    repeatRootId: task.repeatRootId ?? task.id,
+    repeatProcessed: task.repeatProcessed,
+    repeatOccurrence: undefined,
   }
   return { template, dueDate: date }
 }

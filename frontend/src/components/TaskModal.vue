@@ -29,12 +29,16 @@ const props = defineProps<{
   templateMasterId?: string | null
   /** 时间胶囊编辑模式：任务保持在胶囊内（状态不变），保存写回胶囊而不是活跃任务；保留完成/入舱时间 */
   capsuleEdit?: boolean
+  /** 日历图里点击待办小块：把「存入时间胶囊」按钮换成「完成该任务」 */
+  calendarComplete?: boolean
 }>()
 const emit = defineEmits<{
   'update:open': [boolean]
   saved: [Task]
   savedSubtask: [parentTaskId: string, subtask: Subtask]
   delete: [string]
+  /** 日历图里「完成该任务」：通知父组件按当天完成对应重复出现 */
+  complete: [Task]
 }>()
 
 const projects = useProjectsStore()
@@ -278,6 +282,14 @@ function askDelete() {
   const id = props.task.id
   cancel()
   emit('delete', id)
+}
+
+/** 日历图「完成该任务」：先关弹窗，由父组件按当天完成对应重复出现 */
+function completeCalendarTask() {
+  const t = props.task
+  if (!t) return
+  cancel()
+  emit('complete', t)
 }
 
 /** 时间胶囊编辑：开始新增（index=null）或编辑（index）子任务 */
@@ -736,6 +748,10 @@ async function submit() {
     attachments: attachments.value,
   }
   task.repeat = repeat
+  // 保留重复链字段：编辑重复模板/日历里的某次出现时，不允许丢失归属根任务与已处理日期
+  task.repeatRootId = props.task?.repeatRootId
+  task.repeatProcessed = props.task?.repeatProcessed
+  task.repeatOccurrence = props.task?.repeatOccurrence
   // 记住新建任务时选择的项目：下次在今日视图新建任务时默认用它
   if (!props.task) rememberProject(task.projectId)
   // 点保存立即关闭弹窗；提示由回显后的 toast 负责（成功才提示，失败回滚并弹错误提示）
@@ -1114,7 +1130,15 @@ onUnmounted(() => {
         <div v-if="err" class="text-sm text-red-500">{{ err }}</div>
         <div class="flex justify-between items-center gap-2 pt-1">
           <button
-            v-if="!subtaskMode && task && !capsuleEdit"
+            v-if="!subtaskMode && task && !capsuleEdit && calendarComplete"
+            type="button"
+            class="px-3 py-1.5 rounded-lg text-xs text-emerald-600 border border-emerald-300 hover:bg-emerald-50"
+            @click="completeCalendarTask"
+          >
+            完成该任务
+          </button>
+          <button
+            v-else-if="!subtaskMode && task && !capsuleEdit"
             type="button"
             class="px-3 py-1.5 rounded-lg text-xs text-red-500 border border-red-200 hover:bg-red-50"
             @click="askDelete"

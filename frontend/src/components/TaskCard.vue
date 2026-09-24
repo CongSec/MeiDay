@@ -115,7 +115,7 @@ function onSubDragEnd() {
     @click="emit('edit', task)"
   >
     <div class="flex items-start gap-3">
-      <label v-if="!future" class="pt-0.5 shrink-0 cursor-pointer select-none" title="标记完成 / 取消完成" @click.stop>
+      <label class="pt-0.5 shrink-0 cursor-pointer select-none" :title="future ? '提前完成该任务' : '标记完成 / 取消完成'" @click.stop>
         <input
           type="checkbox"
           class="sr-only"
@@ -131,7 +131,6 @@ function onSubDragEnd() {
           <AppIcon name="check" :size="13" :stroke-width="2.5" />
         </span>
       </label>
-      <span v-else class="pt-0.5 shrink-0 text-slate-300" title="未来任务"><AppIcon name="calendarFuture" :size="20" /></span>
       <div class="flex-1 min-w-0">
         <div class="flex items-center gap-2">
           <button
@@ -190,14 +189,6 @@ function onSubDragEnd() {
         @click.stop="onAddSubtask"
       >
         <AppIcon name="plus" :size="15" />
-      </button>
-      <button
-        v-else
-        class="shrink-0 w-7 h-7 flex items-center justify-center rounded-lg border border-red-200 text-red-400 hover:bg-red-50 btn-press"
-        title="删除（存入时间胶囊）"
-        @click.stop="emit('delete', task.id)"
-      >
-        <AppIcon name="trash" :size="14" />
       </button>
     </div>
 

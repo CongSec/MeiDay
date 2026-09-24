@@ -67,6 +67,13 @@ export interface Task {
   attachments: AttachmentMeta[]
   /** 重复规则（旧数据可能缺失，视为不重复） */
   repeat?: RepeatRule
+  /** 重复链根任务 id（新重复模型下每个出现都归属同一根任务；旧数据缺失时回退 task.id） */
+  repeatRootId?: string
+  /** 根任务上记录的「单日已处理」映射：{ 'YYYY-MM-DD': 'completed' | 'deleted' }，
+   *  只写在根任务上，表示该重复日已被单独完成/入舱，不再生成待办或显示 */
+  repeatProcessed?: Record<string, 'completed' | 'deleted'>
+  /** 单日记录标记（只写在回收站 trash 单日记录上）：指向所属重复链根任务与目标日，用于恢复/永久删除时定位 */
+  repeatOccurrence?: { rootId: string; date: string; kind: 'completed' | 'deleted' }
 }
 
 /** 未分类分组的项目 id：仅回收站「无分类」分组使用（today_trash.json / today_repeats.json / today_order.json）。
@@ -178,6 +185,8 @@ export interface RepeatMaster {
   projectId: string
   /** 源任务 id：完成重复任务时记录，用于编辑删除重复规则时追溯清理 */ 
   sourceTaskId: string
+  /** 重复链根任务 id：该 master 所属的根任务；新数据写入，旧数据缺失时回退 template.repeatRootId ?? id */ 
+  rootTaskId: string
   /** 下次应生成（显示）的日期 YYYY-MM-DD（东八区） */
   dueDate: string
   /** 下一次出现的任务模板（pending，时间为该次出现的锚点时间） */

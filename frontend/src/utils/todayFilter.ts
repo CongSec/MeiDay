@@ -11,6 +11,8 @@ interface TodayCandidate {
   endTime: string
   reminderTime: string | null
   repeat?: RepeatRule | null
+  /** 根/模板上「单日已处理」映射：该重复日已被单日完成/入舱，不再作为待办显示 */
+  repeatProcessed?: Record<string, 'completed' | 'deleted'>
 }
 
 /** 某天可见核心逻辑（主任务与子任务共用，避免两处逻辑分叉）：
@@ -22,6 +24,8 @@ interface TodayCandidate {
  *    未定日期任务属于所属项目，不自动进入今日视图（项目新建任务默认开始时间为空）。 */
 function isCandidateVisibleOn(c: TodayCandidate, date: string): boolean {
   if (c.status === 'completed') return dateKeyOf(c.updatedAt) === date
+  // 该重复日已被单日完成/入舱处理（只写在重复任务上）：不再作为待办显示
+  if (c.repeatProcessed?.[date]) return false
   const rule = c.repeat
   if (rule && isNewStyleRepeat(rule) && rule.start) {
     if (rule.endAfter && date > rule.endAfter) return false
@@ -80,6 +84,8 @@ export function nextVisibleDateInWindow(t: Task, today: string, windowDays = 30)
   if (t.status === 'deleted') return null
   for (let i = 1; i <= windowDays; i++) {
     const date = addDaysKey(today, i)
+    // 该重复日已被单日完成/入舱处理，不再作为待办出现
+    if (t.repeatProcessed?.[date]) continue
     if (isTaskVisibleOn(t, date)) return date
   }
   return null
@@ -126,9 +132,15 @@ export function collectFutureVisibleTasks(
     if (date) out.push({ task: t, date })
   }
   const last = addDaysKey(today, windowDays)
+  const rootById = new Map(allTasks.map((t) => [t.id, t]))
   for (const pid of Object.keys(repeats)) {
     for (const m of repeats[pid] ?? []) {
       if (m.dueDate > today && m.dueDate <= last && isTaskVisibleOn(m.template, m.dueDate)) {
+        // 该重复日已被单日完成/入舱处理，不再出现在未来任务区
+        const rootId = m.rootTaskId ?? m.template.repeatRootId ?? m.id
+        const root = rootById.get(rootId)
+        const processed = root?.repeatProcessed ?? m.template.repeatProcessed
+        if (processed?.[m.dueDate]) continue
         out.push({ task: m.template, date: m.dueDate })
       }
     }
@@ -152,5 +164,6 @@ export function isRepeatTaskActiveOn(t: Task, date: string): boolean {
   const rule = t.repeat
   if (!rule || !isNewStyleRepeat(rule) || !rule.start) return true
   if (rule.endAfter && date > rule.endAfter) return false
+  if (t.repeatProcessed?.[date]) return false
   return date >= rule.start && isRepeatDay(rule, rule.start, date)
 }

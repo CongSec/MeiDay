@@ -173,11 +173,12 @@ export const useStatsStore = defineStore('stats', {
     },
     /** 记录一次完成(+1) 或取消完成(-1)：按当天净增量累计，绝不清零重算。
      *  taskId 用于记录该任务当天最近状态，合并时避免已同步的计数再次相加。
+     *  date（东八区 YYYY-MM-DD）可指定计入哪一天（默认今天），用于补记历史重复日完成。
      *  首次调用前先加载 OSS，避免用空统计覆盖已有历史（时间/计数不可变约束）。 */
-    async addDelta(delta: number, taskId?: string) {
+    async addDelta(delta: number, taskId?: string, date?: string) {
       if (!delta) return
       if (!this.loaded) await this.load()
-      const key = todayKey()
+      const key = date ?? todayKey()
       if (!this.stats) this.stats = emptyStats()
       if (!this.stats.daily) this.stats.daily = {}
       const ts = nowIso()

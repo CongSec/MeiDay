@@ -300,7 +300,18 @@ const pendingActiveTasks = computed(() => {
   return out
 })
 /** 重复模板（已完成重复任务的后续出现）：扁平列表，供日历图补足今天之后的重复日 */
-const repeatMastersForCalendar = computed(() => Object.values(tasks.repeats).flat())
+const repeatMastersForCalendar = computed(() =>
+  Object.values(tasks.repeats)
+    .flat()
+    .map((m) => {
+      // 根任务已处理日期（完成/删除）可能只写在根任务上：合并到模板，供日历图跳过已处理的未来重复日
+      const rootId = m.rootTaskId ?? m.template.repeatRootId ?? m.id
+      const root = tasks.all.find((x) => x.id === rootId)
+      return root?.repeatProcessed
+        ? { ...m, template: { ...m.template, repeatProcessed: root.repeatProcessed } }
+        : m
+    }),
+)
 /** 项目名（多视图组件展示用） */
 function projectNameOf(pid: string): string {
   if (!pid || pid === UNCATEGORIZED) return '无分类'
@@ -834,6 +845,10 @@ function durationText(t: Task): string {
 
 /** 编辑弹窗：胶囊内任务用胶囊编辑（保留完成/入舱时间），胶囊外待办用普通编辑 */
 const editCapsule = ref(true)
+/** 日历图点开的待办小块归属日（YYYY-MM-DD）：用于按当天完成对应的重复出现 */
+const editCalendarDay = ref<string | null>(null)
+/** 日历图点开的待办小块：把「存入时间胶囊」换成「完成该任务」 */
+const editCalendarComplete = ref(false)
 
 /** 查找某 id 对应的重复模板 master（repeats 中 template.id 匹配）；非模板返回 undefined */
 function findMasterByTemplateId(taskId: string) {
@@ -845,11 +860,14 @@ function findMasterByTemplateId(taskId: string) {
 }
 
 /** 打开任务编辑弹窗（任务详情页已废弃：列表/日历点击任务都直接进编辑） */
-function openEdit(t: Task) {
+function openEdit(t: Task, day?: string) {
   editTask.value = t
   editCapsule.value = t.status !== 'pending'
   // 日历图点开的「未来重复日」小块（重复模板）：编辑保存走未来任务流程
   editTemplateMasterId.value = findMasterByTemplateId(t.id)?.id ?? null
+  // 日历图点开的待办小块归属日：待办小块显示「完成该任务」按当天完成
+  editCalendarDay.value = day ?? null
+  editCalendarComplete.value = !!day && t.status === 'pending'
   editOpen.value = true
 }
 
@@ -858,7 +876,22 @@ function onSaved(task: Task) {
   editOpen.value = false
   editTask.value = null
   editTemplateMasterId.value = null
+  editCalendarDay.value = null
+  editCalendarComplete.value = false
   ui.toast(task.status === 'pending' ? '任务已保存' : '已保存到时间胶囊')
+}
+
+/** 日历图「完成该任务」：按当天完成对应的重复出现（只影响该天，不动其它未来日与已完成日） */
+async function onCalendarComplete(task: Task) {
+  const day = editCalendarDay.value
+  editOpen.value = false
+  editTask.value = null
+  editTemplateMasterId.value = null
+  editCalendarDay.value = null
+  editCalendarComplete.value = false
+  if (!day) return
+  const ok = await tasks.completeFutureOccurrence(task.id, day)
+  if (ok) ui.toast('任务已完成')
 }
 </script>
 
@@ -1173,7 +1206,9 @@ function onSaved(task: Task) {
       :task="editTask"
       :capsule-edit="editCapsule"
       :template-master-id="editTemplateMasterId"
+      :calendar-complete="editCalendarComplete"
       @saved="onSaved"
+      @complete="onCalendarComplete"
     />
   </div>
 </template>
