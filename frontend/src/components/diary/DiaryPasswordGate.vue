@@ -16,6 +16,7 @@
         <template v-if="mode === 'setup'">
           <input
             v-model="password"
+            ref="passwordInput"
             type="password"
             autocomplete="new-password"
             placeholder="设置日记密码（至少 6 位）"
@@ -32,6 +33,7 @@
         <template v-else>
           <input
             v-model="password"
+            ref="enterPasswordInput"
             type="password"
             autocomplete="current-password"
             placeholder="日记密码"
@@ -61,6 +63,7 @@
       <form v-else @submit.prevent="onChange">
         <input
           v-model="oldPassword"
+          ref="oldPasswordInput"
           type="password"
           autocomplete="current-password"
           placeholder="当前日记密码"
@@ -101,7 +104,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { nextTick, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import AppIcon from '@/components/AppIcon.vue'
 import { useDiaryStore } from '@/stores/diary'
@@ -123,16 +126,42 @@ const busy = ref(false)
 const error = ref('')
 const changing = ref(!!props.startInChange)
 
+// 各表单首个输入框的引用：进入隐私日记时自动聚焦密码框，方便直接输入
+const passwordInput = ref<HTMLInputElement | null>(null)
+const enterPasswordInput = ref<HTMLInputElement | null>(null)
+const oldPasswordInput = ref<HTMLInputElement | null>(null)
+
+/** 聚焦当前表单的第一个输入框（首次设置 / 进入 / 修改密码） */
+function focusFirstInput(): void {
+  nextTick(() => {
+    if (changing.value) {
+      oldPasswordInput.value?.focus()
+      return
+    }
+    if (props.mode === 'setup') {
+      passwordInput.value?.focus()
+    } else {
+      enterPasswordInput.value?.focus()
+    }
+  })
+}
+
+onMounted(focusFirstInput)
+// DiaryView 异步确定 gateMode 为 setup 时会切换表单，重新聚焦首个输入框
+watch(() => props.mode, focusFirstInput)
+
 /** 由 DiaryView 顶栏「修改密码」打开 */
 function openChange(): void {
   error.value = ''
   oldPassword.value = newPassword.value = newPassword2.value = ''
   changing.value = true
+  nextTick(() => oldPasswordInput.value?.focus())
 }
 function closeChange(): void {
   changing.value = false
   error.value = ''
   emit('cancel')
+  focusFirstInput()
 }
 defineExpose({ openChange })
 
