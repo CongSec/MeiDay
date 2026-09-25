@@ -95,6 +95,7 @@ frontend/.env.local
 frontend/.env.development.local
 frontend/.env.test.local
 !frontend/.env.example
+frontend/package-lock.json
 
 # ===== Node / 前端工具日志与缓存 =====
 npm-debug.log*
