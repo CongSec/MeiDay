@@ -8,7 +8,6 @@ import { useProjectsStore } from '@/stores/projects'
 import { useTasksStore } from '@/stores/tasks'
 import { useUiStore } from '@/stores/ui'
 import { useSync } from '@/composables/useSync'
-import { isSiyuanPlugin } from '@/utils/env'
 import { setDiaryEntryIntent } from '@/utils/diarySession'
 import type { Project } from '@/types'
 import logo from '@/assets/logo.png'
@@ -34,7 +33,7 @@ const navSettingsClass = computed(() => navClass(route.path === '/settings'))
 
 /** 侧栏「今日任务」：无论当前在哪个页面，点击都进入今日任务页并软刷新（重拉最新数据，
  *  未来任务 / 日历图随之更新），不整页刷新、界面不闪。
- *  - 浏览器端：软刷新且成功时静默（不出「同步完成」提示），仅出错时提示。
+ *  - 浏览器端与思源插件端一致：软刷新且成功时静默（不出「同步完成」提示），仅出错时提示。
  *  - 思源插件：前端在 srcdoc iframe 内，软刷新避免连带整个思源重载（出现启动页）。 */
 async function goToday() {
   ui.closeDrawer()
@@ -42,13 +41,9 @@ async function goToday() {
     await router.push('/today')
   }
   // 软刷新（与「同步刷新」同一逻辑）：重拉项目/任务、到期物化重复任务，未来任务区随之更新。
-  // 浏览器端成功时静默；思源插件端保留原有提示。
-  const { syncNow, syncNowSilent } = useSync()
-  if (isSiyuanPlugin()) {
-    await syncNow()
-  } else {
-    await syncNowSilent()
-  }
+  // 浏览器端与思源插件端均静默：成功不弹「同步完成」，仅出错时提示。
+  const { syncNowSilent } = useSync()
+  await syncNowSilent()
 }
 
 async function onLogout() {
