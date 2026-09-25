@@ -32,24 +32,22 @@ const navClass = (active: boolean) =>
 const navTodayClass = computed(() => navClass(route.path === '/today'))
 const navSettingsClass = computed(() => navClass(route.path === '/settings'))
 
-/** 侧栏「今日任务」：无论当前在哪个页面，点击都进入今日任务页并刷新。
- *  - 独立 Web / APK：整页刷新，浏览器卡住 / 全屏无刷新按钮时点这里等同点浏览器的刷新按钮；
- *    即使已在今日页也整页刷新以拉取最新数据（未来任务 / 日历图随之更新）。
- *  - 思源插件：前端在 srcdoc iframe 内，整页刷新会连带整个思源重载（出现启动页），
- *    改用软刷新（与「同步刷新」同一逻辑）拉取最新数据。hash 路由下进入后仍落在今日任务页。 */
+/** 侧栏「今日任务」：无论当前在哪个页面，点击都进入今日任务页并软刷新（重拉最新数据，
+ *  未来任务 / 日历图随之更新），不整页刷新、界面不闪。
+ *  - 浏览器端：软刷新且成功时静默（不出「同步完成」提示），仅出错时提示。
+ *  - 思源插件：前端在 srcdoc iframe 内，软刷新避免连带整个思源重载（出现启动页）。 */
 async function goToday() {
   ui.closeDrawer()
   if (route.path !== '/today') {
     await router.push('/today')
   }
+  // 软刷新（与「同步刷新」同一逻辑）：重拉项目/任务、到期物化重复任务，未来任务区随之更新。
+  // 浏览器端成功时静默；思源插件端保留原有提示。
+  const { syncNow, syncNowSilent } = useSync()
   if (isSiyuanPlugin()) {
-    // 思源插件内是 srcdoc iframe：location.reload() 会连带整个思源重载（出现启动加载页）。
-    // 改用软刷新（与「同步刷新」同一逻辑）：重拉项目/任务、到期物化重复任务，未来任务区随之更新。
-    const { syncNow } = useSync()
     await syncNow()
   } else {
-    // 独立 Web / APK：整页刷新，浏览器卡住 / 全屏无刷新按钮时点这里等同点浏览器的刷新按钮。
-    window.location.reload()
+    await syncNowSilent()
   }
 }
 

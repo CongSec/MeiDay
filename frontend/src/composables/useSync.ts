@@ -12,6 +12,7 @@ const syncing = ref(false)
  * 1) 先落盘本地未保存的项目变更，避免被远端覆盖；
  * 2) 重拉项目列表（远端权威）；
  * 3) 重拉全部任务并与本地按 updatedAt 合并（避免多端冲突），有改动写回。
+ * 提供 syncNow（成功弹「同步完成」）与 syncNowSilent（成功静默、出错仍提示）两种入口。
  */
 export function useSync() {
   const projects = useProjectsStore()
@@ -20,6 +21,15 @@ export function useSync() {
   const ui = useUiStore()
 
   async function syncNow(): Promise<boolean> {
+    return doSync(false)
+  }
+
+  /** 静默同步：成功时不弹「同步完成」提示，出错仍提示；用于「今日任务」入口的静默刷新 */
+  async function syncNowSilent(): Promise<boolean> {
+    return doSync(true)
+  }
+
+  async function doSync(silent: boolean): Promise<boolean> {
     if (syncing.value) return false
     syncing.value = true
     try {
@@ -46,7 +56,7 @@ export function useSync() {
       const failed = await tasks.syncAll(target)
       if (failed > 0) {
         ui.toast(`同步完成，${failed} 个项目同步失败`, 'error')
-      } else {
+      } else if (!silent) {
         ui.toast('同步完成')
       }
       return failed === 0
@@ -58,5 +68,5 @@ export function useSync() {
     }
   }
 
-  return { syncing, syncNow }
+  return { syncing, syncNow, syncNowSilent }
 }
