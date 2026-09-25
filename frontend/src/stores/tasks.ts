@@ -38,6 +38,9 @@ const TRASH_FETCH_CONCURRENCY = 8
  *  - 今日相关项目：逐出时实时计算「内存里存在今日可见任务的项目」，保证今日视图/侧栏角标依赖的
  *    项目常驻（不随 profile 全量固定，否则几百个项目会把所有访问过的项目都钉在内存里，LRU 失效）。 */
 const viewPins = new Set<string>()
+/** 时间胶囊页打开期间固定的项目：胶囊需要所有项目的「已完成活跃任务」常驻内存，
+ *  否则 LRU 逐出后日历图/项目图会丢失当天完成、尚未归档的已完成记录（不随 trash 一起释放）。 */
+const capsulePins = new Set<string>()
 /** LRU 访问顺序：越靠前越最近使用（项目加载/访问/写入时置顶） */
 const accessOrder: string[] = []
 /** 逐出互斥：防止并发 touch 触发多次逐出循环 */
@@ -672,6 +675,39 @@ export const useTasksStore = defineStore('tasks', {
       viewPins.delete(projectId)
       void this.evictIfNeeded()
     },
+    /** 时间胶囊页打开期间固定全部项目：防止逐出导致日历图/项目图丢失已完成活跃任务。
+     *  退出胶囊（releaseTrashMemory）时统一解除。 */
+    pinCapsuleProjects(projectIds: string[]) {
+      for (const id of projectIds) {
+        capsulePins.add(id)
+        this.touchProject(id)
+      }
+    },
+    unpinCapsuleProjects(projectIds: string[]) {
+      for (const id of projectIds) capsulePins.delete(id)
+      void this.evictIfNeeded()
+    },
+    /** 打开时间胶囊时补全所有项目的活跃任务文件：已完成任务可能仍留在活跃列表（当天完成
+     *  未归档），需一并读入内存才能在日历图/项目图显示完成状态。加载前先固定全部项目防止
+     *  LRU 逐出；单项目失败不影响其它项目（下一轮打开会重试）。 */
+    async loadCapsuleActiveProjects(): Promise<void> {
+      const projectsStore = useProjectsStore()
+      if (!projectsStore.loaded) await projectsStore.load().catch(() => {})
+      const ids = projectsStore.projects.map((p) => p.id)
+      this.pinCapsuleProjects(ids)
+      const BATCH = 4
+      for (let i = 0; i < ids.length; i += BATCH) {
+        await Promise.all(
+          ids.slice(i, i + BATCH).map(async (id) => {
+            try {
+              await this.loadProject(id)
+            } catch {
+              /* 单项目加载失败忽略：其已完成任务可能短暂缺失，但下一轮打开会重试 */
+            }
+          }),
+        )
+      }
+    },
     /** 把“最近最少使用”的非固定项目逐出内存（仅内存与已加载标记；IDB 缓存保留，下次访问按需重载）。
      *  正在保存 / 有未落盘待发变更的项目不逐出，避免把内存数据写空到 OSS。 */
     async evictIfNeeded() {
@@ -679,7 +715,7 @@ export const useTasksStore = defineStore('tasks', {
       evicting = true
       try {
         const today = todayKey()
-        const pins = new Set<string>([...viewPins, UNCATEGORIZED])
+        const pins = new Set<string>([...viewPins, UNCATEGORIZED, ...capsulePins])
         // 活跃项目固定集不单独维护：凡内存里存在「今日可见任务」的项目都固定常驻，
         // 保证今日视图与侧栏角标始终完整；无今日任务的已访问项目按 LRU 逐出（内存上限生效）。
         for (const [pid, list] of Object.entries(this.tasks)) {
@@ -1104,6 +1140,7 @@ export const useTasksStore = defineStore('tasks', {
       }
       // 解除全部胶囊项目固定，交回 LRU 逐出（仅胶囊页挂载期间 pin 的是胶囊项目）
       for (const pid of Object.keys(this.trash)) viewPins.delete(pid)
+      capsulePins.clear()
       this.trash = {}
       this.trashLoaded = []
       this.trashLoadedMonths = {}
@@ -3353,6 +3390,7 @@ export const useTasksStore = defineStore('tasks', {
       this.todayOrder = []
       // 清空固定集与 LRU 顺序，避免跨账号残留导致新账号项目无法逐出
       viewPins.clear()
+      capsulePins.clear()
       accessOrder.length = 0
       evicting = false
     },

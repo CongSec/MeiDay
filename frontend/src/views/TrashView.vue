@@ -136,6 +136,7 @@ async function loadCurrentYear() {
   try {
     await scanTrashMeta()
     await tasks.switchTrashYear(CURRENT_YEAR)
+    await tasks.loadCapsuleActiveProjects()
     visibleMonths.value = {}
     viewYear.value = CURRENT_YEAR
     viewMonth.value = currentMonthKey()
@@ -244,6 +245,7 @@ async function confirmYearPick() {
   viewLoading.value = true
   try {
     const res = await tasks.switchTrashYear(year)
+    await tasks.loadCapsuleActiveProjects()
     visibleMonths.value = {}
     viewYear.value = year
     viewMonth.value = year === CURRENT_YEAR ? currentMonthKey() : `${year}-01`
@@ -281,6 +283,33 @@ const completedTrashTasks = computed(() => {
       completedCache.set(arr, cached)
     }
     out.push(...cached)
+  }
+  return out
+})
+/** 已完成活跃任务过滤缓存：以活跃数组引用为键（数组整体替换，引用即指纹） */
+const completedActiveCache = new WeakMap<Task[], Task[]>()
+/** 活跃列表中的已完成任务：当天完成尚未归档、仍留在活跃列表（status=completed，按 updatedAt 归属完成当天） */
+const completedActiveTasks = computed(() => {
+  const out: Task[] = []
+  for (const arr of Object.values(tasks.tasks)) {
+    let cached = completedActiveCache.get(arr)
+    if (!cached) {
+      cached = arr.filter((t) => t.status === 'completed')
+      completedActiveCache.set(arr, cached)
+    }
+    out.push(...cached)
+  }
+  return out
+})
+/** 多视图：全部已完成胶囊任务 = 回收站已完成 + 活跃列表中已完成的（当天完成未归档的任务），
+ *  按任务 id 防御性去重（活跃与回收站理论上互斥：归档即移出活跃列表）。 */
+const completedCapsuleTasks = computed(() => {
+  const seen = new Set<string>()
+  const out: Task[] = []
+  for (const t of [...completedTrashTasks.value, ...completedActiveTasks.value]) {
+    if (seen.has(t.id)) continue
+    seen.add(t.id)
+    out.push(t)
   }
   return out
 })
@@ -342,6 +371,31 @@ function sortedTrashArr(key: string): Task[] {
   return sorted
 }
 
+/** 某项目是否在本查看年份有胶囊数据：回收站有记录，或活跃列表中有「所选年份已完成」的任务 */
+function hasCapsuleData(key: string): boolean {
+  if ((tasks.trash[key]?.length ?? 0) > 0) return true
+  const yearStr = String(viewYear.value)
+  return (tasks.tasks[key] ?? []).some(
+    (t) => t.status === 'completed' && dateKeyOf(t.updatedAt).slice(0, 4) === yearStr,
+  )
+}
+
+/** 某项目的时间胶囊展示数据：回收站记录（已完成/已删除）+ 活跃列表中「所选年份已完成」的任务
+ *  （当天完成尚未归档，仍留在活跃列表）。仅取已完成/已删除，不含未完成待办（项目图定位为归档）。 */
+function capsuleGroupArr(key: string): Task[] {
+  const trash = tasks.trash[key] ?? []
+  const yearStr = String(viewYear.value)
+  const activeCompleted = (tasks.tasks[key] ?? []).filter(
+    (t) => t.status === 'completed' && dateKeyOf(t.updatedAt).slice(0, 4) === yearStr,
+  )
+  if (!activeCompleted.length) return sortedTrashArr(key)
+  // 回收站 + 活跃已完成合并，按任务 id 去重，updatedAt 倒序
+  const byId = new Map<string, Task>()
+  for (const t of trash) byId.set(t.id, t)
+  for (const t of activeCompleted) if (!byId.has(t.id)) byId.set(t.id, t)
+  return [...byId.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+}
+
 /** 任务按月份分组（YYYY-MM 倒序，最新在前），以数组引用为键缓存，避免分组计算反复遍历 */
 const monthGroupsCache = new WeakMap<Task[], { key: string; tasks: Task[] }[]>()
 function toMonthGroups(list: Task[]): { key: string; tasks: Task[] }[] {
@@ -368,7 +422,7 @@ function monthLabel(m: string): string {
 }
 /** 项目时间胶囊任务总数（所选年份数据已全部载入内存，即该年份真实总数） */
 function trashTotal(g: TrashGroup): number {
-  return tasks.trash[g.key]?.length ?? 0
+  return g.monthGroups.reduce((n, m) => n + m.tasks.length, 0)
 }
 
 /** 回收站按项目分组：所选年份数据在进入/切年时已一次性全部加载进内存，直接按内存数据分组展示；
@@ -377,16 +431,16 @@ const projectGroups = computed<TrashGroup[]>(() => {
   if (!scanned.value) return []
   const seen = new Set<string>()
   const groups: TrashGroup[] = []
-  /** 本地已加载回收站里任务的最新时间，作为扫描时间缺失时的兜底排序键 */
+  /** 本地已加载回收站 + 活跃已完成任务的最新时间，作为扫描时间缺失时的兜底排序键 */
   const maxTaskTime = (key: string) => {
-    const arr = tasks.trash[key] ?? []
+    const arr = capsuleGroupArr(key)
     return arr.reduce((m, t) => (t.updatedAt > m ? t.updatedAt : m), '')
   }
   const push = (key: string, label: string, deleted: boolean, deletedProject: DeletedProject | null) => {
     if (seen.has(key)) return
     seen.add(key)
-    const arr = sortedTrashArr(key)
-    // 该年份无胶囊数据（switchTrashYear 只把所选年份数据放进内存）的项目不展示
+    const arr = capsuleGroupArr(key)
+    // 该年份无胶囊数据（switchTrashYear 只把所选年份回收站数据放进内存；活跃已完成单独并入）的项目不展示
     if (!arr.length) return
     const monthGroups = toMonthGroups(arr)
     // 排序键：优先扫描到的回收站文件最新变动时间；已删除项目回退到删除时间；
@@ -399,15 +453,15 @@ const projectGroups = computed<TrashGroup[]>(() => {
   }
   // 活跃项目：仅展示该年份内存中有数据的项目
   for (const p of projects.projects) {
-    if ((tasks.trash[p.id]?.length ?? 0) > 0) push(p.id, p.name, false, null)
+    if (hasCapsuleData(p.id)) push(p.id, p.name, false, null)
   }
   // 已删除项目：仅展示该年份内存中有数据的项目（仍支持整项目恢复）
   const deletedList = [...(projects.deletedProjects ?? [])].sort((a, b) => b.deletedAt.localeCompare(a.deletedAt))
   for (const dp of deletedList) {
-    if ((tasks.trash[dp.id]?.length ?? 0) > 0) push(dp.id, dp.name, true, dp)
+    if (hasCapsuleData(dp.id)) push(dp.id, dp.name, true, dp)
   }
   // 未分类回收站（today_trash.json）：切年时已按年份过滤，仅展示有数据的部分
-  if ((tasks.trash[UNCATEGORIZED]?.length ?? 0) > 0) push(UNCATEGORIZED, '无分类', false, null)
+  if (hasCapsuleData(UNCATEGORIZED)) push(UNCATEGORIZED, '无分类', false, null)
   // 扫描发现但不在档案中的历史项目（孤儿回收站）
   for (const pid of scanIds.value) {
     if (projects.byId(pid)) continue
@@ -432,7 +486,7 @@ const projectGroups = computed<TrashGroup[]>(() => {
       out.push(g)
       continue
     }
-    const matched = (tasks.trash[g.key] ?? []).filter((t) => {
+    const matched = capsuleGroupArr(g.key).filter((t) => {
       const name = (t.name || '').toLowerCase()
       const desc = (t.description || '').toLowerCase()
       return name.includes(q) || desc.includes(q)
@@ -1131,7 +1185,7 @@ async function onCalendarComplete(task: Task) {
         <div class="mb-3 text-[11px] text-slate-400">当前展示 {{ viewYear }} 年数据；切换年份请点击「扫描时间胶囊文件」。</div>
         <TimeCapsuleCalendar
           v-if="viewMode === 'calendar'"
-          :tasks="completedTrashTasks"
+          :tasks="completedCapsuleTasks"
           :pending="pendingActiveTasks"
           :repeats="repeatMastersForCalendar"
           :month="viewMonth"
@@ -1143,12 +1197,12 @@ async function onCalendarComplete(task: Task) {
         />
         <TimeCapsuleHeatmap
           v-else-if="viewMode === 'heatmap'"
-          :tasks="completedTrashTasks"
+          :tasks="completedCapsuleTasks"
           :year="viewYear"
         />
         <TimeCapsuleTrend
           v-else-if="viewMode === 'trend'"
-          :tasks="completedTrashTasks"
+          :tasks="completedCapsuleTasks"
           :year="viewYear"
         />
       </template>
