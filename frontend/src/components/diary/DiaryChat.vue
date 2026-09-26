@@ -51,6 +51,47 @@
 
     <!-- 输入区 -->
     <div class="border-t border-slate-200 bg-white px-2 py-2 space-y-1.5 shrink-0" @dragover.prevent @drop.prevent="onDrop">
+      <!-- 相册最近新增图片提示条（仅 Android App 端）：勾选后点「发送 N 张」作为日记消息上传 -->
+      <div
+        v-if="recentOffers.length"
+        class="flex flex-wrap items-center gap-1.5 rounded-lg border border-brand/30 bg-brand/5 px-2 py-1.5"
+      >
+        <span class="shrink-0 text-xs text-slate-500">检测到 {{ recentOffers.length }} 张新图片：</span>
+        <button
+          v-for="item in recentOffers.slice(0, MAX_SHOWN_IMAGES)"
+          :key="imageFingerprint(item)"
+          type="button"
+          class="relative shrink-0 cursor-pointer overflow-hidden rounded-md border transition hover:ring-2 hover:ring-brand"
+          :class="isOfferSelected(item) ? 'border-brand ring-2 ring-brand' : 'border-slate-200'"
+          :title="`${item.name}（${formatSize(item.size)}）`"
+          @click="toggleOffer(item)"
+        >
+          <img :src="`data:${item.mime};base64,${item.base64}`" class="h-10 w-10 object-cover" alt="新图片预览" />
+          <span
+            v-if="isOfferSelected(item)"
+            class="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-brand text-white flex items-center justify-center text-[10px] font-bold"
+          >✓</span>
+        </button>
+        <span v-if="recentOffers.length > MAX_SHOWN_IMAGES" class="shrink-0 text-xs text-slate-400">
+          +{{ recentOffers.length - MAX_SHOWN_IMAGES }}
+        </span>
+        <div class="flex-1" />
+        <button
+          type="button"
+          class="shrink-0 px-2.5 py-1 rounded-lg text-xs font-medium bg-brand text-white hover:bg-brand-dark disabled:opacity-50 disabled:cursor-not-allowed"
+          :disabled="!selectedOfferKeys.size"
+          @click="sendSelectedOffers"
+        >
+          发送 {{ selectedOfferKeys.size }} 张
+        </button>
+        <button
+          type="button"
+          class="shrink-0 px-2 py-1 rounded-lg text-xs text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+          @click="dismissOffers"
+        >
+          忽略
+        </button>
+      </div>
       <div
         v-if="dragging"
         class="rounded-lg border-2 border-dashed border-brand/60 bg-brand/5 text-center text-sm text-brand py-2"
@@ -118,6 +159,7 @@ import DiaryImageGroup from './DiaryImageGroup.vue'
 import { useDiaryStore } from '@/stores/diary'
 import { useUiStore } from '@/stores/ui'
 import { todayKey } from '@/utils/time'
+import { base64ToFile, imageFileName, imageFingerprint, MAX_SHOWN_IMAGES, readRecentImages, type RecentImageData } from '@/utils/recentImages'
 import type { DiaryMessage } from '@/types'
 
 const diary = useDiaryStore()
@@ -152,6 +194,89 @@ function rowsOf(msgs: DiaryMessage[]): ChatRow[] {
 const selectedDate = computed(() => diary.selectedDate)
 const dayLoaded = computed(() => !!diary.loadedDates[diary.selectedDate])
 const messages = computed(() => diary.days[diary.selectedDate] ?? [])
+
+/* ---------- 相册最近新增图片提示（仅 Android App 端，逻辑同新建任务） ---------- */
+/** 新图片检测轮询间隔（秒级），兜底覆盖「不切后台直接截图」的场景 */
+const RECENT_IMAGES_POLL_MS = 30_000
+/** 提示条候选：最近 3 分钟新增的截图/拍照（已发送/已忽略/重复的自动排除） */
+const recentOffers = ref<RecentImageData[]>([])
+/** 用户勾选、待发送的图片指纹集合 */
+const selectedOfferKeys = ref<Set<string>>(new Set())
+/** 本次日记会话内已忽略 / 已发送的图片指纹：不再重复提示 */
+const handledOfferKeys = new Set<string>()
+/** 当前提示条正在展示的指纹集合：候选无变化时不重渲染 */
+let shownOfferKeys = new Set<string>()
+let recentImagesTimer: number | undefined
+
+function isOfferSelected(item: RecentImageData): boolean {
+  return selectedOfferKeys.value.has(imageFingerprint(item))
+}
+
+function toggleOffer(item: RecentImageData): void {
+  const key = imageFingerprint(item)
+  const next = new Set(selectedOfferKeys.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  selectedOfferKeys.value = next
+}
+
+function formatSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${bytes} B`
+}
+
+/** 忽略本次：提示条消失，已展示的图片本次会话内不再提示 */
+function dismissOffers(): void {
+  for (const item of recentOffers.value) handledOfferKeys.add(imageFingerprint(item))
+  clearOfferBar()
+}
+
+/** 发送勾选的新图片：作为日记消息加密上传（与回形针选图发送完全一致） */
+function sendSelectedOffers(): void {
+  const selected = recentOffers.value.filter((it) => selectedOfferKeys.value.has(imageFingerprint(it)))
+  if (!selected.length) return
+  for (const item of selected) handledOfferKeys.add(imageFingerprint(item))
+  clearOfferBar()
+  const files = selected.map((it) => base64ToFile(it, imageFileName(it.mime)))
+  sendFiles(files)
+}
+
+function clearOfferBar(): void {
+  recentOffers.value = []
+  selectedOfferKeys.value = new Set()
+  shownOfferKeys = new Set()
+}
+
+/** 读取相册最近新增图片并刷新提示条：仅「今天」展示；已发送/已忽略的自动排除 */
+async function checkRecentImages(): Promise<void> {
+  if (diary.selectedDate !== todayKey()) {
+    clearOfferBar()
+    return
+  }
+  const res = await readRecentImages()
+  if (res.status !== 'ok') {
+    // 无新图片或权限被拒：清空提示条（权限被拒已有会话级防重弹，不打扰）
+    clearOfferBar()
+    return
+  }
+  // 已作为日记消息发送过的图片大小集合（原生插件重编码后同源图片大小一致，近似去重）
+  const sentSizes = new Set<number>()
+  for (const m of messages.value) {
+    if (m.file && m.file.mime.startsWith('image/')) sentSizes.add(m.file.size)
+  }
+  const candidates = res.items.filter(
+    (it) => !handledOfferKeys.has(imageFingerprint(it)) && !sentSizes.has(it.size),
+  )
+  const keys = new Set(candidates.map(imageFingerprint))
+  // 候选无变化时不重渲染（同一批图在 3 分钟窗口内会被反复读到）
+  const unchanged = shownOfferKeys.size === keys.size && [...shownOfferKeys].every((k) => keys.has(k))
+  if (unchanged) return
+  shownOfferKeys = keys
+  recentOffers.value = candidates
+  // 勾选状态只保留仍存在的候选，避免残留
+  selectedOfferKeys.value = new Set([...selectedOfferKeys.value].filter((k) => keys.has(k)))
+}
 
 const selectedTitle = computed(() => formatTitle(diary.selectedDate))
 
@@ -314,12 +439,19 @@ async function onDelete(msgId: string, dateKey: string): Promise<void> {
 onMounted(() => {
   window.addEventListener('dragenter', onDragEnter)
   window.addEventListener('dragleave', onDragLeave)
-  // 进入系统后光标自动落在输入框，方便直接输入
-  void nextTick(() => textInput.value?.focus())
+  window.addEventListener('visibilitychange', onVisibilityChange)
+  recentImagesTimer = window.setInterval(() => void checkRecentImages(), RECENT_IMAGES_POLL_MS)
+  // 进入系统后光标自动落在输入框，方便直接输入；同时检测相册最近新增图片
+  void nextTick(() => {
+    textInput.value?.focus()
+    void checkRecentImages()
+  })
 })
 onUnmounted(() => {
   window.removeEventListener('dragenter', onDragEnter)
   window.removeEventListener('dragleave', onDragLeave)
+  window.removeEventListener('visibilitychange', onVisibilityChange)
+  if (recentImagesTimer !== undefined) window.clearInterval(recentImagesTimer)
   if (recTimer !== undefined) window.clearInterval(recTimer)
   if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop()
 })
@@ -345,4 +477,15 @@ watch(
     })
   },
 )
+
+/* 切换日期：新图片提示条仅在「今天」展示 */
+watch(
+  () => diary.selectedDate,
+  () => void checkRecentImages(),
+)
+
+/* 从截图/拍照切回 App 时立即重新检测新图片 */
+function onVisibilityChange(): void {
+  if (document.visibilityState === 'visible') void checkRecentImages()
+}
 </script>
