@@ -27,8 +27,8 @@ function pvApi(): any {
 function resizeWidget(h: number) {
   pvApi()?.resize(WIDGET_W, h)
 }
-function hideWidget() {
-  pvApi()?.hide()
+function quitWidget() {
+  pvApi()?.quit()
 }
 
 /* 标题栏 JS 拖拽：用 window.screenX + 鼠标位移计算绝对坐标，交给 Python 端 move()。
@@ -71,10 +71,6 @@ const loginUser = ref('')
 const loginPw = ref('')
 const loginErr = ref('')
 const loginBusy = ref(false)
-function fillTestAccount() {
-  loginUser.value = 'congsec'
-  loginPw.value = '12345678'
-}
 async function bootAfterLogin() {
   // 首登先引导加载（等同网页端 TodayView 挂载）：version=0 的账号（如测试号）
   // 没有同步日志，轮询拿不到 changes，必须显式拉取一次数据再进入 2s 轮询。
@@ -260,7 +256,6 @@ function onRefresh() {
         <button class="login-btn" type="submit" :disabled="loginBusy">
           {{ loginBusy ? '登录中…' : '登 录' }}
         </button>
-        <button type="button" class="login-test" @click="fillTestAccount">一键填入测试账号 congsec</button>
       </form>
       <div class="login-foot">测试号数据每小时清空；首次使用 OSS 返回 404 属正常</div>
     </div>
@@ -287,14 +282,14 @@ function onRefresh() {
               <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3h-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
             </svg>
           </button>
-          <button class="icon-btn" title="隐藏到任务栏" @click="hideWidget">
-            <svg viewBox="0 0 16 16" width="12" height="12">
-              <path d="M3 9h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-            </svg>
-          </button>
           <button class="icon-btn" title="退出登录" @click="doLogout">
             <svg viewBox="0 0 16 16" width="12" height="12">
               <path d="M6 3H3.5A1.5 1.5 0 0 0 2 4.5v7A1.5 1.5 0 0 0 3.5 13H6M10 5l3 3-3 3M13 8H6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+          <button class="icon-btn quit-btn" title="退出小组件" @click="quitWidget">
+            <svg viewBox="0 0 16 16" width="12" height="12">
+              <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
             </svg>
           </button>
         </div>
@@ -639,15 +634,6 @@ function onRefresh() {
 }
 .login-btn:hover:not(:disabled) {
   background: #2563eb;
-}
-.login-test {
-  background: none;
-  border: none;
-  color: #64748b;
-  font-size: 12px;
-  cursor: pointer;
-  text-decoration: underline;
-  text-underline-offset: 2px;
 }
 .login-foot {
   margin-top: 12px;
