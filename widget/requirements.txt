@@ -1,0 +1,8 @@
+# MeiDay 桌面小组件（Python 壳）运行依赖
+pywebview>=5.0
+pystray>=0.19
+Pillow>=10.0
+pythonnet>=3.0
+
+# 打包依赖（可选：仅构建 exe 时需要）
+pyinstaller>=6.0

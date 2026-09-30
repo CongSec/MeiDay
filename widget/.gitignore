@@ -1,6 +1,14 @@
 # 构建产物（npm run build 生成）
 dist/
 
+# 打包产物（python build.py 生成）
+build/
+*.spec
+logo.ico
+
+# 运行时配置（程序同级目录生成）
+config.json
+
 # 保留 .env.production（父级 .gitignore 的 .env.* 会忽略它，这里显式重新纳入；
 # 该文件只含公开的 API 地址 https://task.congsec.cn，不含密钥）
 !.env.production

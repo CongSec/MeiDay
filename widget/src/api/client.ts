@@ -67,6 +67,27 @@ export function clearSavedUsername(): void {
   localStorage.removeItem(USER_KEY)
 }
 
+/* ---- 桌面小组件：登录态在 localStorage 与 config.json 之间镜像所需的原生读写 ---- */
+export function getTokenAt(): number {
+  return Number(localStorage.getItem(`${TOKEN_KEY}_at`) ?? 0)
+}
+export function setTokenRaw(token: string, at: number): void {
+  localStorage.setItem(TOKEN_KEY, token)
+  localStorage.setItem(`${TOKEN_KEY}_at`, String(at))
+  unauthorizedFired = false
+  restoreFailedOnce = false
+}
+export function getSavedPasswordAt(): number {
+  return Number(localStorage.getItem(SAVED_PW_AT_KEY) ?? 0)
+}
+export function setSavedPasswordRaw(pw: string, at: number): void {
+  localStorage.setItem(SAVED_PW_KEY, pw)
+  localStorage.setItem(SAVED_PW_AT_KEY, String(at))
+}
+export function setSavedUsernameRaw(username: string): void {
+  localStorage.setItem(USER_KEY, username)
+}
+
 export class ApiError extends Error {
   status: number
   constructor(status: number, message: string) {
@@ -216,3 +237,4 @@ export const api = {
     return request<SyncState>('GET', `/api/sync/state?since=${since}`)
   },
 }
+
