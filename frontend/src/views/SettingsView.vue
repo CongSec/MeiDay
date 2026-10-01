@@ -2,6 +2,7 @@
 import { computed, inject, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import AppIcon from '@/components/AppIcon.vue'
+import TutorialModal from '@/components/TutorialModal.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useUiStore } from '@/stores/ui'
 import { useStatsStore } from '@/stores/stats'
@@ -96,6 +97,15 @@ watch(
 const visible = reactive<Record<string, boolean>>({})
 const busy = ref(false)
 const err = ref('')
+
+/** 教程弹窗状态：kind 区分 OSS 教程 / 邮箱教程 */
+const tutorialOpen = ref(false)
+const tutorialKind = ref<'oss' | 'email'>('oss')
+function openTutorial(kind: 'oss' | 'email') {
+  tutorialKind.value = kind
+  tutorialOpen.value = true
+  logAudit('打开教程', safeDetail(kind === 'oss' ? '查看 OSS 配置教程' : '查看微信消息通知教程'))
+}
 
 function toggle(k: string) {
   const showing = !visible[k]
@@ -313,6 +323,17 @@ async function save() {
               {{ visible[f.key] ? '隐藏' : '显示' }}
             </button>
           </div>
+          <div v-if="f.key === 'notifyEmail'" class="pt-1">
+            <button
+              type="button"
+              class="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm text-brand hover:bg-brand/5"
+              @click="openTutorial('email')"
+            >
+              <AppIcon name="book" :size="15" />
+              不会配置？查看微信消息通知配置教程
+            </button>
+          </div>
+
           <div v-if="f.key === 'endpoint'" class="pt-1">
             <button
               type="button"
@@ -321,6 +342,14 @@ async function save() {
               @click="testOss"
             >
               {{ ossTesting ? '测试中…' : '测试 OSS 配置' }}
+            </button>
+            <button
+              type="button"
+              class="mt-2 w-full flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm text-brand hover:bg-brand/5"
+              @click="openTutorial('oss')"
+            >
+              <AppIcon name="book" :size="15" />
+              不会配置？查看 OSS 配置教程
             </button>
             <div v-if="ossTestMsg" class="mt-2 text-sm whitespace-pre-wrap" :class="ossTestMsg.ok ? 'text-green-600' : 'text-red-500'">
               {{ ossTestMsg.text }}
@@ -465,5 +494,7 @@ async function save() {
       </div>
     </div>
   </div>
+
+  <TutorialModal :open="tutorialOpen" :kind="tutorialKind" @close="tutorialOpen = false" />
 </template>
 
