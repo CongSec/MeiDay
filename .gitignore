@@ -134,3 +134,6 @@ verify_real.py
 
 # ===== Playwright MCP 调试日志 =====
 .playwright-mcp/
+
+# ===== 一键构建输出 =====
+output/

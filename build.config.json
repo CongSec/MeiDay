@@ -1,0 +1,15 @@
+{
+  "repos": {
+    "meiday": "https://github.com/CongSec/MeiDay.git",
+    "plugin": "https://github.com/CongSec/meiday-siyuan-plugin.git"
+  },
+  "paths": {
+    "meiday_dir": "",
+    "plugin_dir": "",
+    "output_dir": "output"
+  },
+  "frontend": {
+    "api_base_url": "https://task.congsec.cn",
+    "cdn_base": ""
+  }
+}
