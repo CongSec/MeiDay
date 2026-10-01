@@ -185,17 +185,13 @@ const visibleKey = computed(() => {
   for (const t of sorted.value) k += `${t.id}:${t.updatedAt}:${t.name}\n`
   return k
 })
-watch(visibleKey, () => {
-  pushView()
-  refreshPreview()
-}, { immediate: true })
+watch(visibleKey, () => pushView(), { immediate: true })
 watch(today, () => pushView())
 watch(
   () => widget.mode,
   (mode) => {
     if (mode === 'settings') {
       resizeWidget(SETTINGS_W, SETTINGS_H)
-      refreshPreview()
     } else if (mode === 'view') {
       pushView()
     }
@@ -209,33 +205,6 @@ watch(
     if (!v) widget.setMode('settings')
   },
 )
-
-/* ---------------- 任务显示实时预览（所见即所得） ---------------- */
-/** 由 Python 端 NativeWidget.render_preview 按当前任务数据 + 外观参数合成，
-    与任务显示界面使用同一套渲染逻辑，设置面板里拖动滑块即可直接看到效果。 */
-const previewSrc = ref('')
-let previewTimer: number | undefined
-
-async function refreshPreview() {
-  if (widget.mode !== 'settings') return
-  const api = pvApi()
-  if (!api?.preview_widget) return
-  try {
-    const url = await api.preview_widget({
-      width: widget.width,
-      opacity: widget.opacity,
-      fontSize: widget.fontSize,
-    })
-    if (url) previewSrc.value = url
-  } catch {
-    /* 忽略：浏览器调试时无 pywebview 桥 */
-  }
-}
-/** 滑块 / 输入框拖动时防抖刷新预览（@input 触发）；落盘仍由 @change=persistWidget 负责。 */
-function onAppearanceInput() {
-  window.clearTimeout(previewTimer)
-  previewTimer = window.setTimeout(refreshPreview, 120)
-}
 
 /* ---------------- 设置面板交互 ---------------- */
 function toggleShow() {
@@ -331,15 +300,6 @@ const settingsBgStyle = computed(() => ({ background: '#0f172a' }))
           <button class="ghost-btn" @click="doLogout">退出登录</button>
         </section>
 
-        <section class="group preview-group">
-          <div class="group-title">任务显示预览</div>
-          <div class="hint">下方调节宽度 / 透明度 / 字体大小时，此处即时呈现任务显示界面的真实效果。</div>
-          <div class="preview-backdrop">
-            <img v-if="previewSrc" :src="previewSrc" class="preview-img" :style="{ width: widget.width + 'px' }" alt="任务显示预览" />
-            <span v-else class="preview-empty">预览加载中…</span>
-          </div>
-        </section>
-
         <section class="group">
           <div class="group-title">小组件</div>
           <div class="row">
@@ -365,7 +325,6 @@ const settingsBgStyle = computed(() => ({ background: '#0f172a' }))
               max="1"
               step="0.01"
               v-model.number="widget.opacity"
-              @input="onAppearanceInput"
               @change="persistWidget"
             />
             <span class="row-value">{{ Math.round(widget.opacity * 100) }}%</span>
@@ -380,7 +339,6 @@ const settingsBgStyle = computed(() => ({ background: '#0f172a' }))
               max="520"
               step="10"
               v-model.number="widget.width"
-              @input="onAppearanceInput"
               @change="persistWidget"
             />
           </div>
@@ -393,7 +351,6 @@ const settingsBgStyle = computed(() => ({ background: '#0f172a' }))
               max="32"
               step="1"
               v-model.number="widget.fontSize"
-              @input="onAppearanceInput"
               @change="persistWidget"
             />
             <span class="row-value">{{ widget.fontSize }}px</span>
@@ -551,39 +508,6 @@ const settingsBgStyle = computed(() => ({ background: '#0f172a' }))
 }
 .num-input:focus {
   border-color: #3b82f6;
-}
-/* 任务显示实时预览 */
-.preview-group {
-  background: rgba(255, 255, 255, 0.04);
-}
-.preview-backdrop {
-  overflow-x: auto;
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  min-height: 64px;
-  padding: 10px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, #5b8def 0%, #9b6df0 50%, #2fb8a6 100%);
-  scrollbar-width: thin;
-}
-.preview-backdrop::-webkit-scrollbar {
-  height: 6px;
-}
-.preview-backdrop::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.35);
-  border-radius: 3px;
-}
-.preview-img {
-  flex: 0 0 auto;
-  height: auto;
-  border-radius: 10px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
-}
-.preview-empty {
-  color: rgba(255, 255, 255, 0.7);
-  font-size: 12px;
-  padding: 16px 0;
 }
 /* 开关 */
 .switch {
