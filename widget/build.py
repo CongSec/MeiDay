@@ -2,8 +2,10 @@
 """
 MeiDay 桌面小组件 打包脚本（PyInstaller，Windows 专用）
 
-产物：widget/build/dist/MeiDayWidget/MeiDayWidget.exe（onedir 目录）
-  - onedir 而非 onefile：config.json 必须落在「程序同级目录」，onefile 无法保证；
+产物：widget/build/dist/MeiDayWidget.exe（onefile 单文件，拷到任意 64 位 Win10/11 双击即运行）
+  - onefile 单文件：无需携带 _internal 目录；config.json 仍落在「程序同级目录」——
+    run.py 用 Path(sys.executable).parent 解析 CONFIG_DIR，onefile 下同样成立
+    （sys.executable 指向真实 exe 路径，而非 _MEIPASS 临时目录）；
   - --noconsole：后台托盘程序，不弹控制台窗口；
   - 前端 widget/dist 作为数据打进 bundle（_MEIPASS/dist），运行时由内置 HTTP 服务托管；
   - logo.png 同时打进 bundle 根（_MEIPASS/logo.png），供托盘图标使用；
@@ -50,12 +52,12 @@ def make_icon():
 
 
 def package():
-    print("==> PyInstaller 打包（onedir）")
+    print("==> PyInstaller 打包（onefile 单文件）")
     sep = ";" if sys.platform == "win32" else ":"
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm", "--clean",
-        "--noconsole", "--onedir",
+        "--noconsole", "--onefile",
         "--name", NAME,
         "--icon", str(ICON),
         "--distpath", str(OUTPUT_DIR),
@@ -80,7 +82,7 @@ def main():
     package()
     print()
     print("完成！可执行文件位于：")
-    print("  ", OUTPUT_DIR / NAME / f"{NAME}.exe")
+    print("  ", OUTPUT_DIR / f"{NAME}.exe")
 
 
 if __name__ == "__main__":

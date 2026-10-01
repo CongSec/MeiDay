@@ -399,9 +399,14 @@ def build_widget(widget_dir: Path, output_dir: Path) -> None:
     ensure_npm_deps(widget_dir, "widget")
     log("  [pyinstaller] python build.py ...")
     run([python_cmd(), "build.py"], cwd=widget_dir)
-    exe = widget_dir / "build" / "dist" / "MeiDayWidget" / "MeiDayWidget.exe"
-    if not exe.is_file():
-        log(f"[失败] 未找到组件可执行文件：{exe}")
+    # onefile 产物在 distpath 根目录；onedir 产物在 MeiDayWidget 子目录（兼容旧版）
+    candidates = [
+        widget_dir / "build" / "dist" / "MeiDayWidget.exe",
+        widget_dir / "build" / "dist" / "MeiDayWidget" / "MeiDayWidget.exe",
+    ]
+    exe = next((c for c in candidates if c.is_file()), None)
+    if exe is None:
+        log("[失败] 未找到组件可执行文件（已查找：widget/build/dist/MeiDayWidget.exe 及其旧版子目录）")
         sys.exit(1)
     target = output_dir / "MeiDay.exe"
     shutil.copy2(exe, target)
