@@ -9,7 +9,7 @@ import { queueSyncChange } from '@/utils/syncReport'
 import { nowIso, todayKey } from '@/utils/time'
 import { isTaskVisibleToday } from '@/utils/todayFilter'
 import { buildRepeatOccurrence, nextRepeatDate, shiftTaskTimes } from '@/utils/repeat'
-import { normalizeTasks, taskEffectiveEndTime } from '@/utils/task'
+import { canonicalJson, normalizeTasks, taskEffectiveEndTime } from '@/utils/task'
 import { addDaysKey, dateKeyOf, diffDaysKey } from '@/utils/time'
 import { UNCATEGORIZED, type RepeatMaster, type Task } from '@/types'
 
@@ -412,7 +412,9 @@ export const useTasksStore = defineStore('tasks', {
       if (newEtag) await idbPut('kv', etagKey, newEtag)
       const newLm = lastModifiedOf(res.res.headers as Record<string, unknown>)
       if (newLm) await idbPut('kv', lmKey, newLm)
-      if (JSON.stringify(merged) !== JSON.stringify(rawRemoteActive)) {
+      // 仅排序/字段顺序不同而内容一致时不写回，避免每 2 秒轮询反复改写任务文件
+      // 导致 OSS 版本号跳动、其它端误报“检测到其他设备同时修改”
+      if (canonicalJson(merged) !== canonicalJson(sortActiveList([...rawRemoteActive]))) {
         await this.saveProjectNow(projectId, [...merged])
       }
       if (!this.loadedProjects.includes(projectId)) {

@@ -106,3 +106,18 @@ export function sortSubtasks(list: Subtask[]): Subtask[] {
     return a.updatedAt.localeCompare(b.updatedAt)
   })
 }
+
+/** 规范化 JSON 序列化：递归对对象键排序、数组保持原顺序。
+ *  用于“内容是否真的变了”的语义比较，忽略对象字段顺序差异，
+ *  避免仅字段顺序/排序差异触发无意义写回与多端冲突误报。 */
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value !== null && typeof value === 'object') {
+    const obj = value as Record<string, unknown>
+    return `{${Object.keys(obj)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`)
+      .join(',')}}`
+  }
+  return JSON.stringify(value)
+}

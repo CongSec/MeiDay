@@ -16,7 +16,7 @@ import { buildOccurrenceTemplate, buildReminderPayload, buildRepeatOccurrence, n
 import { api } from '@/api/client'
 import { logAudit, safeDetail } from '@/utils/audit'
 import { UNCATEGORIZED, type AttachmentMeta, type RepeatMaster, type Subtask, type Task } from '@/types'
-import { compareSortTime, newSubtask, normalizeTask, normalizeTasks, pendingSubtaskReminders, taskEffectiveEndTime, taskEffectiveSortTime } from '@/utils/task'
+import { canonicalJson, compareSortTime, newSubtask, normalizeTask, normalizeTasks, pendingSubtaskReminders, taskEffectiveEndTime, taskEffectiveSortTime } from '@/utils/task'
 import { deleteAttachments } from '@/utils/attachments'
 const saveDebouncers = new Map<string, Debounced<[]>>()
 const trashDebouncers = new Map<string, Debounced<[]>>()
@@ -1305,9 +1305,10 @@ export const useTasksStore = defineStore('tasks', {
       if (newEtag) await idbPut('kv', etagKey, newEtag)
       const newLm = lastModifiedOf(res.res.headers as Record<string, unknown>)
       if (newLm) await idbPut('kv', lmKey, newLm)
-      // 合并结果相对远端原始内容有差异（含被过滤掉的过期副本）时写回，
-      // 让其他设备也能看到，并顺带“自愈”掉源项目里残留的旧副本（BUG）
-      if (JSON.stringify(merged) !== JSON.stringify(rawRemoteActive)) {
+      // 合并结果相对远端内容有差异（规范化 + 排序后比较，含被过滤掉的过期副本）时写回，
+      // 让其他设备也能看到，并顺带“自愈”掉源项目里残留的旧副本（BUG）。
+      // 仅排序/字段顺序不同而内容一致时不写回，避免多端轮询反复改写导致版本号跳动误报冲突
+      if (canonicalJson(merged) !== canonicalJson(sortActiveList([...rawRemoteActive]))) {
         await this.saveProject(projectId, [...merged])
       }
     },
@@ -1383,6 +1384,9 @@ export const useTasksStore = defineStore('tasks', {
       let knownEtag = await idbGet<string>('kv', etagKey)
       try {
       // CAS 写入 + 冲突合并：最多重试 3 次，防止多端同时编辑互相覆盖（丢失更新）
+      // 冲突合并是否真的引入了远端新数据：仅用于决定是否弹「已自动合并」提示，
+      // 只是版本号过期、内容一致时静默完成，避免多端同时在线时反复误报刷屏
+      let mergedNewData = false
       for (let attempt = 0; attempt < 3; attempt++) {
         const result = await compareAndSwapPut<Task[]>(client, key, list, knownEtag)
         if (result.ok) {
@@ -1391,7 +1395,7 @@ export const useTasksStore = defineStore('tasks', {
           await idbDel('kv', lmKeyOf(etagKey))
           await idbPut('tasks', taskCacheKey(auth.username, projectId), list)
             queueSyncChange(auth.username, 'tasks', projectId)
-          if (attempt > 0) useUiStore().toast('检测到其他设备同时修改，已自动合并最新数据', 'ok')
+          if (attempt > 0 && mergedNewData) useUiStore().toast('检测到其他设备同时修改，已自动合并最新数据', 'ok')
           return true
         }
         // 冲突：把远端与本地按 updatedAt 合并后再重试，不丢失任一端修改
@@ -1414,7 +1418,13 @@ export const useTasksStore = defineStore('tasks', {
             remoteDeleted,
             remoteTrash,
           )
+          // 对比“本次原本要写的内容”：仅当合并结果有实质差异（远端确实带入新数据/删除墓碑影响结果）
+          // 才标记为真合并；否则只是版本号过期、内容一致，不弹「已自动合并」提示
+          const beforeMerge = list
           list = sortActiveList(applyDeletedTombstones(mergeTasks(list, filteredRemote), tombstones))
+          if (canonicalJson(list) !== canonicalJson(sortActiveList([...beforeMerge]))) {
+            mergedNewData = true
+          }
           knownEtag = result.remoteEtag ?? undefined
           if (!snapshot) {
             this.tasks[projectId] = list

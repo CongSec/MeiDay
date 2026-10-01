@@ -6,6 +6,7 @@ import { useTasksStore } from './tasks'
 import { useStatsStore } from './stats'
 import { createOssClient, describeOssError, paths } from '@/utils/oss'
 import { applyDeletedProjectTombstones, compareAndSwapPut, lastModifiedOf, lmKeyOf, mergeProfile, versionToken } from '@/utils/sync'
+import { canonicalJson } from '@/utils/task'
 import { enrichOssError } from '@/utils/ossDiag'
 import { idbGet, idbPut, idbDel } from '@/utils/idb'
 import { queueSyncChange } from '@/utils/syncReport'
@@ -25,6 +26,14 @@ let profileSaveTimer: number | undefined
 /** profile 加载的 in-flight Promise：LayoutView 引导加载与 TodayView onMounted 可能同时
  *  调用 load()，复用同一个请求避免重复拉取 profile.json（重复 OSS 请求/内存写入）。 */
 let profileLoadPromise: Promise<void> | undefined
+/** 最近一次“已成功写盘”的 profile 内容指纹（用户名 + 项目/删除墓碑），
+ *  供 _persist 判断内容未变时跳过无意义写盘：避免每次刷新 updated_at → OSS 版本号跳动 */
+let lastSavedProfileUser: string | undefined
+let lastSavedProfileFingerprint: string | undefined
+/** 计算 profile 的内容指纹（忽略 updated_at，只关注业务数据是否变化） */
+function profileContentFingerprint(username: string, snapshot: Profile): string {
+  return `${username}|${canonicalJson(snapshot.projects)}|${canonicalJson(snapshot.deletedProjects ?? [])}`
+}
 
 export const useProjectsStore = defineStore('projects', {
   state: () => ({
@@ -128,6 +137,15 @@ export const useProjectsStore = defineStore('projects', {
         deletedProjects: [...(this.deletedProjects ?? [])],
         updated_at: nowIso(),
       }
+      // 项目列表/删除墓碑与上次成功写盘一致时不再调度写盘，
+      // 避免每次 _persist 都刷新 updated_at → OSS 版本号跳动 → 其它端误报冲突
+      if (
+        auth.username &&
+        lastSavedProfileUser === auth.username &&
+        lastSavedProfileFingerprint === profileContentFingerprint(auth.username, snapshot)
+      ) {
+        return
+      }
       if (auth.username) {
         void idbPut('profile', auth.username, snapshot)
       }
@@ -153,6 +171,9 @@ export const useProjectsStore = defineStore('projects', {
 
       try {
       // CAS 写入 + 冲突合并：最多重试 3 次，防止多端同时改项目列表互相覆盖
+      // 冲突合并是否真的引入了远端新数据：仅用于决定是否弹「已合并项目列表」提示，
+      // 只是版本号过期、内容一致时静默完成，避免多端同时在线时反复误报刷屏
+      let mergedNewData = false
       for (let attempt = 0; attempt < 3; attempt++) {
         const result = await compareAndSwapPut<Profile>(client, key, profile, knownEtag)
         if (result.ok) {
@@ -160,11 +181,22 @@ export const useProjectsStore = defineStore('projects', {
           // 写成功后清掉 Last-Modified，避免旧值导致后续 304 误判（Last-Modified 秒级精度）
           await idbDel('kv', lmKeyOf(etagKey))
           await idbPut('profile', auth.username, profile)
-          if (attempt > 0) useUiStore().toast('检测到其他设备同时修改，已合并项目列表', 'ok')
+          // 记录本次成功写盘的内容指纹，供 _persist 判断后续是否真的发生了变化
+          lastSavedProfileUser = auth.username
+          lastSavedProfileFingerprint = profileContentFingerprint(auth.username, profile)
+          if (attempt > 0 && mergedNewData) useUiStore().toast('检测到其他设备同时修改，已合并项目列表', 'ok')
           return true
         }
         if (result.remote) {
+          const beforeProfile = profile
           profile = mergeProfile(profile, result.remote as Profile)
+          // 仅当合并结果相对“本次原本要写的内容”有实质差异（项目/删除墓碑变化）才算真合并
+          if (
+            canonicalJson(profile.projects) !== canonicalJson(beforeProfile.projects) ||
+            canonicalJson(profile.deletedProjects ?? []) !== canonicalJson(beforeProfile.deletedProjects ?? [])
+          ) {
+            mergedNewData = true
+          }
           knownEtag = result.remoteEtag ?? undefined
           if (!snapshot) {
             this.projects = profile.projects
