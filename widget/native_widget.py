@@ -239,6 +239,7 @@ class NativeWidget:
             "y": 0,
             "width": 360,
             "transparency": 0.6,   # 背景透明度：越大越透明
+            "font_size": 16,      # 任务文字基准字号（px），日期/计数按比例缩放
             "date": "",
             "count": "",
             "tasks": [],           # list[str]
@@ -288,12 +289,14 @@ class NativeWidget:
             tasks=list(data.get("tasks") or []),
         )
 
-    def set_appearance(self, width=None, transparency=None):
+    def set_appearance(self, width=None, transparency=None, font_size=None):
         kw = {}
         if width is not None:
             kw["width"] = int(width)
         if transparency is not None:
             kw["transparency"] = max(0.05, min(1.0, float(transparency)))
+        if font_size is not None:
+            kw["font_size"] = max(12, min(40, int(font_size)))
         if kw:
             self.set_state(**kw)
 
@@ -379,14 +382,34 @@ class NativeWidget:
     # ------------------------------------------------------------------
     # 渲染
     # ------------------------------------------------------------------
+    def _layout(self, st):
+        """按基准字号(font_size)推导各区域尺寸（物理像素）。"""
+        fs = int(st.get("font_size") or 16)
+        fs = max(12, min(40, fs))
+        return {
+            "fs": fs,
+            "pad_x": self.PAD_X,
+            "pad_top": round(fs * 0.75),          # 12 @ fs=16
+            "pad_bottom": round(fs * 0.75),       # 12 @ fs=16
+            "header_h": max(20, round(fs * 1.5)), # 24 @ fs=16
+            "task_row_h": max(24, round(fs * 1.75)),  # 28 @ fs=16
+            "empty_h": round(fs * 5.75),          # 92 @ fs=16
+            "font_date": max(12, fs + 1),
+            "font_count": max(10, fs - 2),
+            "font_task": fs,
+            "font_empty": fs,
+            "font_hint": max(10, fs - 2),
+        }
+
     def _measure(self, st):
         """按任务数量计算高度（物理像素），并裁剪超出最大高度的行。"""
         w = int(st["width"])
+        L = self._layout(st)
         tasks = st["tasks"]
         if not tasks:
-            h = self.PAD_TOP + self.HEADER_H + self.EMPTY_H + self.PAD_BOTTOM
+            h = L["pad_top"] + L["header_h"] + L["empty_h"] + L["pad_bottom"]
             return w, min(self.H_MAX, max(self.H_MIN, h))
-        h = self.PAD_TOP + self.HEADER_H + len(tasks) * self.TASK_ROW_H + self.PAD_BOTTOM
+        h = L["pad_top"] + L["header_h"] + len(tasks) * L["task_row_h"] + L["pad_bottom"]
         h = min(self.H_MAX, max(self.H_MIN, h))
         return w, h
 
@@ -398,23 +421,27 @@ class NativeWidget:
             d.rounded_rectangle(
                 [0, 0, w - 1, h - 1], radius=self.ROUND_RADIUS, fill=(255, 255, 255, alpha)
             )
-        # 文字：纯黑，不透明
-        font_date = _load_font(14, bold=True)
-        font_count = _load_font(11)
-        font_task = _load_font(13)
-        font_empty = _load_font(13, bold=True)
-        font_hint = _load_font(11)
+        L = self._layout(st)
+        # 文字：纯黑，不透明；字号随 font_size 缩放
+        font_date = _load_font(L["font_date"], bold=True)
+        font_count = _load_font(L["font_count"])
+        font_task = _load_font(L["font_task"])
+        font_empty = _load_font(L["font_empty"], bold=True)
+        font_hint = _load_font(L["font_hint"])
 
         txt_color = (0, 0, 0, 255)
         sub_color = (60, 60, 60, 255)
+        c_off = max(1, round(L["fs"] * 3 / 16))    # 计数在日期行内的垂直偏移
+        e_off = round(L["fs"] * 10 / 16)           # 空状态主文案偏移
+        e_hint_off = round(L["fs"] * 34 / 16)      # 空状态提示偏移
 
-        y = self.PAD_TOP
+        y = L["pad_top"]
         if st["date"]:
-            d.text((self.PAD_X, y), st["date"], font=font_date, fill=txt_color)
+            d.text((L["pad_x"], y), st["date"], font=font_date, fill=txt_color)
         if st["count"]:
             cw = d.textlength(st["count"], font=font_count)
-            d.text((w - self.PAD_X - cw, y + 3), st["count"], font=font_count, fill=sub_color)
-        y += self.HEADER_H
+            d.text((w - L["pad_x"] - cw, y + c_off), st["count"], font=font_count, fill=sub_color)
+        y += L["header_h"]
 
         tasks = st["tasks"]
         if not tasks:
@@ -425,13 +452,13 @@ class NativeWidget:
                 empty = "正在同步…"
                 hint = ""
             ew = d.textlength(empty, font=font_empty)
-            d.text(((w - ew) / 2, y + 10), empty, font=font_empty, fill=txt_color)
+            d.text(((w - ew) / 2, y + e_off), empty, font=font_empty, fill=txt_color)
             if hint:
                 hw_ = d.textlength(hint, font=font_hint)
-                d.text(((w - hw_) / 2, y + 34), hint, font=font_hint, fill=sub_color)
+                d.text(((w - hw_) / 2, y + e_hint_off), hint, font=font_hint, fill=sub_color)
             return img
 
-        avail_w = w - self.PAD_X * 2
+        avail_w = w - L["pad_x"] * 2
         for name in tasks:
             if y > h - 8:
                 break
@@ -439,8 +466,8 @@ class NativeWidget:
             for ln in lines[:2]:  # 每行最多两行，避免超高
                 if y > h - 8:
                     break
-                d.text((self.PAD_X, y), ln, font=font_task, fill=txt_color)
-                y += self.TASK_ROW_H
+                d.text((L["pad_x"], y), ln, font=font_task, fill=txt_color)
+                y += L["task_row_h"]
         return img
 
     @staticmethod

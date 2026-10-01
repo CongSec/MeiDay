@@ -7,7 +7,7 @@ import {
  * 桌面小组件与 Python 壳之间的配置桥接。
  * config.json 固定存放于程序同级目录（Python 端管理），结构：
  *   { session: {token, tokenAt, savedPw, savedPwAt, username},
- *     widget:  {opacity, width, posX, posY, autoStart} }
+ *     widget:  {opacity, width, posX, posY, autoStart, fontSize} }
  * 登录态在 localStorage（同步访问）与 config.json（持久化）之间镜像。
  */
 
@@ -26,6 +26,8 @@ export interface WidgetConfig {
   posX: number | null
   posY: number | null
   autoStart: boolean
+  /** 任务文字基准字号（px） */
+  fontSize: number
 }
 
 export interface AppConfig {
@@ -51,6 +53,7 @@ const defaultWidget = (): WidgetConfig => ({
   posX: null,
   posY: null,
   autoStart: false,
+  fontSize: 16,
 })
 
 export async function readConfig(): Promise<AppConfig> {

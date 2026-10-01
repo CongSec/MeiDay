@@ -90,7 +90,7 @@ def _native():
 # ---------------------------------------------------------------------------
 DEFAULT_CONFIG = {
     "session": {"token": "", "tokenAt": 0, "savedPw": "", "savedPwAt": 0, "username": ""},
-    "widget": {"opacity": 0.6, "width": 360, "posX": None, "posY": None, "autoStart": False},
+    "widget": {"opacity": 0.6, "width": 360, "posX": None, "posY": None, "autoStart": False, "fontSize": 16},
 }
 
 
@@ -559,7 +559,11 @@ class Api:
         if native is not None:
             native.set_data(data or {})
             cfg = read_config().get("widget", {})
-            native.set_appearance(width=cfg.get("width"), transparency=cfg.get("opacity"))
+            native.set_appearance(
+                width=cfg.get("width"),
+                transparency=cfg.get("opacity"),
+                font_size=cfg.get("fontSize"),
+            )
         return True
 
     def read_config(self):
@@ -573,7 +577,11 @@ class Api:
             w = data.get("widget", {})
             native = _native()
             if native is not None:
-                native.set_appearance(width=w.get("width"), transparency=w.get("opacity"))
+                native.set_appearance(
+                    width=w.get("width"),
+                    transparency=w.get("opacity"),
+                    font_size=w.get("fontSize"),
+                )
                 px, py = w.get("posX"), w.get("posY")
                 if isinstance(px, (int, float)) and isinstance(py, (int, float)):
                     scale = _dpi_scale() or 1.0
@@ -615,6 +623,7 @@ def main():
     native.set_appearance(
         width=int(cfg["widget"].get("width") or 360),
         transparency=cfg["widget"].get("opacity", 0.6),
+        font_size=cfg["widget"].get("fontSize", 16),
     )
 
     window = webview.create_window(

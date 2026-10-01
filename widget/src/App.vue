@@ -217,6 +217,7 @@ function persistWidget() {
   // 钳制取值范围后再落盘
   widget.opacity = Math.min(1, Math.max(0.1, Number(widget.opacity) || 0.6))
   widget.width = Math.min(520, Math.max(240, Math.round(Number(widget.width) || 360)))
+  widget.fontSize = Math.min(32, Math.max(14, Math.round(Number(widget.fontSize) || 16)))
   void widget.persist()
 }
 async function onAutoStart(e: Event) {
@@ -340,6 +341,19 @@ const settingsBgStyle = computed(() => ({ background: '#0f172a' }))
               v-model.number="widget.width"
               @change="persistWidget"
             />
+          </div>
+          <div class="row">
+            <span class="row-label">字体大小 (px)</span>
+            <input
+              class="range"
+              type="range"
+              min="14"
+              max="32"
+              step="1"
+              v-model.number="widget.fontSize"
+              @change="persistWidget"
+            />
+            <span class="row-value">{{ widget.fontSize }}px</span>
           </div>
         </section>
 

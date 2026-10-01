@@ -22,6 +22,7 @@ export const useWidgetStore = defineStore('widget', {
     posX: null as number | null,
     posY: null as number | null,
     autoStart: false,
+    fontSize: 16,
     ready: false,
   }),
   actions: {
@@ -32,6 +33,7 @@ export const useWidgetStore = defineStore('widget', {
       this.width = Math.min(520, Math.max(240, Number(w.width) || 360))
       this.posX = typeof w.posX === 'number' ? w.posX : null
       this.posY = typeof w.posY === 'number' ? w.posY : null
+      this.fontSize = Math.min(32, Math.max(14, Number(w.fontSize) || 16))
       this.autoStart = !!w.autoStart
       // 以系统注册表为准同步开机自启动状态（可能被外部改动）
       const api = pvApi()
@@ -65,6 +67,7 @@ export const useWidgetStore = defineStore('widget', {
         posX: this.posX,
         posY: this.posY,
         autoStart: this.autoStart,
+        fontSize: this.fontSize,
       })
     },
     async setAutoStart(value: boolean): Promise<void> {
