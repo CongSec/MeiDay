@@ -300,6 +300,22 @@ class NativeWidget:
         if kw:
             self.set_state(**kw)
 
+    def render_preview(self, width=None, transparency=None, font_size=None):
+        """按当前任务数据 + 给定外观，离线合成一张与任务显示完全一致的预览图（RGBA）。
+
+        供设置面板实时预览使用：不依赖窗口可见，直接用与 _render 相同的
+        _measure/_compose 逻辑合成，保证预览所见即任务显示所见。
+        """
+        st = self._snapshot()
+        if width is not None:
+            st["width"] = int(width)
+        if transparency is not None:
+            st["transparency"] = max(0.05, min(1.0, float(transparency)))
+        if font_size is not None:
+            st["font_size"] = max(12, min(40, int(font_size)))
+        w, h = self._measure(st)
+        return self._compose(st, w, h)
+
     def apply_affinity(self):
         if not self._anti_capture:
             return

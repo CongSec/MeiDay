@@ -594,6 +594,30 @@ class Api:
     def get_auto_start(self):
         return get_auto_start()
 
+    def preview_widget(self, patch):
+        """按给定外观（width/opacity/fontSize）渲染任务显示界面预览图，返回 PNG dataURL。
+
+        设置面板拖动滑块时实时调用，用于「所见即所得」的效果预览。
+        """
+        native = _native()
+        if native is None:
+            return None
+        patch = patch or {}
+        img = native.render_preview(
+            width=patch.get("width"),
+            transparency=patch.get("opacity"),
+            font_size=patch.get("fontSize"),
+        )
+        try:
+            import base64
+            import io as _io
+            buf = _io.BytesIO()
+            img.save(buf, format="PNG")
+            return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+        except Exception as e:
+            print("[widget] 预览渲染失败：", e)
+            return None
+
 
 # ---------------------------------------------------------------------------
 def _set_process_dpi_aware():
