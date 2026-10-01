@@ -276,7 +276,10 @@ const settingsBgStyle = computed(() => ({
   <!-- ============ 设置面板：可交互、可拖拽 ============ -->
   <div v-else-if="widget.mode === 'settings'" class="settings-root" :style="settingsBgStyle">
     <header class="settings-header" @mousedown="onTitlebarDown">
-      <span class="settings-title">{{ auth.isLoggedIn ? '设置' : '登录 MeiDay 小组件' }}</span>
+      <div class="settings-header-left">
+        <span class="settings-title">{{ auth.isLoggedIn ? '设置' : '登录 MeiDay 小组件' }}</span>
+        <span class="settings-drag-hint">拖拽移动位置</span>
+      </div>
       <button v-if="auth.isLoggedIn" class="icon-btn" title="关闭设置" @click="closeSettings">
         <svg viewBox="0 0 16 16" width="12" height="12">
           <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
@@ -371,11 +374,6 @@ const settingsBgStyle = computed(() => ({
         </section>
 
         <section class="group">
-          <div class="group-title">屏幕位置</div>
-          <div class="hint">拖动上方标题栏即可自由调整小组件位置，松开后自动保存，下次启动恢复。</div>
-        </section>
-
-        <section class="group">
           <div class="group-title">启动</div>
           <div class="row">
             <span class="row-label">开机自启动</span>
@@ -430,8 +428,15 @@ const settingsBgStyle = computed(() => ({
   justify-content: space-between;
   gap: 8px;
   padding: 10px 12px;
+  background: #ffffff; /* 标题栏白色不透明背景（与设置主体半透明区分） */
   border-bottom: 1px solid rgba(0, 0, 0, 0.1);
   cursor: move;
+}
+.settings-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 .settings-title {
   font-size: calc(var(--fs, 16px) * 1.06);
@@ -439,6 +444,13 @@ const settingsBgStyle = computed(() => ({
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+  min-width: 0;
+}
+.settings-drag-hint {
+  flex-shrink: 0;
+  font-size: calc(var(--fs, 16px) * 0.78);
+  color: #999;
+  white-space: nowrap;
 }
 .icon-btn {
   display: inline-flex;
