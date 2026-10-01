@@ -152,6 +152,10 @@ async function pullChanges(changes: SyncStateItem[]): Promise<boolean> {
         case 'today_order':
           await tasks.loadTodayOrder()
           break
+        case 'trash':
+          // 回收站/时间胶囊变更：重新拉取对应项目，用回收站墓碑剔除已入舱/已软删任务
+          if (c.project_id) await syncProjectWithRepeats(c.project_id)
+          break
         default:
           break
       }

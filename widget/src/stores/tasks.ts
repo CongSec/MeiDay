@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { useAuthStore } from './auth'
 import { useStatsStore } from './stats'
 import { useUiStore } from './ui'
-import { createOssClient, describeOssError, paths } from '@/utils/oss'
+import { createOssClient, describeOssError, paths, type OssClient } from '@/utils/oss'
 import { applyDeletedTombstones, compareAndSwapPut, lastModifiedOf, lmKeyOf, mergeDeletedTombstones, mergeTasks, versionToken } from '@/utils/sync'
 import { idbGet, idbPut, idbDel } from '@/utils/idb'
 import { queueSyncChange } from '@/utils/syncReport'
@@ -41,6 +41,104 @@ function todayOrderCacheKey(username: string): string {
 function todayOrderEtagKey(username: string): string {
   return `etag:${username}:today_order`
 }
+/** 回收站 IDB 缓存键：真实项目带月份后缀（trash:user:pid:YYYY-MM），未分类沿用单键（与主应用一致） */
+function trashCacheKey(username: string, projectId: string, month?: string): string {
+  return `trash:${username}:${projectId}${month ? `:${month}` : ''}`
+}
+
+/** 未分类回收站存 today_trash.json（单文件不分片）；真实项目回收站按月分片存 trash/{YYYY-MM}.json */
+function trashFilePath(username: string, projectId: string, month?: string): string {
+  return projectId === UNCATEGORIZED
+    ? paths.todayTrash(username)
+    : month
+      ? paths.trashShard(username, projectId, month)
+      : paths.trash(username, projectId)
+}
+
+/** 当前月份键（YYYY-MM） */
+function monthOfNow(): string {
+  return dateKeyOf(nowIso()).slice(0, 7)
+}
+
+/** 上一个自然月（2026-01 -> 2025-12） */
+function prevMonth(month: string): string {
+  const [y, m] = month.split('-').map(Number)
+  const d = new Date(Date.UTC(y, m - 2, 1))
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}`
+}
+
+/** 按 id 去重合并两个任务列表（保序：base 在前，incoming 补充新增） */
+function mergeUnique(base: Task[], incoming: Task[]): Task[] {
+  const seen = new Set(base.map((t) => t.id))
+  return [...base, ...incoming.filter((t) => !seen.has(t.id))]
+}
+
+/** 拉取远端单个回收站文件（真实项目某月分片 / 未分类单文件）；文件不存在时视为空，网络/权限错误向上抛。
+ *  带 Last-Modified 条件 GET（If-Modified-Since）：远端未变化返回 304 时直接复用本地缓存，
+ *  避免每次同步都全量下载（回收站按月分片后日常只碰当月 + 上月两个小文件）。 */
+async function fetchRemoteTrashShard(
+  client: OssClient,
+  username: string,
+  projectId: string,
+  month?: string,
+): Promise<Task[]> {
+  const etagKey = `etag:${username}:${projectId}:trash${month ? `:${month}` : ''}`
+  const lmKey = lmKeyOf(etagKey)
+  const cacheKey = trashCacheKey(username, projectId, month)
+  const lm = await idbGet<string>('kv', lmKey)
+  try {
+    const res = await client.get(
+      trashFilePath(username, projectId, month),
+      lm ? { headers: { 'If-Modified-Since': lm } } : undefined,
+    )
+    if (res.res.status === 304) {
+      // 远端未变化：复用本地回收站缓存（无缓存视为空）
+      const cached = await idbGet<Task[]>('trash', cacheKey)
+      return cached ?? []
+    }
+    if (res.res.status === 404) {
+      await idbDel('kv', etagKey)
+      await idbDel('kv', lmKey)
+      return []
+    }
+    const list = JSON.parse(res.content.toString()) as Task[]
+    normalizeTasks(list)
+    const newEtag = versionToken(res.res.headers as Record<string, unknown>, res.content) ?? ''
+    if (newEtag) await idbPut('kv', etagKey, newEtag)
+    const newLm = lastModifiedOf(res.res.headers as Record<string, unknown>)
+    if (newLm) await idbPut('kv', lmKey, newLm)
+    await idbPut('trash', cacheKey, list)
+    return list
+  } catch (e) {
+    const err = e as { code?: string | number; status?: number }
+    if (err.status === 404 || err.code === 'NoSuchKey') {
+      await idbDel('kv', etagKey)
+      await idbDel('kv', lmKey)
+      return []
+    }
+    // 部分 S3 兼容服务对 304 会抛异常而非正常返回：与主应用一致地兜底
+    if (err.code === 304 || err.status === 304) {
+      const cached = await idbGet<Task[]>('trash', cacheKey)
+      return cached ?? []
+    }
+    throw e
+  }
+}
+
+/** 回收站墓碑合并窗口：未分类拉单文件；真实项目拉当月 + 上月分片合并（与主应用一致），
+ *  更早分片不参与同步，避免回收站历史增长拖慢日常操作。 */
+async function fetchRemoteTrash(client: OssClient, username: string, projectId: string): Promise<Task[]> {
+  if (projectId === UNCATEGORIZED) return fetchRemoteTrashShard(client, username, projectId)
+  const cur = monthOfNow()
+  const prev = prevMonth(cur)
+  const [a, b] = await Promise.all([
+    fetchRemoteTrashShard(client, username, projectId, cur),
+    fetchRemoteTrashShard(client, username, projectId, prev),
+  ])
+  return mergeUnique(a, b)
+}
+
 function isServerEmptyError(e: unknown): boolean {
   const err = e as { code?: string | number }
   return err?.code === 'NoSuchKey' || err?.code === 'NoSuchBucket'
@@ -129,7 +227,8 @@ export const useTasksStore = defineStore('tasks', {
           const { active, deleted } = splitDeleted(remote)
           const activeFiltered = active.filter((t) => !t.projectId || t.projectId === projectId)
           const local = (this.tasks[projectId] ?? []).filter((t) => !t.projectId || t.projectId === projectId)
-          const tombstones = mergeDeletedTombstones([], deleted, [])
+          const remoteTrash = await fetchRemoteTrash(client, auth.username, projectId)
+          const tombstones = mergeDeletedTombstones([], deleted, remoteTrash)
           const merged = sortActiveList(
             applyDeletedTombstones(mergeTasks(local, activeFiltered), tombstones),
           )
@@ -139,6 +238,19 @@ export const useTasksStore = defineStore('tasks', {
           if (newEtag) await idbPut('kv', etagKey, newEtag)
           const newLm = lastModifiedOf(res.res.headers as Record<string, unknown>)
           if (newLm) await idbPut('kv', lmKey, newLm)
+        } else {
+          // 活跃任务文件未变化：仍尝试用远端回收站墓碑剔除已入时间胶囊/已软删任务，
+          // 避免冷启动时从本地 IDB 缓存里把已入舱任务“复活”出来。
+          const trash = await fetchRemoteTrash(client, auth.username, projectId)
+          if (trash.length) {
+            const pruned = sortActiveList(
+              applyDeletedTombstones(this.tasks[projectId] ?? [], mergeDeletedTombstones([], trash, [])),
+            )
+            if (JSON.stringify(pruned) !== JSON.stringify(this.tasks[projectId] ?? [])) {
+              this.tasks[projectId] = pruned
+              await idbPut('tasks', taskCacheKey(auth.username, projectId), pruned)
+            }
+          }
         }
       } catch (e) {
         const err = e as { code?: string | number; status?: number }
@@ -269,13 +381,28 @@ export const useTasksStore = defineStore('tasks', {
         paths.tasks(auth.username, projectId),
         lm ? { headers: { 'If-Modified-Since': lm } } : undefined,
       )
-      if (res.res.status === 304) return
+      if (res.res.status === 304) {
+        // 活跃任务文件未变化：仍尝试用远端回收站墓碑剔除已入时间胶囊/已软删任务
+        // （时间胶囊操作可能只改了 trash 分片，任务不消失的 BUG 根源就在这）。
+        const trash = await fetchRemoteTrash(client, auth.username, projectId)
+        if (trash.length) {
+          const pruned = sortActiveList(
+            applyDeletedTombstones(this.tasks[projectId] ?? [], mergeDeletedTombstones([], trash, [])),
+          )
+          if (JSON.stringify(pruned) !== JSON.stringify(this.tasks[projectId] ?? [])) {
+            this.tasks[projectId] = pruned
+            await idbPut('tasks', taskCacheKey(auth.username, projectId), pruned)
+          }
+        }
+        return
+      }
       const remote = JSON.parse(res.content.toString()) as Task[]
       normalizeTasks(remote)
       const { active: rawRemoteActive, deleted: remoteDeleted } = splitDeleted(remote)
       const remoteActive = rawRemoteActive.filter((t) => !t.projectId || t.projectId === projectId)
       const local = (this.tasks[projectId] ?? []).filter((t) => !t.projectId || t.projectId === projectId)
-      const tombstones = mergeDeletedTombstones([], remoteDeleted, [])
+      const remoteTrash = await fetchRemoteTrash(client, auth.username, projectId)
+      const tombstones = mergeDeletedTombstones([], remoteDeleted, remoteTrash)
       const merged = sortActiveList(
         applyDeletedTombstones(mergeTasks(local, remoteActive), tombstones),
       )
@@ -429,7 +556,8 @@ export const useTasksStore = defineStore('tasks', {
             normalizeTasks(remoteList)
             const { active: remoteActive, deleted: remoteDeleted } = splitDeleted(remoteList)
             const filteredRemote = remoteActive.filter((t) => !t.projectId || t.projectId === projectId)
-            const tombstones = mergeDeletedTombstones([], remoteDeleted, [])
+            const remoteTrash = await fetchRemoteTrash(client, auth.username, projectId)
+            const tombstones = mergeDeletedTombstones([], remoteDeleted, remoteTrash)
             list = sortActiveList(applyDeletedTombstones(mergeTasks(list, filteredRemote), tombstones))
             knownEtag = result.remoteEtag ?? undefined
             if (!snapshot) {
