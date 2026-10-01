@@ -132,3 +132,5 @@ _tmp_pw/
 seed_real.py
 verify_real.py
 
+# ===== Playwright MCP 调试日志 =====
+.playwright-mcp/
