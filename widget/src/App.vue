@@ -19,7 +19,7 @@ const stats = useStatsStore()
 const widget = useWidgetStore()
 
 /* ---------------- 窗口控制（pywebview 薄壳，浏览器调试时自动降级为 no-op） ---------------- */
-const SETTINGS_W = 420
+// 设置窗口高度固定；宽度 = 任务显示宽度（widget.width），实时镜像任务显示
 const SETTINGS_H = 580
 
 function pvApi(): any {
@@ -27,6 +27,11 @@ function pvApi(): any {
 }
 function resizeWidget(w: number, h: number) {
   pvApi()?.resize(w, h)
+}
+/** 宽度/字号等设置实时同步到设置窗口本身：设置窗口 = 任务显示实时镜像。
+    宽度滑块 @input 时调用，高度固定，仅宽度跟随任务显示。 */
+function resizeSettings() {
+  resizeWidget(widget.width, SETTINGS_H)
 }
 function quitWidget() {
   pvApi()?.quit()
@@ -191,7 +196,7 @@ watch(
   () => widget.mode,
   (mode) => {
     if (mode === 'settings') {
-      resizeWidget(SETTINGS_W, SETTINGS_H)
+      resizeWidget(widget.width, SETTINGS_H)
     } else if (mode === 'view') {
       pushView()
     }
@@ -254,7 +259,12 @@ onUnmounted(() => {
 /* ---------------- 背景 / 透明度 ---------------- */
 // 视图内容由原生渲染窗口（NativeWidget）展示，透明度由 Python 端传给原生渲染器；
 // 这里只需 settings 面板保持深色可读。
-const settingsBgStyle = computed(() => ({ background: '#0f172a' }))
+// 设置窗口 = 任务显示实时镜像：背景为半透明白色圆角矩形（透明度/字号实时联动），
+// 透明度语义与原生任务显示一致：opacity 越大背景越透明（后面程序越清晰），文字保持黑色。
+const settingsBgStyle = computed(() => ({
+  background: `rgba(255, 255, 255, ${(1 - widget.opacity).toFixed(3)})`,
+  '--fs': `${widget.fontSize}px`,
+}))
 </script>
 
 <template>
@@ -339,6 +349,7 @@ const settingsBgStyle = computed(() => ({ background: '#0f172a' }))
               max="520"
               step="10"
               v-model.number="widget.width"
+              @input="resizeSettings"
               @change="persistWidget"
             />
           </div>
@@ -405,25 +416,28 @@ const settingsBgStyle = computed(() => ({ background: '#0f172a' }))
   display: flex;
   flex-direction: column;
   border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.35);
-  color: #f8fafc;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.22);
+  color: #111;
   overflow: hidden;
-  font-size: 13px;
+  font-size: var(--fs, 16px);
 }
 .settings-header {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 14px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.1);
   cursor: move;
 }
 .settings-title {
-  font-size: 14px;
+  font-size: calc(var(--fs, 16px) * 1.06);
   font-weight: 700;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .icon-btn {
   display: inline-flex;
@@ -431,24 +445,25 @@ const settingsBgStyle = computed(() => ({ background: '#0f172a' }))
   justify-content: center;
   width: 26px;
   height: 26px;
+  flex-shrink: 0;
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: #cbd5e1;
+  color: #555;
   cursor: pointer;
 }
 .icon-btn:hover {
-  background: rgba(255, 255, 255, 0.12);
-  color: #fff;
+  background: rgba(0, 0, 0, 0.08);
+  color: #000;
 }
 .settings-body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px 14px 16px;
+  padding: 10px 12px 14px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 .settings-body::-webkit-scrollbar {
   width: 0;
@@ -457,38 +472,39 @@ const settingsBgStyle = computed(() => ({ background: '#0f172a' }))
 .group {
   display: flex;
   flex-direction: column;
-  gap: 9px;
-  padding: 10px 12px;
+  gap: 8px;
+  padding: 8px 10px;
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(0, 0, 0, 0.05);
+  border: 1px solid rgba(0, 0, 0, 0.08);
 }
 .group-title {
-  font-size: 11px;
+  font-size: calc(var(--fs, 16px) * 0.82);
   font-weight: 700;
-  color: #94a3b8;
+  color: #555;
   letter-spacing: 1px;
 }
 .row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 .row-label {
   flex-shrink: 0;
-  color: #e2e8f0;
+  color: #222;
 }
 .row-value {
   flex-shrink: 0;
-  width: 40px;
+  min-width: 44px;
   text-align: right;
-  color: #94a3b8;
-  font-size: 12px;
+  color: #555;
+  font-size: calc(var(--fs, 16px) * 0.9);
 }
 .hint {
-  font-size: 11px;
-  color: #94a3b8;
+  font-size: calc(var(--fs, 16px) * 0.82);
+  color: #555;
   line-height: 1.5;
 }
 .range {
@@ -498,12 +514,12 @@ const settingsBgStyle = computed(() => ({ background: '#0f172a' }))
 }
 .num-input {
   width: 84px;
-  padding: 5px 8px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  padding: 4px 8px;
+  border: 1px solid rgba(0, 0, 0, 0.2);
   border-radius: 7px;
-  background: rgba(255, 255, 255, 0.08);
-  color: #f8fafc;
-  font-size: 13px;
+  background: rgba(255, 255, 255, 0.7);
+  color: #111;
+  font-size: var(--fs, 16px);
   outline: none;
 }
 .num-input:focus {
@@ -526,7 +542,7 @@ const settingsBgStyle = computed(() => ({ background: '#0f172a' }))
   position: absolute;
   inset: 0;
   border-radius: 999px;
-  background: rgba(148, 163, 184, 0.45);
+  background: rgba(0, 0, 0, 0.25);
   transition: background 0.15s;
   cursor: pointer;
 }
@@ -539,6 +555,7 @@ const settingsBgStyle = computed(() => ({ background: '#0f172a' }))
   top: 3px;
   border-radius: 50%;
   background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
   transition: transform 0.15s;
 }
 .switch input:checked + .slider {
@@ -553,13 +570,13 @@ const settingsBgStyle = computed(() => ({ background: '#0f172a' }))
 .danger-btn {
   border: none;
   border-radius: 8px;
-  font-size: 13px;
+  font-size: var(--fs, 16px);
   font-weight: 600;
   cursor: pointer;
   transition: background 0.12s;
 }
 .primary-btn {
-  padding: 9px;
+  padding: 8px;
   background: #3b82f6;
   color: #fff;
 }
@@ -570,21 +587,21 @@ const settingsBgStyle = computed(() => ({ background: '#0f172a' }))
   opacity: 0.6;
 }
 .ghost-btn {
-  padding: 5px 12px;
-  background: rgba(255, 255, 255, 0.1);
-  color: #e2e8f0;
+  padding: 4px 10px;
+  background: rgba(0, 0, 0, 0.06);
+  color: #222;
 }
 .ghost-btn:hover {
-  background: rgba(255, 255, 255, 0.18);
+  background: rgba(0, 0, 0, 0.12);
 }
 .danger-btn {
   width: 100%;
-  padding: 9px;
-  background: rgba(220, 38, 38, 0.75);
+  padding: 8px;
+  background: rgba(220, 38, 38, 0.8);
   color: #fff;
 }
 .danger-btn:hover {
-  background: rgba(220, 38, 38, 0.92);
+  background: rgba(220, 38, 38, 0.95);
 }
 /* 登录 */
 .login {
@@ -594,8 +611,8 @@ const settingsBgStyle = computed(() => ({ background: '#0f172a' }))
   padding: 8px 4px;
 }
 .login-sub {
-  font-size: 12px;
-  color: #94a3b8;
+  font-size: calc(var(--fs, 16px) * 0.85);
+  color: #555;
   text-align: center;
 }
 .login-form {
@@ -605,24 +622,24 @@ const settingsBgStyle = computed(() => ({ background: '#0f172a' }))
 }
 .field-input {
   width: 100%;
-  padding: 9px 11px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  padding: 8px 10px;
+  border: 1px solid rgba(0, 0, 0, 0.2);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.08);
-  color: #f8fafc;
-  font-size: 13px;
+  background: rgba(255, 255, 255, 0.7);
+  color: #111;
+  font-size: var(--fs, 16px);
   outline: none;
 }
 .field-input:focus {
   border-color: #3b82f6;
 }
 .login-err {
-  font-size: 12px;
-  color: #f87171;
+  font-size: calc(var(--fs, 16px) * 0.85);
+  color: #dc2626;
 }
 .login-foot {
-  font-size: 11px;
-  color: #94a3b8;
+  font-size: calc(var(--fs, 16px) * 0.82);
+  color: #555;
   text-align: center;
 }
 /* 账号行 */
@@ -630,16 +647,17 @@ const settingsBgStyle = computed(() => ({ background: '#0f172a' }))
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
   padding: 4px 2px;
 }
 .account-name {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  color: #e2e8f0;
+  color: #111;
   font-weight: 600;
 }
+
 
 </style>
 

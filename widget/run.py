@@ -6,8 +6,10 @@ MeiDay 桌面小组件启动器（Windows 专用）
   1. 原生视图窗口（native_widget.NativeWidget，UpdateLayeredWindow 逐像素透明）：
      展示今日未完成任务。半透明白色圆角背景（透明度可调）+ 纯黑文字，
      可真实透出看到桌面 / 其它程序；始终鼠标穿透、常驻最底层、防偷窥。
-  2. pywebview 设置窗口（不透明，仅设置 / 登录时显示）：
-     登录、显示/隐藏、同步、外观（透明度/宽度）、拖动位置、自启动、退出。
+  2. pywebview 设置窗口（半透明实时镜像，仅设置 / 登录时显示）：
+    登录、显示/隐藏、同步、外观（透明度/宽度/字号）、拖动位置、自启动、退出。
+    设置窗口 = 任务显示界面的实时镜像：宽度/透明度/字号/位置与任务显示同步，
+    但可交互（不穿透点击）。
 
 其它职责：
   - 起本机 HTTP 服务（127.0.0.1:5173）托管 widget/dist 构建产物，供设置窗口加载；
@@ -58,9 +60,14 @@ DIST = ROOT / "dist"
 PORT = 5173
 TITLE = "MeiDay 桌面小组件"
 
-# 设置窗口尺寸（视图窗口尺寸由原生渲染器按任务数自适应，宽度来自 config）
-SETTINGS_W = 420
+# 设置窗口尺寸：宽度 = 任务显示宽度（随 config.widget.width 实时变，240-520），高度固定。
 SETTINGS_H = 580
+
+def _settings_size():
+    """设置窗口 = 任务显示实时镜像：宽度取当前任务显示宽度，高度固定。"""
+    width = int(read_config().get("widget", {}).get("width") or 360)
+    width = min(520, max(240, width))
+    return width, SETTINGS_H
 
 # ---------------------------------------------------------------------------
 # 窗口/原生渲染器的共享状态。注意：不能把 pywebview 的 window 对象挂到 Api
@@ -327,6 +334,9 @@ def apply_mode(mode):
     if mode == "settings":
         set_click_through(False)
         if win is not None:
+            # 设置窗口 = 任务显示实时镜像：宽度/位置跟随任务显示，高度固定
+            w, h = _settings_size()
+            win.resize(w, h)
             pos = _STATE.get("pos")
             hwnd = _STATE.get("hwnd")
             if pos and hwnd:
@@ -629,11 +639,10 @@ def main():
     window = webview.create_window(
         TITLE,
         f"http://127.0.0.1:{PORT}/",
-        width=SETTINGS_W,
+        width=_settings_size()[0],
         height=SETTINGS_H,
         frameless=True,
-        transparent=False,   # 设置窗口为不透明面板，不依赖 WebView2 透明
-        background_color='#0f172a',  # 不透明深色底，避免白色闪边
+        transparent=True,    # 设置窗口真透明（WebView2 逐像素 alpha），由前端 CSS 控制半透明背景
         easy_drag=False,
         resizable=False,
         hidden=True,         # 初始隐藏：登录成功前不闪窗口，由前端按模式控制显示
