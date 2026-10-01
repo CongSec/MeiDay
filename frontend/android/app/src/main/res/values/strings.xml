@@ -4,4 +4,5 @@
     <string name="title_activity_main">MeiDay</string>
     <string name="package_name">com.meiday.app</string>
     <string name="custom_url_scheme">com.meiday.app</string>
+    <string name="widget_description">显示今日未完成任务</string>
 </resources>

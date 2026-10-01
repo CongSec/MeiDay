@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 常驻通知折叠态内容：直接展示今日任务名列表（多行，一行一个）。
+     不设标题行，把有限的通知卡高度全部让给任务名；应用名由系统自动显示在卡片底部。
+     受系统单卡高度限制，最多显示 COLLAPSED_MAX_LINES 行，超出部分在展开态完整查看。 -->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/notif_tasks"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:paddingTop="2dp"
+    android:paddingBottom="2dp"
+    android:textSize="14sp"
+    android:lineSpacingExtra="2dp"
+    android:textColor="?android:attr/textColorPrimary"
+    android:maxLines="6"
+    android:ellipsize="end" />

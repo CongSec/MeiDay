@@ -6,11 +6,16 @@ import { useUiStore } from '@/stores/ui'
 import IdleLockBanner from '@/components/diary/IdleLockBanner.vue'
 import AppIcon from '@/components/AppIcon.vue'
 import { idbClearUserCache } from '@/utils/idb'
+import { useTaskSnapshot } from '@/composables/useTaskSnapshot'
 import { stopSyncPoll } from '@/composables/useSyncPoll'
 
 const auth = useAuthStore()
 const ui = useUiStore()
 const router = useRouter()
+
+useTaskSnapshot()
+
+// 今日任务快照：桌面小组件 + 常驻通知由 useTaskSnapshot 统一维护（写入/刷新/跳转）
 
 onMounted(() => {
   window.addEventListener('st:unauthorized', async () => {
