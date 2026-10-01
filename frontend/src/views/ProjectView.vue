@@ -12,7 +12,6 @@ import ProjectModal from '@/components/ProjectModal.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { todayKey } from '@/utils/time'
 import { isRepeatTaskActiveOn } from '@/utils/todayFilter'
-import { pinOverdueFirst } from '@/utils/task'
 import AppIcon from '@/components/AppIcon.vue'
 import type { Subtask, Task } from '@/types'
 import { useSync } from '@/composables/useSync'
@@ -49,9 +48,6 @@ const progressPct = computed(() =>
 
 const dragList = ref<Task[]>([])
 
-/** 是否已进入用户手动拖拽阶段：拖拽后不再自动按「已到截止/提醒时间」置顶，尊重手动顺序 */
-let dragged = false
-
 /** 统一拖拽参数（触屏 fallback 拖拽更丝滑） */
 const dragOptions = getDragOptions({ wholeCard: true })
 
@@ -60,9 +56,8 @@ watch(
   (list) => {
     // 同步合并可能带来「同 id 但内容已更新」的新对象；直接整体替换新数组，
     // 由 VueDraggable 的 v-model 接收（不再原地 splice 共享引用，也省去手动深比较）。
-    // 进入页面/加载时按「已到截止/提醒时间」置顶（稳定分区，组内保持原相对顺序）；
-    // 用户手动拖拽后（dragged=true）保留拖拽顺序，不再重新置顶。
-    dragList.value = dragged ? [...list] : pinOverdueFirst([...list])
+    // 手动拖拽顺序最高优先：按任务 sort 排序，过期任务不再自动置顶（避免覆盖手动顺序）。
+    dragList.value = [...list]
   },
   { immediate: true },
 )
@@ -73,7 +68,6 @@ function onDragStart() {
 
 function onDragEnd() {
   setDragging(false)
-  dragged = true
   const full = tasks.tasks[projectId.value] ?? []
   const done = full.filter((t) => t.status !== 'pending')
   tasks.setOrder(projectId.value, [...dragList.value, ...done])
@@ -105,8 +99,6 @@ onUnmounted(() => {
 watch(projectId, (id, oldId) => {
   if (oldId) tasks.unpinViewProject(oldId)
   tasks.pinViewProject(id)
-  // 切换项目：重新应用「已到截止/提醒时间」置顶
-  dragged = false
   void tasks.loadProject(id)
 })
 

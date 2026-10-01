@@ -6,7 +6,6 @@ import { useTasksStore } from '@/stores/tasks'
 import { useStatsStore } from '@/stores/stats'
 import { useWidgetStore, type WidgetMode } from '@/stores/widget'
 import { isTaskVisibleToday } from '@/utils/todayFilter'
-import { pinOverdueFirst } from '@/utils/task'
 import { todayKey } from '@/utils/time'
 import { bootstrapLoad, startSyncPoll, stopSyncPoll, syncNow } from '@/composables/useSyncPoll'
 import { persistSessionToConfig } from '@/utils/config'
@@ -152,7 +151,7 @@ const filtered = computed(() =>
   tasks.all.filter((t) => t.status === 'pending' && isTaskVisibleToday(t, today.value)),
 )
 
-/** 与网页端今日视图一致：注册过顺序的按顺序表排，其余按 sort/截止时间兜底，最后把已到时间的置顶 */
+/** 与网页端今日视图一致：注册过顺序的按顺序表排，其余按 sort/截止时间兜底，过期任务不再自动置顶 */
 const sorted = computed(() => {
   const orderMap = new Map<string, number>()
   tasks.todayOrder.forEach((id, idx) => orderMap.set(id, idx))
@@ -165,7 +164,7 @@ const sorted = computed(() => {
   }
   const registered = filtered.value.filter((t) => orderMap.has(t.id)).sort(byOrder)
   const unregistered = filtered.value.filter((t) => !orderMap.has(t.id)).sort(fallback)
-  return pinOverdueFirst([...registered, ...unregistered])
+  return [...registered, ...unregistered]
 })
 
 /* ---------------- 今日视图数据 → 原生渲染窗口 ---------------- */

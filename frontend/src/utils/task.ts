@@ -1,4 +1,4 @@
-import { addDays, dateKeyOf, diffDaysKey, nowIso, todayKey } from './time'
+import { dateKeyOf, nowIso } from './time'
 import { isNewStyleRepeat, isRepeatDay } from './repeat'
 import type { Subtask, Task } from '@/types'
 
@@ -105,44 +105,4 @@ export function sortSubtasks(list: Subtask[]): Subtask[] {
     if (c !== 0) return c
     return a.updatedAt.localeCompare(b.updatedAt)
   })
-}
-
-/** 任务是否「已到截止时间或提醒时间」（用于今日任务/项目页置顶）：
- *  - 仅未完成（pending）任务参与；
- *  - 截止时间（endTime）或提醒时间（reminderTime）任一已到/已过即命中；
- *  - 主任务与各未完成子任务地位同等：任一子任务的截止/提醒时间已到同样置顶；
- *  - 新模型重复任务：仅重复日当天参与，按「当天这一次」顺延后的截止/提醒时间判断，
- *    避免用模板中陈旧的锚点时间把重复任务永久置顶（子任务无重复规则，同样按当天顺延判断）。 */
-export function isTaskPastDue(task: Task, now = Date.now()): boolean {
-  if (task.status !== 'pending') return false
-  const rule = task.repeat
-  const passed = (iso: string | null | undefined): boolean => {
-    if (!iso) return false
-    return new Date(iso).getTime() <= now
-  }
-  if (rule && isNewStyleRepeat(rule) && rule.start) {
-    const today = todayKey()
-    if (rule.endAfter && today > rule.endAfter) return false
-    if (!isRepeatDay(rule, rule.start, today)) return false
-    const instancePassed = (iso: string | null | undefined): boolean => {
-      if (!iso) return false
-      const offset = diffDaysKey(dateKeyOf(iso), today)
-      return new Date(addDays(iso, offset)).getTime() <= now
-    }
-    if (instancePassed(task.endTime) || instancePassed(task.reminderTime)) return true
-    return (task.subtasks ?? []).some((s) => !s.completed && (instancePassed(s.endTime) || instancePassed(s.reminderTime)))
-  }
-  if (passed(task.endTime) || passed(task.reminderTime)) return true
-  return (task.subtasks ?? []).some((s) => !s.completed && (passed(s.endTime) || passed(s.reminderTime)))
-}
-
-/** 将任务列表按「已到截止/提醒时间」稳定分区：命中者保持原相对顺序排到最前，其余保持原顺序在后。 */
-export function pinOverdueFirst(list: Task[]): Task[] {
-  const pinned: Task[] = []
-  const rest: Task[] = []
-  for (const t of list) {
-    if (isTaskPastDue(t)) pinned.push(t)
-    else rest.push(t)
-  }
-  return [...pinned, ...rest]
 }

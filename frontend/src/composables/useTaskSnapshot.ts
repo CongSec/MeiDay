@@ -4,7 +4,6 @@ import { useAuthStore } from '@/stores/auth'
 import { useTasksStore } from '@/stores/tasks'
 import { todayKey } from '@/utils/time'
 import { isTaskVisibleToday } from '@/utils/todayFilter'
-import { pinOverdueFirst } from '@/utils/task'
 import { debounce } from '@/utils/debounce'
 import {
   consumeLaunchToday,
@@ -17,7 +16,7 @@ import type { Task } from '@/types'
 /**
  * 计算「今日任务页」里展示的未完成任务名称（与 TodayView 完全一致）：
  * 1) 今日可见（isTaskVisibleToday，含逾期/提醒已过/区间覆盖/重复命中/子任务拉回）+ 仅 pending；
- * 2) 排序：手动拖拽顺序 todayOrder → 兜底 sort/截止时间 → 已到截止/提醒时间置顶（pinOverdueFirst）。
+ * 2) 排序：手动拖拽顺序 todayOrder → 兜底 sort/截止时间（过期任务不再自动置顶）。
  */
 function computeTodayPendingNames(): string[] {
   const tasks = useTasksStore()
@@ -37,7 +36,7 @@ function computeTodayPendingNames(): string[] {
     const unregistered = arr.filter((t) => !orderMap.has(t.id)).sort(fallback)
     return [...registered, ...unregistered]
   }
-  const pending = pinOverdueFirst(group(list.filter((t) => t.status === 'pending')))
+  const pending = group(list.filter((t) => t.status === 'pending'))
   return pending.map((t) => t.name)
 }
 

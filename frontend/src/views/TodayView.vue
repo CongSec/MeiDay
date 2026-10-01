@@ -13,7 +13,6 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import AppIcon from '@/components/AppIcon.vue'
 import { dateKeyOf, nowIso, toLocalInput } from '@/utils/time'
 import { collectFutureVisibleTasks, isTaskVisibleToday } from '@/utils/todayFilter'
-import { pinOverdueFirst } from '@/utils/task'
 import type { Subtask, Task } from '@/types'
 import { useSync } from '@/composables/useSync'
 import { useNow } from '@/composables/useNow'
@@ -113,11 +112,8 @@ const futureOpen = ref(false)
  *  任务）不再重复进入未来区；30 天外才开始/提醒的任务不再展示。 */
 const futureTasks = computed(() => collectFutureVisibleTasks(tasks.all, tasks.repeats, today.value))
 
-/** 拖拽用可变列表：初始按时间排序，拖拽后保留手动顺序，仅在任务增删时重排 */
+/** 拖拽用可变列表：注册过 todayOrder 的按手动顺序排，其余按 sort/截止时间兜底；手动拖拽后保留顺序，仅在任务增删时重排 */
 const dragList = ref<Task[]>([])
-
-/** 是否已进入用户手动拖拽阶段：拖拽后不再自动按「已到截止/提醒时间」置顶，尊重手动顺序 */
-let dragged = false
 
 /** 统一拖拽参数（触屏 fallback 拖拽更丝滑） */
 const dragOptions = getDragOptions({ wholeCard: true })
@@ -139,9 +135,9 @@ const visibleKey = computed(() => {
 watch(
   [visibleKey, () => tasks.todayOrder],
   () => {
-    // 进入页面/加载时按「已到截止/提醒时间」置顶（稳定分区，组内保持原相对顺序）；
-    // 用户手动拖拽后（dragged=true）保留拖拽顺序，不再重新置顶。
-    dragList.value = dragged ? sorted.value : pinOverdueFirst(sorted.value)
+    // 手动拖拽顺序最高优先：注册过 todayOrder 的按顺序表排，未注册的按 sort/截止时间兜底，
+    // 过期任务不再自动置顶（避免覆盖手动顺序）。
+    dragList.value = sorted.value
   },
   { immediate: true },
 )
@@ -152,7 +148,6 @@ function onDragStart() {
 
 function onDragEnd() {
   setDragging(false)
-  dragged = true
   const byProject = new Map<string, Task[]>()
   for (const t of dragList.value) {
     if (t.status !== 'pending') continue
