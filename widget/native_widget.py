@@ -318,10 +318,10 @@ class NativeWidget:
             except Exception:
                 pass
 
-    def bring_to_bottom(self):
+    def bring_to_top(self):
         hwnd = self.hwnd
         if hwnd:
-            user32.SetWindowPos(hwnd, 1, 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0010)  # HWND_BOTTOM, NOMOVE|NOSIZE|NOACTIVATE
+            user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0010)  # HWND_TOPMOST, NOMOVE|NOSIZE|NOACTIVATE
 
     # ------------------------------------------------------------------
     # DPI / 尺寸
@@ -572,7 +572,7 @@ class NativeWidget:
         # 确保显示且不激活
         user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
         user32.SetWindowPos(
-            hwnd, 1, 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0010  # HWND_BOTTOM NOMOVE|NOSIZE|NOACTIVATE
+            hwnd, -1, 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0010  # HWND_TOPMOST NOMOVE|NOSIZE|NOACTIVATE
         )
         with self._lock:
             self._last_size = (w, h)

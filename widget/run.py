@@ -13,8 +13,9 @@ MeiDay 桌面小组件启动器（Windows 专用）
 
 其它职责：
   - 起本机 HTTP 服务（127.0.0.1:5173）托管 widget/dist 构建产物，供设置窗口加载；
-  - 托盘（pystray）：左键 = 打开设置；右键菜单 = 打开设置 / 显示 / 隐藏 / 退出；
-  - 置底循环：view 模式把原生视图压到所有应用窗口之下（桌面图标之上）；
+  - 托盘（pystray）：左键 = 打开设置；右键菜单 = 打开设置 / 退出；
+  - 置顶循环：view 模式把原生视图置顶（所有应用窗口之上），并杜绝被最小化/隐藏
+    （Win+D 显示桌面、Win+M 全部最小化、Aero Shake 等均不消失）；
   - 防偷窥：对两个窗口持续 SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)，
     录屏 / 截图 / 屏幕共享时内容不可见（本人屏幕正常显示）；
   - 配置：程序同级目录 config.json（session 登录态 + widget 界面设置），原子写入。
@@ -202,6 +203,7 @@ WS_EX_APPWINDOW = 0x00040000
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_TRANSPARENT = 0x00000020
 HWND_BOTTOM = 1
+HWND_TOPMOST = -1
 HWND_TOP = 0
 SWP_NOMOVE = 0x0002
 SWP_NOSIZE = 0x0001
@@ -393,7 +395,7 @@ def _apply_startup_position():
 
 def apply_mode(mode):
     """切换三模式：
-    - view   ：原生视图窗口显示（鼠标穿透、置底），设置窗口隐藏；
+    - view   ：原生视图窗口显示（鼠标穿透、置顶），设置窗口隐藏；
     - settings：设置窗口显示（可交互、置前），原生视图隐藏；
     - hidden ：两个窗口都隐藏，仅保留后台同步与托盘。
     """
@@ -431,7 +433,7 @@ def apply_mode(mode):
             win.hide()
         if native is not None:
             native.set_visible(True)
-            native.bring_to_bottom()
+            native.bring_to_top()
     else:  # hidden
         if win is not None:
             win.hide()
@@ -439,17 +441,25 @@ def apply_mode(mode):
             native.set_visible(False)
 
 
-def keep_bottom_loop(stop_event):
-    """view 模式把原生视图窗口压到所有应用窗口之下（桌面图标之上）。
-    settings 模式（可交互）不压底，关闭设置后自动落回最底层。"""
+def keep_topmost_loop(stop_event):
+    """view 模式把原生视图窗口置顶（所有应用窗口之上），并杜绝被最小化/隐藏。
+    Win+D 显示桌面、Win+M 全部最小化、Aero Shake 晃动窗口等任何最小化都不影响
+    它；检测到被最小化/隐藏时用 SW_SHOWNOACTIVATE 恢复显示（不抢焦点）。
+    settings 模式（可交互）不置顶，关闭设置后自动回到置顶。"""
     while not stop_event.is_set():
         try:
+            if _STATE.get("mode") != "view":
+                time.sleep(0.5)
+                continue
             native = _native()
-            if native and _STATE.get("mode") == "view":
-                native.bring_to_bottom()
+            hwnd = native.hwnd if native is not None else 0
+            if hwnd:
+                if _user32().IsIconic(hwnd) or not _user32().IsWindowVisible(hwnd):
+                    _user32().ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE：恢复且不激活
+                native.bring_to_top()
         except Exception:
             pass
-        time.sleep(1.5)
+        time.sleep(0.5)
 
 
 def set_display_affinity(hwnd):
@@ -519,16 +529,6 @@ def _call_js(script):
             print("[widget] 通知前端失败：", e)
 
 
-def tray_show(_icon=None, _item=None):
-    apply_mode("view")
-    _call_js("window.__setMode && window.__setMode('view')")
-
-
-def tray_hide(_icon=None, _item=None):
-    apply_mode("hidden")
-    _call_js("window.__setMode && window.__setMode('hidden')")
-
-
 def tray_open_settings(_icon=None, _item=None):
     apply_mode("settings")
     _call_js("window.__setMode && window.__setMode('settings')")
@@ -554,8 +554,6 @@ def start_tray():
             TITLE,
             pystray.Menu(
                 pystray.MenuItem("打开设置", tray_open_settings, default=True),
-                pystray.MenuItem("显示小组件", tray_show),
-                pystray.MenuItem("隐藏小组件", tray_hide),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("退出", tray_quit),
             ),
@@ -748,7 +746,7 @@ def main():
             _apply_startup_position()
         else:
             print("[widget] 警告：未找到设置窗口句柄")
-        threading.Thread(target=keep_bottom_loop, args=(stop_event,), daemon=True).start()
+        threading.Thread(target=keep_topmost_loop, args=(stop_event,), daemon=True).start()
         threading.Thread(target=enforce_affinity_loop, args=(stop_event,), daemon=True).start()
 
         start_tray()
