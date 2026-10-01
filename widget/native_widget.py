@@ -135,6 +135,11 @@ kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
 kernel32.GetLastError.restype = wintypes.DWORD
 
+user32.GetDpiForWindow.restype = wintypes.UINT
+user32.GetDpiForWindow.argtypes = [wintypes.HWND]
+user32.GetDpiForSystem.restype = wintypes.UINT
+user32.GetDpiForSystem.argtypes = []
+
 
 class BITMAPINFOHEADER(ctypes.Structure):
     _fields_ = [
@@ -215,15 +220,17 @@ def _load_font(size, bold=False):
 class NativeWidget:
     """桌面小组件原生窗口。所有状态修改线程安全，重绘在窗口线程执行。"""
 
-    H_MIN = 110
-    H_MAX = 640
-    ROUND_RADIUS = 12
-    PAD_X = 14
+    H_MIN = 110       # 逻辑 px（渲染时按 DPI 缩放）
+    H_MAX = 640       # 逻辑 px
+    ROUND_RADIUS = 12  # 逻辑 px，与设置界面 .settings-root 的 border-radius 一致
+    PAD_X = 14         # 逻辑 px
     PAD_TOP = 12
     HEADER_H = 24
     TASK_ROW_H = 28
     PAD_BOTTOM = 12
     EMPTY_H = 92
+    BORDER_W = 1       # 逻辑 px，与设置界面 1px 边框一致
+    BORDER_COLOR_A = 31  # rgba(0,0,0,0.12) 的 alpha 通道
 
     def __init__(self, anti_capture=True):
         self._lock = threading.Lock()
@@ -232,7 +239,8 @@ class NativeWidget:
         self._render_pending = threading.Event()
         self._hwnd = None
         self._thread = None
-        # 默认状态（物理像素坐标）
+        self._last_size = (0, 0)  # 最近一次渲染的物理尺寸，供 run.py 对齐
+        # 默认状态（width/font_size 为逻辑像素；x/y 为物理像素坐标）
         self._state = {
             "visible": False,
             "x": 0,
@@ -316,6 +324,27 @@ class NativeWidget:
             user32.SetWindowPos(hwnd, 1, 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0010)  # HWND_BOTTOM, NOMOVE|NOSIZE|NOACTIVATE
 
     # ------------------------------------------------------------------
+    # DPI / 尺寸
+    # ------------------------------------------------------------------
+    def _dpi_scale(self, hwnd=None):
+        """当前显示器 DPI 缩放系数（物理像素 / 逻辑像素），窗口所在监视器优先。"""
+        hwnd = hwnd or self.hwnd
+        try:
+            dpi = user32.GetDpiForWindow(hwnd) if hwnd else 0
+            if not dpi:
+                dpi = user32.GetDpiForSystem()
+            return (dpi / 96.0) if dpi else 1.0
+        except Exception:
+            return 1.0
+
+    def measure_size(self):
+        """当前状态下的物理尺寸 (w, h)（供 run.py 做顶部中心对齐，线程安全）。"""
+        with self._lock:
+            st = dict(self._state)
+        scale = self._dpi_scale()
+        return self._measure(st, scale)
+
+    # ------------------------------------------------------------------
     # 窗口线程
     # ------------------------------------------------------------------
     def _snapshot(self):
@@ -382,46 +411,56 @@ class NativeWidget:
     # ------------------------------------------------------------------
     # 渲染
     # ------------------------------------------------------------------
-    def _layout(self, st):
-        """按基准字号(font_size)推导各区域尺寸（物理像素）。"""
+    def _layout(self, st, scale=1.0):
+        """按基准字号(font_size, 逻辑px)推导各区域尺寸（物理像素，已按 DPI 缩放）。"""
         fs = int(st.get("font_size") or 16)
         fs = max(12, min(40, fs))
+        fsp = max(1, round(fs * scale))
         return {
-            "fs": fs,
-            "pad_x": self.PAD_X,
-            "pad_top": round(fs * 0.75),          # 12 @ fs=16
-            "pad_bottom": round(fs * 0.75),       # 12 @ fs=16
-            "header_h": max(20, round(fs * 1.5)), # 24 @ fs=16
-            "task_row_h": max(24, round(fs * 1.75)),  # 28 @ fs=16
-            "empty_h": round(fs * 5.75),          # 92 @ fs=16
-            "font_date": max(12, fs + 1),
-            "font_count": max(10, fs - 2),
-            "font_task": fs,
-            "font_empty": fs,
-            "font_hint": max(10, fs - 2),
+            "fs": fsp,
+            "pad_x": max(1, round(self.PAD_X * scale)),
+            "pad_top": max(1, round(fs * 0.75 * scale)),
+            "pad_bottom": max(1, round(fs * 0.75 * scale)),
+            "header_h": max(1, round(fs * 1.5 * scale)),
+            "task_row_h": max(1, round(fs * 1.75 * scale)),
+            "empty_h": max(1, round(fs * 5.75 * scale)),
+            "font_date": max(1, round((fs + 1) * scale)),
+            "font_count": max(1, round((fs - 2) * scale)),
+            "font_task": fsp,
+            "font_empty": fsp,
+            "font_hint": max(1, round((fs - 2) * scale)),
+            "radius": max(1, round(self.ROUND_RADIUS * scale)),
+            "border_w": max(1, round(self.BORDER_W * scale)),
         }
 
-    def _measure(self, st):
-        """按任务数量计算高度（物理像素），并裁剪超出最大高度的行。"""
-        w = int(st["width"])
-        L = self._layout(st)
+    def _measure(self, st, scale=1.0):
+        """按任务数量计算尺寸（物理像素）。宽度 = 逻辑宽 × DPI 缩放。"""
+        w = max(1, round(int(st["width"]) * scale))
+        L = self._layout(st, scale)
         tasks = st["tasks"]
+        hmax = max(1, round(self.H_MAX * scale))
+        hmin = max(1, round(self.H_MIN * scale))
         if not tasks:
             h = L["pad_top"] + L["header_h"] + L["empty_h"] + L["pad_bottom"]
-            return w, min(self.H_MAX, max(self.H_MIN, h))
+            return w, min(hmax, max(hmin, h))
         h = L["pad_top"] + L["header_h"] + len(tasks) * L["task_row_h"] + L["pad_bottom"]
-        h = min(self.H_MAX, max(self.H_MIN, h))
+        h = min(hmax, max(hmin, h))
         return w, h
 
-    def _compose(self, st, w, h):
+    def _compose(self, st, w, h, scale=1.0):
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
+        L = self._layout(st, scale)
         alpha = int(round(max(0.0, min(1.0, 1.0 - st["transparency"])) * 255))
         if alpha > 0:
+            # 半透明白底 + 1px 细边框，与设置界面 .settings-root 视觉一致
             d.rounded_rectangle(
-                [0, 0, w - 1, h - 1], radius=self.ROUND_RADIUS, fill=(255, 255, 255, alpha)
+                [0, 0, w - 1, h - 1],
+                radius=L["radius"],
+                fill=(255, 255, 255, alpha),
+                outline=(0, 0, 0, self.BORDER_COLOR_A),
+                width=L["border_w"],
             )
-        L = self._layout(st)
         # 文字：纯黑，不透明；字号随 font_size 缩放
         font_date = _load_font(L["font_date"], bold=True)
         font_count = _load_font(L["font_count"])
@@ -486,8 +525,9 @@ class NativeWidget:
         return lines
 
     def _render(self, hwnd, st):
-        w, h = self._measure(st)
-        img = self._compose(st, w, h)
+        scale = self._dpi_scale(hwnd)
+        w, h = self._measure(st, scale)
+        img = self._compose(st, w, h, scale)
         raw = img.tobytes()  # R,G,B,A
         n = w * h
         buf = bytearray(n * 4)
@@ -534,6 +574,8 @@ class NativeWidget:
         user32.SetWindowPos(
             hwnd, 1, 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0010  # HWND_BOTTOM NOMOVE|NOSIZE|NOACTIVATE
         )
+        with self._lock:
+            self._last_size = (w, h)
         gdi32.SelectObject(hdc_mem, old)
         gdi32.DeleteObject(hbmp)
         gdi32.DeleteDC(hdc_mem)

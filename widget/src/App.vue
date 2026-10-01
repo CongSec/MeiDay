@@ -31,7 +31,9 @@ function resizeWidget(w: number, h: number) {
 /** 宽度/字号等设置实时同步到设置窗口本身：设置窗口 = 任务显示实时镜像。
     宽度滑块 @input 时调用，高度固定，仅宽度跟随任务显示。 */
 function resizeSettings() {
-  resizeWidget(widget.width, SETTINGS_H)
+  // 钳制到合法范围，避免输入被清空/中间态时向 Python 传 NaN/空串导致 resize 异常
+  const w = Math.min(520, Math.max(240, Math.round(Number(widget.width) || 360)))
+  resizeWidget(w, SETTINGS_H)
 }
 function quitWidget() {
   pvApi()?.quit()
@@ -417,7 +419,6 @@ const settingsBgStyle = computed(() => ({
   flex-direction: column;
   border-radius: 12px;
   border: 1px solid rgba(0, 0, 0, 0.12);
-  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.22);
   color: #111;
   overflow: hidden;
   font-size: var(--fs, 16px);

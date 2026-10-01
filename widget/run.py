@@ -217,6 +217,11 @@ def _user32():
 
 
 def find_hwnds_by_pid(pid):
+    """枚举某进程的可见顶层窗口，排除控制台窗口（ConsoleWindowClass）。
+
+    用 `python run.py` 运行时进程会附带一个可见的控制台窗口，它常排在
+    EnumWindows 结果最前。若把它当作设置窗口句柄，_settings_phys_width()
+    会读到控制台宽度，导致原生视图与设置窗口错位。"""
     found = []
 
     @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -225,6 +230,10 @@ def find_hwnds_by_pid(pid):
             win_pid = wintypes.DWORD()
             _user32().GetWindowThreadProcessId(hwnd, ctypes.byref(win_pid))
             if win_pid.value == pid:
+                cls = ctypes.create_unicode_buffer(128)
+                _user32().GetClassNameW(hwnd, cls, 128)
+                if cls.value == "ConsoleWindowClass":
+                    return True  # 跳过控制台窗口
                 found.append(hwnd)
         return True
 
@@ -233,10 +242,17 @@ def find_hwnds_by_pid(pid):
 
 
 def find_main_hwnd():
+    """优先按标题找设置窗口；找不到再退回按 PID 枚举（已排除控制台）。"""
     hwnd = _user32().FindWindowW(None, TITLE)
     if hwnd:
         return hwnd
     hwnds = find_hwnds_by_pid(os.getpid())
+    # 尽量选 WebView2 / WinForms 宿主窗口，避免选到托盘 / GDI+ 等辅助窗口
+    for h in hwnds:
+        cls = ctypes.create_unicode_buffer(128)
+        _user32().GetClassNameW(h, cls, 128)
+        if "WindowsForms10" in cls.value or "WebView2" in cls.value:
+            return h
     return hwnds[0] if hwnds else None
 
 
@@ -264,6 +280,24 @@ def _move_window(hwnd, x, y):
         hwnd, 0, int(x), int(y), 0, 0,
         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
     )
+
+
+
+def _restore_settings_transparency():
+    """pywebview 的 win.resize() 走 SetWindowPos 改尺寸，会重置 WebView2 的
+    逐像素透明合成，导致设置窗口变成不透明白底（Bug3：调宽度时透明消失）。
+    原生 SW_HIDE + SW_SHOWNOACTIVATE 可恢复透明且不抢焦点（不会调用 Activate）。
+    仅在窗口当前可见时执行，避免把隐藏窗口误显示出来。"""
+    hwnd = _STATE.get("hwnd")
+    if not hwnd:
+        return
+    try:
+        if not _user32().IsWindowVisible(hwnd):
+            return
+        _user32().ShowWindow(hwnd, 0)  # SW_HIDE
+        _user32().ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
+    except Exception:
+        pass
 
 
 def set_click_through(enabled):
@@ -297,6 +331,42 @@ def _dpi_scale(hwnd=None):
         return 1.0
 
 
+
+def _settings_phys_width():
+    """设置窗口当前物理宽度：设置窗口可见时取实际窗口宽（拖宽度滑块时反映实时值），
+    隐藏时取 config 逻辑宽×DPI 推导值。不能无条件取实际窗口——pywebview 隐藏创建
+    的透明窗口在首次 resize 前物理尺寸偏小（如 390 逻辑→563 而非 585），会导致
+    原生视图顶部中心对齐时向左偏移。"""
+    hwnd = _STATE.get("hwnd")
+    if hwnd:
+        try:
+            if _user32().IsWindowVisible(hwnd):
+                return _window_size(hwnd)[0]
+        except Exception:
+            pass
+    scale = _dpi_scale() or 1.0
+    return round(_settings_size()[0] * scale)
+
+
+def _native_top_center_xy(lx, ly):
+    """由设置窗口逻辑左上角 (lx, ly) 推导原生视图窗口的物理左上角，
+    使两者「顶部中间」对齐：原生物理宽与设置窗口物理宽一致时即为同左上角，
+    存在取整差异时以顶部中间对齐为准。"""
+    scale = _dpi_scale() or 1.0
+    sw_phys = _settings_phys_width()
+    nw = 0
+    native = _native()
+    if native is not None:
+        try:
+            nw = native.measure_size()[0]
+        except Exception:
+            nw = sw_phys
+    if not nw:
+        nw = sw_phys
+    nx = round(lx * scale + (sw_phys - nw) / 2.0)
+    ny = round(ly * scale)
+    return nx, ny
+
 def _apply_startup_position():
     """计算窗口位置（逻辑像素）：
     - 若 config 已保存过位置（posX/posY，前端拖动后写入的逻辑像素），使用之；
@@ -317,7 +387,8 @@ def _apply_startup_position():
     _STATE["pos"] = (lx, ly)
     native = _native()
     if native is not None:
-        native.set_position(int(lx * scale), int(ly * scale))
+        nx, ny = _native_top_center_xy(lx, ly)
+        native.set_position(nx, ny)
 
 
 def apply_mode(mode):
@@ -343,6 +414,10 @@ def apply_mode(mode):
                 scale = _dpi_scale() or 1.0
                 _move_window(hwnd, int(pos[0] * scale), int(pos[1] * scale))
             win.show()
+            # 原生视图窗口同步到顶部中间对齐位置（当前隐藏，恢复 view 时生效）
+            if native is not None and pos:
+                nx, ny = _native_top_center_xy(pos[0], pos[1])
+                native.set_position(nx, ny)
         if native is not None:
             native.set_visible(False)
         if hwnd:
@@ -540,14 +615,18 @@ class Api:
             _move_window(hwnd, int(x * scale), int(y * scale))
         native = _native()
         if native is not None:
-            native.set_position(int(x * scale), int(y * scale))
+            nx, ny = _native_top_center_xy(x, y)
+            native.set_position(nx, ny)
         return True
 
     def resize(self, width, height):
-        """仅设置窗口使用（视图窗口由原生渲染器自适应高度）。"""
+        """仅设置窗口使用（视图窗口由原生渲染器自适应高度）。
+        win.resize() 会破坏 WebView2 透明合成（变成不透明白底），随后用原生
+        hide/show（不激活、不抢焦点）恢复透明。"""
         win = _win()
         if win is not None:
             win.resize(int(width), int(height))
+        _restore_settings_transparency()
         return True
 
     def quit(self):
@@ -594,8 +673,8 @@ class Api:
                 )
                 px, py = w.get("posX"), w.get("posY")
                 if isinstance(px, (int, float)) and isinstance(py, (int, float)):
-                    scale = _dpi_scale() or 1.0
-                    native.set_position(int(px * scale), int(py * scale))
+                    nx, ny = _native_top_center_xy(int(px), int(py))
+                    native.set_position(nx, ny)
         return data
 
     def set_auto_start(self, enabled):
@@ -671,6 +750,7 @@ def main():
             print("[widget] 警告：未找到设置窗口句柄")
         threading.Thread(target=keep_bottom_loop, args=(stop_event,), daemon=True).start()
         threading.Thread(target=enforce_affinity_loop, args=(stop_event,), daemon=True).start()
+
         start_tray()
         print("[widget] 桌面小组件已启动（托盘左键=设置，右键=菜单）")
 
