@@ -247,9 +247,8 @@ class NativeWidget:
             "y": 0,
             "width": 360,
             "transparency": 0.6,   # 背景透明度：越大越透明
-            "font_size": 16,      # 任务文字基准字号（px），日期/计数按比例缩放
+            "font_size": 16,      # 任务文字基准字号（px），日期按比例缩放
             "date": "",
-            "count": "",
             "tasks": [],           # list[str]
             "ready": False,        # 是否已有真实数据
         }
@@ -289,11 +288,10 @@ class NativeWidget:
         self.set_state(x=int(x), y=int(y))
 
     def set_data(self, data):
-        """data: {ready, date, count, tasks}"""
+        """data: {ready, date, tasks}"""
         self.set_state(
             ready=bool(data.get("ready")),
             date=str(data.get("date") or ""),
-            count=str(data.get("count") or ""),
             tasks=list(data.get("tasks") or []),
         )
 
@@ -425,7 +423,6 @@ class NativeWidget:
             "task_row_h": max(1, round(fs * 1.75 * scale)),
             "empty_h": max(1, round(fs * 5.75 * scale)),
             "font_date": max(1, round((fs + 1) * scale)),
-            "font_count": max(1, round((fs - 2) * scale)),
             "font_task": fsp,
             "font_empty": fsp,
             "font_hint": max(1, round((fs - 2) * scale)),
@@ -463,23 +460,18 @@ class NativeWidget:
             )
         # 文字：纯黑，不透明；字号随 font_size 缩放
         font_date = _load_font(L["font_date"], bold=True)
-        font_count = _load_font(L["font_count"])
         font_task = _load_font(L["font_task"])
         font_empty = _load_font(L["font_empty"], bold=True)
         font_hint = _load_font(L["font_hint"])
 
         txt_color = (0, 0, 0, 255)
         sub_color = (60, 60, 60, 255)
-        c_off = max(1, round(L["fs"] * 3 / 16))    # 计数在日期行内的垂直偏移
         e_off = round(L["fs"] * 10 / 16)           # 空状态主文案偏移
         e_hint_off = round(L["fs"] * 34 / 16)      # 空状态提示偏移
 
         y = L["pad_top"]
         if st["date"]:
             d.text((L["pad_x"], y), st["date"], font=font_date, fill=txt_color)
-        if st["count"]:
-            cw = d.textlength(st["count"], font=font_count)
-            d.text((w - L["pad_x"] - cw, y + c_off), st["count"], font=font_count, fill=sub_color)
         y += L["header_h"]
 
         tasks = st["tasks"]

@@ -652,7 +652,7 @@ class Api:
         return True
 
     def update_view(self, data):
-        """前端把今日视图数据（日期/计数/任务标题列表）推给原生视图窗口。"""
+        """前端把今日视图数据（日期/任务标题列表）推给原生视图窗口。"""
         native = _native()
         if native is not None:
             native.set_data(data or {})

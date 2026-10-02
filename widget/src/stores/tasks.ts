@@ -179,12 +179,6 @@ export const useTasksStore = defineStore('tasks', {
   getters: {
     all: (s) => Object.values(s.tasks).flat(),
     byProject: (s) => (projectId: string) => s.tasks[projectId] ?? [],
-    todayCount: (s) => {
-      const today = todayKey()
-      return Object.values(s.tasks)
-        .flat()
-        .filter((t) => t.status === 'pending' && isTaskVisibleToday(t, today)).length
-    },
     todayRelevantProjectIds: (s) => (projectIds: string[]) => {
       const today = todayKey()
       const set = new Set<string>()

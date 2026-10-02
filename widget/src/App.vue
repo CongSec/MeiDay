@@ -177,7 +177,6 @@ function pushView() {
     api.update_view({
       ready: true,
       date: monthDay.value,
-      count: `${tasks.todayCount} 项未完成`,
       tasks: sorted.value.map((t) => t.name),
     })
   } catch {
