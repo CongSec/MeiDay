@@ -7,6 +7,11 @@
  * - 纵向占优：放行给页面滚动 / 下拉刷新，互不干扰；
  * - 容器未溢出（桌面宽屏）时不进入拖拽，保留原生选择/滚动；
  * - 横向拖动结束会吞掉紧随其后的 click，避免从可点击小块上起手拖动时误触编辑。
+ *
+ * 注意：指针捕获只能在「确认横向拖动」之后设置，不能在 pointerdown 时立即设置。
+ * 一旦 pointerdown 就 setPointerCapture，后续的兼容鼠标事件（mousedown/mouseup/click）
+ * 会被重定向到滚动容器本身，容器内任务小块（button）的普通点击永远收不到 click，
+ * 表现为「日历图里的任务点不动」（网页端日历容器常年处于溢出态，必现）。
  */
 import { ref } from 'vue'
 
@@ -20,6 +25,8 @@ export function useHorizontalDrag() {
   let dragStartY = 0
   let dragStartScroll = 0
   let dragAxis: 'h' | 'v' | null = null
+  /** 是否已捕获指针（仅横向拖动确认后为 true） */
+  let captured = false
   /** 横向拖动发生过：吞掉紧随其后的 click，防止误触内部可点击元素 */
   let suppressClick = false
 
@@ -33,13 +40,11 @@ export function useHorizontalDrag() {
     dragStartScroll = el.scrollLeft
     dragAxis = null
     suppressClick = false
+    captured = false
     dragging.value = true
     el.classList.add('dragging')
-    try {
-      el.setPointerCapture(e.pointerId)
-    } catch {
-      /* ignore */
-    }
+    // 这里不能 setPointerCapture：会把普通点击重定向到容器，导致内部可点击元素点不动。
+    // 等到 pointermove 确认横向拖动后再捕获（见 onPointerMove）。
   }
 
   function onPointerMove(e: PointerEvent) {
@@ -54,12 +59,14 @@ export function useHorizontalDrag() {
       if (dragAxis === 'v') {
         dragging.value = false
         el.classList.remove('dragging')
-        try {
-          el.releasePointerCapture(e.pointerId)
-        } catch {
-          /* ignore */
-        }
         return
+      }
+      // 确认横向拖动后才捕获指针：拖动期间即使指针移出容器也能持续收到 move
+      try {
+        el.setPointerCapture(e.pointerId)
+        captured = true
+      } catch {
+        captured = false
       }
     }
     if (dragAxis === 'h') {
@@ -75,10 +82,13 @@ export function useHorizontalDrag() {
     dragAxis = null
     if (el) {
       el.classList.remove('dragging')
-      try {
-        el.releasePointerCapture(e.pointerId)
-      } catch {
-        /* ignore */
+      if (captured) {
+        captured = false
+        try {
+          el.releasePointerCapture(e.pointerId)
+        } catch {
+          /* ignore */
+        }
       }
     }
   }
