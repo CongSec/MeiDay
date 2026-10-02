@@ -141,6 +141,13 @@ def read_config():
                 return merged
         except Exception as e:
             print("[widget] 读取配置失败，使用默认配置：", e)
+    # 配置文件不存在（或损坏）：原子写一份默认配置，保证“没有就创建、下次直接读取”
+    try:
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(_default_config(), ensure_ascii=False, indent=2), "utf-8")
+        os.replace(tmp, path)
+    except Exception as e:
+        print("[widget] 创建默认配置失败：", e)
     return _default_config()
 
 

@@ -118,7 +118,3 @@ export async function persistSessionToConfig(): Promise<void> {
   await writeSession(snapshotSessionToConfig())
 }
 
-/** 会话失效（401）时清空 config.json 中的登录态。 */
-export async function clearSessionInConfig(): Promise<void> {
-  await writeSession(emptySession())
-}

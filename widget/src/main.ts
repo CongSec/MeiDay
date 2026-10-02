@@ -8,11 +8,11 @@ import { useStatsStore } from '@/stores/stats'
 import { useWidgetStore } from '@/stores/widget'
 import { idbClearUserCache } from '@/utils/idb'
 import { bootstrapLoad, startSyncPoll, stopSyncPoll } from '@/composables/useSyncPoll'
-import { clearSessionInConfig, seedSessionFromConfig } from '@/utils/config'
+import { seedSessionFromConfig } from '@/utils/config'
 
 /**
  * 401 恢复钩子：必须在 Pinia 创建之后注册（useXxxStore 依赖激活的 Pinia 实例）。
- * 会话失效时停止轮询、清空内存与本地缓存、清空 config.json 会话，回到设置面板。
+ * 会话失效时停止轮询、清空内存与本地缓存（config.json 里的登录态保留，供下次启动自动登录重试），回到设置面板。
  */
 function registerUnauthorizedHandler() {
   window.addEventListener('st:unauthorized', async () => {
@@ -23,15 +23,28 @@ function registerUnauthorizedHandler() {
     useTasksStore().resetAll()
     useProjectsStore().resetAll()
     useStatsStore().resetAll()
-    await clearSessionInConfig()
     useWidgetStore().setMode('settings')
     if (username) await idbClearUserCache(username)
   })
 }
 
+/** 等待 pywebview JS 桥就绪：桥注入晚于页面脚本，直接读 config.json 会拿到空会话。 */
+function whenBridgeReady(timeoutMs = 5000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const t0 = Date.now()
+    const check = () => {
+      if ((window as any).pywebview?.api?.read_config) return resolve(true)
+      if (Date.now() - t0 > timeoutMs) return resolve(false)
+      setTimeout(check, 50)
+    }
+    check()
+  })
+}
+
 async function bootstrap() {
-  // 先把 config.json 里的登录态灌回 localStorage（auth store 创建时同步读取），
-  // 否则“记住登录”在重启后失效。
+  // 先等 pywebview 桥就绪，再读 config.json 并把登录态灌回 localStorage
+  // （auth store 创建时同步读取），否则桥未注入时读到空会话，每次启动都要重新登录。
+  await whenBridgeReady()
   await seedSessionFromConfig()
 
   const app = createApp(App)
