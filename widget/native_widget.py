@@ -493,28 +493,27 @@ class NativeWidget:
         for name in tasks:
             if y > h - 8:
                 break
-            lines = self._wrap(d, name, font_task, avail_w)
-            for ln in lines[:2]:  # 每行最多两行，避免超高
-                if y > h - 8:
-                    break
-                d.text((L["pad_x"], y), ln, font=font_task, fill=txt_color)
-                y += L["task_row_h"]
+            ln = self._ellipsize(d, name, font_task, avail_w)
+            d.text((L["pad_x"], y), ln, font=font_task, fill=txt_color)
+            y += L["task_row_h"]
         return img
 
     @staticmethod
-    def _wrap(d, text, font, max_w):
+    def _ellipsize(d, text, font, max_w):
+        """超宽任务名单行截断，末尾显示省略号（不再换行）。"""
         if d.textlength(text, font=font) <= max_w:
-            return [text]
-        lines, cur = [], ""
-        for ch in text:
-            if d.textlength(cur + ch, font=font) <= max_w:
-                cur += ch
+            return text
+        ell = "…"
+        ell_w = d.textlength(ell, font=font)
+        # 二分查找可容纳省略号的最长前缀
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if d.textlength(text[:mid], font=font) + ell_w <= max_w:
+                lo = mid
             else:
-                lines.append(cur)
-                cur = ch
-        if cur:
-            lines.append(cur)
-        return lines
+                hi = mid - 1
+        return text[:lo].rstrip() + ell
 
     def _render(self, hwnd, st):
         scale = self._dpi_scale(hwnd)
