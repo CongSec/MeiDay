@@ -58,6 +58,17 @@ else:
     CONFIG_DIR = ROOT
 
 DIST = ROOT / "dist"
+
+
+def _log(msg):
+    """--noconsole 打包后 print 不可见，关键排障信息写到程序同级 meiday-widget.log。"""
+    try:
+        with open(CONFIG_DIR / "meiday-widget.log", "a", encoding="utf-8") as f:
+            f.write(time.strftime("[%Y-%m-%d %H:%M:%S] ") + str(msg) + "\n")
+    except Exception:
+        pass
+
+
 PORT = 5173
 TITLE = "MeiDay 桌面小组件"
 
@@ -457,8 +468,8 @@ def keep_topmost_loop(stop_event):
                 if _user32().IsIconic(hwnd) or not _user32().IsWindowVisible(hwnd):
                     _user32().ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE：恢复且不激活
                 native.bring_to_top()
-        except Exception:
-            pass
+        except Exception as e:
+            _log(f"[keep_topmost] {e!r}")
         time.sleep(0.5)
 
 
@@ -479,8 +490,8 @@ def enforce_affinity_loop(stop_event):
             hwnd = _STATE.get("hwnd")
             if hwnd:
                 set_display_affinity(hwnd)
-        except Exception:
-            pass
+        except Exception as e:
+            _log(f"[affinity] {e!r}")
         time.sleep(0.5)
 
 

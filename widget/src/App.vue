@@ -289,7 +289,6 @@ const settingsBgStyle = computed(() => ({
     <div class="settings-body">
       <!-- ===== 登录表单（未登录） ===== -->
       <section v-if="!auth.isLoggedIn" class="login">
-        <div class="login-sub">今日任务 · 实时同步 · 防偷窥</div>
         <form class="login-form" @submit.prevent="doLogin">
           <input v-model="loginUser" class="field-input" placeholder="用户名" autocomplete="username" />
           <input
@@ -621,11 +620,6 @@ const settingsBgStyle = computed(() => ({
   flex-direction: column;
   gap: 10px;
   padding: 8px 4px;
-}
-.login-sub {
-  font-size: calc(var(--fs, 16px) * 0.85);
-  color: #555;
-  text-align: center;
 }
 .login-form {
   display: flex;

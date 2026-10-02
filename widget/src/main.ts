@@ -7,7 +7,7 @@ import { useProjectsStore } from '@/stores/projects'
 import { useStatsStore } from '@/stores/stats'
 import { useWidgetStore } from '@/stores/widget'
 import { idbClearUserCache } from '@/utils/idb'
-import { startSyncPoll, stopSyncPoll } from '@/composables/useSyncPoll'
+import { bootstrapLoad, startSyncPoll, stopSyncPoll } from '@/composables/useSyncPoll'
 import { clearSessionInConfig, seedSessionFromConfig } from '@/utils/config'
 
 /**
@@ -49,6 +49,9 @@ async function bootstrap() {
   // 有登录态：用保存的密码（7 天内）静默重新解锁 OSS 凭证，成功后启动同步
   const unlocked = await auth.tryAutoUnlock()
   if (unlocked && auth.isLoggedIn) {
+    // 与手动登录 bootAfterLogin() 一致：先引导加载今日任务再进入轮询，
+    // 否则冷启动时 tasks 为空，今日视图永远空白（自动登录路径之前漏了这步）。
+    await bootstrapLoad().catch(() => {})
     startSyncPoll()
   } else {
     // 自动解锁失败（密码过期 / 未记住密码）：打开设置让用户重新登录

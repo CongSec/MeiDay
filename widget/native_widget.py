@@ -364,7 +364,7 @@ class NativeWidget:
         # 亲和，再动态加上 WS_EX_LAYERED 用 UpdateLayeredWindow
         # 逐像素渲染，两者可以兼容。
         hwnd = user32.CreateWindowExW(
-            WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
             atom,
             "MeiDayNativeWidget",
             WS_POPUP,  # 不先显示，由 render 控制
