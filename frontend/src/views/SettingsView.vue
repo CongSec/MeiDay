@@ -62,7 +62,7 @@ const FIELDS: { key: keyof CredFields; label: string; hint?: string; optional?: 
   { key: 'ossAk', label: 'OSS AccessKey', hint: 'RAM 子账号 AccessKey' },
   { key: 'ossSk', label: 'OSS SecretKey', hint: 'RAM 子账号 SecretKey' },
   { key: 'bucket', label: 'OSS Bucket 名称' },
-  { key: 'endpoint', label: 'OSS Endpoint', hint: 'S3 兼容地址：oss-cn-beijing.aliyuncs.com / cos.ap-shanghai.myqcloud.com / obs.cn-north-4.myhuaweicloud.com / MinIO' },
+  { key: 'endpoint', label: 'OSS Endpoint', hint: 'S3 兼容地址：oss-cn-beijing.aliyuncs.com / cos.ap-shanghai.myqcloud.com / obs.cn-north-4.myhuaweicloud.com / MinIO / Cloudflare R2（<账号ID>.r2.cloudflarestorage.com）' },
   { key: 'smtpUser', label: '发件邮箱 (QQ)', hint: '可留空，留空则不发送邮件', optional: true },
   { key: 'smtpPass', label: 'SMTP 授权码', hint: 'QQ 邮箱设置 → 账号 → 开启 SMTP 获取；可留空', optional: true },
   { key: 'notifyEmail', label: '收件邮箱', hint: '默认同发件邮箱，可独立填写；可留空', optional: true },

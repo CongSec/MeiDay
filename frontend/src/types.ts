@@ -170,7 +170,7 @@ export interface CredFields {
   ossAk: string
   ossSk: string
   bucket: string
-  /** S3 兼容存储服务地址（完整域名或 URL，如 https://oss-cn-beijing.aliyuncs.com / cos.ap-shanghai.myqcloud.com / obs.cn-north-4.myhuaweicloud.com） */
+  /** S3 兼容存储服务地址（完整域名或 URL，如 https://oss-cn-beijing.aliyuncs.com / cos.ap-shanghai.myqcloud.com / obs.cn-north-4.myhuaweicloud.com / https://<账号ID>.r2.cloudflarestorage.com） */
   endpoint: string
   smtpUser: string
   smtpPass: string

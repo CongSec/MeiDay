@@ -180,13 +180,34 @@ export async function createOssClient(creds: CredFields): Promise<OssClient> {
     retries: 3,
   })
   const base = resolveBase(endpoint, creds.bucket)
+  // R2-304-CORS: Cloudflare R2 对条件 GET（If-Modified-Since/If-None-Match）命中时返回的 304
+  // 响应不带 Access-Control-Allow-Origin 头，浏览器会拦截跨域读取；因此对 R2 剥离条件头、
+  // 始终全量 GET（profile/stats/tasks 均为小文件，开销可忽略）。其它厂商（阿里云/七牛等）
+  // 304 带 CORS 头，不受影响，仍走条件请求增量。
+  let isR2 = false
+  try {
+    isR2 = /\.r2\.cloudflarestorage\.com$/i.test(new URL(endpoint).hostname)
+  } catch {
+    /* 非法 URL 交给下游报错 */
+  }
 
   return {
     async get(key, options) {
       const url = `${base}/${encKey(key)}`
+      let headers = options?.headers
+      if (isR2 && headers) {
+        // R2 的 304 响应无 CORS 头：条件请求命中时浏览器直接拦截，剥离条件头后始终全量 GET。
+        const stripped: Record<string, string> = {}
+        for (const [k, v] of Object.entries(headers)) {
+          const lk = k.toLowerCase()
+          if (lk === 'if-modified-since' || lk === 'if-none-match') continue
+          stripped[k] = v
+        }
+        headers = stripped
+      }
       const res = await aws.fetch(url, {
         method: 'GET',
-        headers: options?.headers,
+        headers,
       })
       if (res.status === 304) {
         return { content: textContent(new Uint8Array(0)), res: { status: 304, headers: headersToObj(res.headers) } }
