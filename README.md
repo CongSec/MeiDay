@@ -28,7 +28,7 @@ MeiDay 专注于“当下”——只做好一件事：**稳定流畅安全的�
 
 完成任务自动封存进「时间胶囊」，像翻开日历一样回看每一天的成果。支持**日历视图**（完成/未完成任务按天归属、跨天任务横条可视化）、**年度热力图**和**工作量趋势图**，让成长轨迹一目了然；重复任务自动枚举所有发生日，回顾不遗漏。
 
-![PixPin_2026-10-02_15-54-38](https://b3logfile.com/file/2026/10/siyuan/1714493573033/assets/PixPin_2026-10-02_15-54-38-20261002171405-rb81p01.gif)
+![image](https://b3logfile.com/file/2026/10/siyuan/1714493573033/assets/PixPin_2026-10-02_15-54-38-20261002171405-rb81p01.gif)
 
 ### 数据安全与性能安全
 
@@ -42,13 +42,13 @@ MeiDay 专注于“当下”——只做好一件事：**稳定流畅安全的�
 
 性能压力测试(test/12345678),模拟十年数据,每天150个任务,仍可流畅使用
 
-![recording](https://b3logfile.com/file/2026/10/siyuan/1714493573033/assets/recording-20260917221055-9cl9zh6.gif)
+![image](https://b3logfile.com/file/2026/10/siyuan/1714493573033/assets/recording-20260917221055-9cl9zh6.gif)
 
 ### 任务添加与修改
 
 极简流畅的添加/编辑体验，支持批量导入任务、任务拖拽排序、项目分组管理，重复任务和提醒时间随手设置，指定日期到点重复自动微信提醒、支持拖拽或粘贴添加附件
 
-![PixPin_2026-10-02_14-38-45](https://b3logfile.com/file/2026/10/siyuan/1714493573033/assets/PixPin_2026-10-02_14-38-45-20261002144006-u36ynpm.gif)
+![image](https://b3logfile.com/file/2026/10/siyuan/1714493573033/assets/PixPin_2026-10-02_14-38-45-20261002144006-u36ynpm.gif)
 
 ![image](https://b3logfile.com/file/2026/10/siyuan/1714493573033/assets/image-20260828223209-7u7yxag.png)
 
@@ -56,7 +56,6 @@ MeiDay 专注于“当下”——只做好一件事：**稳定流畅安全的�
 
 Web 端(https://task.congsec.cn)、Android App、思源笔记插件、Windows 桌面小组件共用同一份云端数据，**无本地数据、秒级同步**，任何一端改动，其他端即刻更新。
 
-<video controls="controls" src="https://b3logfile.com/file/2026/10/siyuan/1714493573033/assets/bandicam_2026-10-02_15-23-55-198-20261002152929-ocgcdov.mp4"></video>
 
 **思源笔记插件端**
 
@@ -66,7 +65,7 @@ Web 端(https://task.congsec.cn)、Android App、思源笔记插件、Windows �
 
 Windows 桌面可置顶显示今日未完成任务，截图或视频会议时自动隐藏防泄露；支持鼠标穿透、透明度调节，不遮挡屏幕内容。
 
-![6fd63525b500b537f41ec96321e58cf7](https://b3logfile.com/file/2026/10/siyuan/1714493573033/assets/6fd63525b500b537f41ec96321e58cf7-20261002153012-l9bepb2.jpg)
+![image](https://b3logfile.com/file/2026/10/siyuan/1714493573033/assets/6fd63525b500b537f41ec96321e58cf7-20261002153012-l9bepb2.jpg)
 
 **APP端**
 
@@ -86,7 +85,7 @@ Windows 桌面可置顶显示今日未完成任务，截图或视频会议时自
 
 日记数据**加密存放**于你的 OSS 中，服务器不存任何数据与账号密码；支持加密备份导入导出，可单独删除日记节省存储成本。
 
-![PixPin_2026-10-02_17-24-28](https://b3logfile.com/file/2026/10/siyuan/1714493573033/assets/PixPin_2026-10-02_17-24-28-20261002172506-xjukbo6.gif)
+![image](https://b3logfile.com/file/2026/10/siyuan/1714493573033/assets/PixPin_2026-10-02_17-24-28-20261002172506-xjukbo6.gif)
 
 ### 微信/邮箱提醒
 
@@ -100,7 +99,7 @@ Windows 桌面可置顶显示今日未完成任务，截图或视频会议时自
 
 显示密钥、登录记录、每一项增删改操作全部留痕，关键操作有据可查，任何风吹草动尽在掌握。
 
-![PixPin_2026-10-01_23-23-02](https://b3logfile.com/file/2026/10/siyuan/1714493573033/assets/PixPin_2026-10-01_23-23-02-20261001232330-fisegvg.gif)
+![image](https://b3logfile.com/file/2026/10/siyuan/1714493573033/assets/PixPin_2026-10-01_23-23-02-20261001232330-fisegvg.gif)
 
 ### 数据迁移备份功能
 
