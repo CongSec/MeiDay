@@ -7,10 +7,11 @@ import { useStatsStore } from './stats'
 import { createOssClient, describeOssError, paths } from '@/utils/oss'
 import { applyDeletedProjectTombstones, compareAndSwapPut, lastModifiedOf, lmKeyOf, mergeProfile, versionToken } from '@/utils/sync'
 import { canonicalJson } from '@/utils/task'
+import { isRepeatTaskActiveOn } from '@/utils/todayFilter'
 import { enrichOssError } from '@/utils/ossDiag'
 import { idbGet, idbPut, idbDel } from '@/utils/idb'
 import { queueSyncChange } from '@/utils/syncReport'
-import { nowIso } from '@/utils/time'
+import { nowIso, todayKey } from '@/utils/time'
 import { logAudit, safeDetail } from '@/utils/audit'
 import type { DeletedProject, Profile, Project, RepeatMaster, Task } from '@/types'
 
@@ -45,7 +46,7 @@ export const useProjectsStore = defineStore('projects', {
     byId: (s) => (id: string) => s.projects.find((p) => p.id === id),
     countBy: () => (projectId: string) => {
       const tasks = useTasksStore()
-      return tasks.tasks[projectId]?.filter((t) => t.status === 'pending').length ?? 0
+      return tasks.tasks[projectId]?.filter((t) => t.status === 'pending' && isRepeatTaskActiveOn(t, todayKey())).length ?? 0
     },
   },
   actions: {
