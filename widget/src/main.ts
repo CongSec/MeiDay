@@ -7,7 +7,8 @@ import { useProjectsStore } from '@/stores/projects'
 import { useStatsStore } from '@/stores/stats'
 import { useWidgetStore } from '@/stores/widget'
 import { idbClearUserCache } from '@/utils/idb'
-import { bootstrapLoad, startSyncPoll, stopSyncPoll } from '@/composables/useSyncPoll'
+import { getSavedPassword } from '@/api/client'
+import { bootstrapLoad, startSyncPoll, stopSyncPoll, armRecoveryLoop, disarmRecovery } from '@/composables/useSyncPoll'
 import { seedSessionFromConfig } from '@/utils/config'
 
 /**
@@ -19,6 +20,7 @@ function registerUnauthorizedHandler() {
     const auth = useAuthStore()
     const username = auth.username
     stopSyncPoll()
+    disarmRecovery() // 会话失效登出，同时解除“待网络恢复”重试
     auth.reset()
     useTasksStore().resetAll()
     useProjectsStore().resetAll()
@@ -67,8 +69,11 @@ async function bootstrap() {
     await bootstrapLoad().catch(() => {})
     startSyncPoll()
   } else {
-    // 自动解锁失败（密码过期 / 未记住密码）：打开设置让用户重新登录
+    // 自动解锁失败：打开设置让用户重新登录。若仍持有本地凭据（保存的密码未过期），
+    // 则进入“待网络恢复”自动重试（如开机时还没网）——监听 online + 指数退避，
+    // 网络恢复后自动重新解锁并回到今日视图，无需手动重启。
     useWidgetStore().setMode('settings')
+    if (getSavedPassword()) armRecoveryLoop()
   }
 }
 

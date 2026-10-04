@@ -13,6 +13,7 @@ import { useRouter } from 'vue-router'
 import { isDragging } from '@/utils/drag'
 import { useSync } from '@/composables/useSync'
 import { startSyncPoll, stopSyncPoll } from '@/composables/useSyncPoll'
+import { isNativeRuntime } from '@/utils/oss'
 import { ensureLegalCalendar } from '@/utils/legalWorkday'
 import type { Task } from '@/types'
 
@@ -30,6 +31,12 @@ const unlockErr = ref('')
 const unlocking = ref(false)
 const projectModalOpen = ref(false)
 const importModalOpen = ref(false)
+
+/** OSS 错误弹窗「重试」：关闭弹窗后立即重新同步，弱网恢复后无需重启 App */
+function retryOss() {
+  ui.closeOssError()
+  void syncNow()
+}
 
 /** 手机端头部「新建任务/导入」动作：由当前子视图（今日/项目）注册；设置/回收站等页不显示 */
 const mobileActions = reactive({
@@ -410,10 +417,17 @@ async function onImported(list: Task[]) {
           <div v-if="ui.ossError.status" class="py-0.5">HTTP 状态：<span class="font-mono text-amber-800">{{ ui.ossError.status }}</span></div>
           <div v-if="ui.ossError.message" class="py-0.5 break-words">服务端说明：<span class="font-mono text-amber-800">{{ ui.ossError.message }}</span></div>
           <div v-if="ui.ossError.request_id" class="pt-1 text-[11px] text-amber-500">RequestId：{{ ui.ossError.request_id }}</div>
-          <div v-if="ui.ossError.cors_configured === false" class="pt-1 text-amber-700">Bucket 已连通但未配置 CORS，请允许当前前端域名 https://localhost:5173。</div>
+          <div v-if="ui.ossError.cors_configured === false" class="pt-1 text-amber-700">
+            <template v-if="isNativeRuntime()">Bucket 已连通但未配置 CORS。App 内请求不经过浏览器、不受 CORS 限制，可忽略此提示；若仍加载失败，请检查手机网络是否能访问外网。</template>
+            <template v-else>Bucket 已连通但未配置 CORS，请允许当前前端域名 https://localhost:5173。</template>
+          </div>
         </div>
 
-        <div class="mt-5 flex justify-end">
+        <div class="mt-5 flex justify-end gap-2">
+          <button
+            class="px-4 py-2 rounded-lg text-sm font-medium border border-slate-300 text-slate-600 hover:bg-slate-100"
+            @click="retryOss"
+          >重试</button>
           <button
             class="px-4 py-2 rounded-lg text-sm text-white bg-red-500 hover:bg-red-600 font-medium"
             @click="ui.closeOssError()"
@@ -434,5 +448,6 @@ async function onImported(list: Task[]) {
     <UploadIndicator />
   </div>
 </template>
+
 
 

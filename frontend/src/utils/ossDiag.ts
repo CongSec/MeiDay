@@ -1,7 +1,7 @@
 import { api, type OssCheckResult } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 import { useUiStore, type OssErrorInfo } from '@/stores/ui'
-import { describeOssError } from '@/utils/oss'
+import { describeOssError, isNativeRuntime } from '@/utils/oss'
 import type { CredFields } from '@/types'
 
 /**
@@ -73,7 +73,8 @@ export async function enrichOssError(e: unknown, fallback = describeOssError(e))
       endpoint: creds.endpoint,
     })
     ui.showOssError({
-      title: diag.cors_configured === false ? 'Bucket 未配置 CORS' : 'OSS 加载失败',
+      // App 端请求不经过浏览器、不受 CORS 限制，后端诊断到「未配置 CORS」不构成故障，标题保持中性
+      title: !isNativeRuntime() && diag.cors_configured === false ? 'Bucket 未配置 CORS' : 'OSS 加载失败',
       hint: diag.ok ? fallback : hintFromDiag(diag),
       code: diag.code != null ? String(diag.code) : null,
       status: diag.status,

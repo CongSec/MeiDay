@@ -1,10 +1,23 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import ClickCaptcha from '@/components/ClickCaptcha.vue'
 import { useAuthStore } from '@/stores/auth'
 import logo from '@/assets/logo.png'
 import AppIcon from '@/components/AppIcon.vue'
+import { useUiStore } from '@/stores/ui'
+import {
+  addServer,
+  checkServerHealth,
+  describeServerProblem,
+  getActiveServer,
+  getOfficialServer,
+  getSavedServers,
+  isMixedContentBlocked,
+  normalizeServerUrl,
+  removeServer,
+  setActiveServer,
+} from '@/utils/serverConfig'
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -21,6 +34,86 @@ const busy = ref(false)
 // 通过 key 强制重新挂载来“换新图”（验证码单次使用，失败/换模式后需要新图）。
 const captchaKey = ref(0)
 const captchaValue = ref<{ id: string | null; answer: number[] } | null>(null)
+
+const ui = useUiStore()
+
+/* ---- 服务器地址选择（登录/注册均可见） ---- */
+const officialServer = getOfficialServer()
+const servers = ref<string[]>(getSavedServers())
+const activeServer = ref(getActiveServer())
+const newServerUrl = ref('')
+const serverBusy = ref(false)
+const serverErr = ref('')
+
+/** 官方地址固定置顶；自定义地址去重展示 */
+const serverOptions = computed(() =>
+  Array.from(new Set([officialServer, ...servers.value.filter((u) => u !== officialServer)])),
+)
+
+function refreshServers() {
+  servers.value = getSavedServers()
+  activeServer.value = getActiveServer()
+}
+
+async function onAddServer() {
+  serverErr.value = ''
+  const url = normalizeServerUrl(newServerUrl.value)
+  if (!/^https?:\/\/.+/.test(url)) {
+    serverErr.value = '服务器地址需以 http:// 或 https:// 开头'
+    return
+  }
+  serverBusy.value = true
+  try {
+    // HTTPS 网页端访问 http:// 地址会被浏览器「混合内容」策略硬拦截，直接给出明确提示
+    if (isMixedContentBlocked(url)) {
+      if (!window.confirm('当前网页是 HTTPS，浏览器会拦截对 http:// 地址的请求（混合内容限制），该地址在网页端无法使用。建议给服务器启用 HTTPS，或在 APP / 桌面小组件 / 思源插件中使用。仍要保存吗？')) {
+        return
+      }
+    } else {
+      const health = await checkServerHealth(url)
+      if (!health.ok && !window.confirm(`${describeServerProblem(health, url)} 仍要保存吗？`)) {
+        return
+      }
+    }
+    addServer(url)
+    refreshServers()
+    newServerUrl.value = ''
+    ui.toast('服务器地址已保存')
+  } finally {
+    serverBusy.value = false
+  }
+}
+
+function onRemoveServer(url: string) {
+  removeServer(url)
+  refreshServers()
+}
+
+async function onSelectServer(url: string) {
+  if (url === activeServer.value) return
+  serverErr.value = ''
+  serverBusy.value = true
+  try {
+    // HTTPS 网页端访问 http:// 地址会被浏览器「混合内容」策略硬拦截，直接给出明确提示
+    if (isMixedContentBlocked(url)) {
+      if (!window.confirm('当前网页是 HTTPS，浏览器会拦截对 http:// 地址的请求（混合内容限制），该地址在网页端无法使用。仍要切换到该地址吗？')) {
+        return
+      }
+    } else {
+      const health = await checkServerHealth(url)
+      if (!health.ok && !window.confirm(`${describeServerProblem(health, url)} 仍要切换吗？`)) {
+        return
+      }
+    }
+    setActiveServer(url)
+    activeServer.value = url
+    // 切换服务器必须清空旧服务器的登录态与记住的密码，避免发往新服务器
+    auth.reset()
+    ui.toast(`已切换到 ${url}，请重新登录`, 'error')
+  } finally {
+    serverBusy.value = false
+  }
+}
 
 function switchMode(m: 'login' | 'register') {
   mode.value = m
@@ -102,6 +195,60 @@ async function submit() {
         >
           注册
         </button>
+      </div>
+
+      <!-- ===== 服务器地址选择（官方固定置顶；可添加/删除自定义地址） ===== -->
+      <div class="mt-4 rounded-xl border border-line bg-surface-1/60 p-3">
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-xs font-semibold text-slate-500">服务器</span>
+          <span class="min-w-0 truncate text-[11px] text-slate-400">{{ activeServer }}</span>
+        </div>
+        <div class="mt-2 max-h-32 space-y-1 overflow-y-auto">
+          <label
+            v-for="s in serverOptions"
+            :key="s"
+            class="flex cursor-pointer select-none items-center gap-2 rounded-lg px-2 py-1.5 text-xs transition"
+            :class="s === activeServer ? 'bg-brand/10 text-brand' : 'text-slate-600 hover:bg-surface-2'"
+          >
+            <input
+              type="radio"
+              name="server"
+              class="accent-brand"
+              :checked="s === activeServer"
+              :disabled="serverBusy"
+              @change="onSelectServer(s)"
+            />
+            <span class="min-w-0 flex-1 truncate">{{ s }}</span>
+            <span v-if="s === officialServer" class="shrink-0 rounded bg-brand/10 px-1.5 py-0.5 text-[10px] text-brand">官方</span>
+            <button
+              v-else
+              type="button"
+              class="shrink-0 text-slate-400 hover:text-red-500"
+              title="删除此服务器"
+              @click.stop="onRemoveServer(s)"
+            >
+              ✕
+            </button>
+          </label>
+        </div>
+        <div class="mt-2 flex gap-2">
+          <input
+            v-model="newServerUrl"
+            placeholder="https://你的服务器地址"
+            :disabled="serverBusy"
+            class="min-w-0 flex-1 border border-line rounded-lg bg-white px-2.5 py-1.5 text-xs outline-none focus:border-brand/50 focus:ring-2 focus:ring-brand/40"
+            @keyup.enter="onAddServer"
+          />
+          <button
+            type="button"
+            class="shrink-0 rounded-lg bg-surface-2 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-200 disabled:opacity-60"
+            :disabled="serverBusy"
+            @click="onAddServer"
+          >
+            {{ serverBusy ? '检测中…' : '添加' }}
+          </button>
+        </div>
+        <div v-if="serverErr" class="mt-1.5 text-xs text-red-500">{{ serverErr }}</div>
       </div>
 
       <form class="mt-5 space-y-3" @submit.prevent="submit">

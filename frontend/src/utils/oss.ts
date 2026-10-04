@@ -1,4 +1,5 @@
-import { AwsClient } from 'aws4fetch'
+import { Capacitor, CapacitorHttp } from '@capacitor/core'
+import { AwsClient, AwsV4Signer } from 'aws4fetch'
 import type { CredFields } from '@/types'
 
 /**
@@ -89,8 +90,165 @@ function encKey(key: string): string {
     .join('/')
 }
 
+/** 最小响应兼容层：原生 CapacitorHttp 的返回结构 + 浏览器 Response 共用的字段/方法 */
+interface FetchLikeResponse {
+  status: number
+  ok: boolean
+  headers: Headers
+  arrayBuffer(): Promise<ArrayBuffer>
+  text(): Promise<string>
+}
+
+/** 原生 App（Android APK / iOS）环境判断：原生 HTTP 请求不经过 WebView 拦截器，无 CORS 限制 */
+export function isNativeRuntime(): boolean {
+  return typeof Capacitor !== 'undefined' && typeof Capacitor.isNativePlatform === 'function' && Capacitor.isNativePlatform()
+}
+
+/** 原生 HTTP 超时（毫秒）：连接与读取分开，避免弱网下无限期挂起 */
+const NATIVE_CONNECT_TIMEOUT = 15_000
+const NATIVE_READ_TIMEOUT = 30_000
+
+/** 网络类失败重试次数与退避间隔（aws4fetch 只重试 5xx/429，网络错误一次就抛，这里补上） */
+const NET_RETRIES = 3
+const NET_BACKOFF_MS = [300, 900, 2000]
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+/** CapacitorHttp 原生响应的 Response 兼容层（arraybuffer 响应为 base64 字符串，解码回字节） */
+class NativeResponse implements FetchLikeResponse {
+  status: number
+  headers: Headers
+  private _bytes: Uint8Array | null
+  private _text: string
+
+  constructor(status: number, headerMap: Record<string, string>, data: unknown, decodeBase64: boolean) {
+    this.status = status
+    this.headers = new Headers()
+    for (const [k, v] of Object.entries(headerMap ?? {})) {
+      if (v != null) this.headers.set(k, String(v))
+    }
+    if (typeof data === 'string') {
+      if (decodeBase64 && data.length > 0) {
+        try {
+          // Android 端 Base64.DEFAULT 每 76 字符插换行，解码前先去掉空白
+          const cleaned = data.replace(/\s+/g, '')
+          const bin = atob(cleaned)
+          const bytes = new Uint8Array(bin.length)
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+          this._bytes = bytes
+          this._text = new TextDecoder().decode(bytes)
+          return
+        } catch {
+          /* 非 base64（理论不会出现）：回退按文本处理 */
+        }
+      }
+      this._text = data
+      this._bytes = null
+    } else if (data != null) {
+      // content-type=json 时原生端已解析成对象/数组
+      this._text = JSON.stringify(data)
+      this._bytes = null
+    } else {
+      this._text = ''
+      this._bytes = null
+    }
+  }
+
+  get ok(): boolean {
+    return this.status >= 200 && this.status < 300
+  }
+
+  async arrayBuffer(): Promise<ArrayBuffer> {
+    if (this._bytes) {
+      return this._bytes.buffer.slice(this._bytes.byteOffset, this._bytes.byteOffset + this._bytes.byteLength)
+    }
+    return new TextEncoder().encode(this._text).buffer as ArrayBuffer
+  }
+
+  async text(): Promise<string> {
+    return this._text
+  }
+}
+
+interface S3Init {
+  method: string
+  headers?: Record<string, string> | Headers
+  body?: ArrayBuffer | string | null
+}
+
+/** 用 aws4fetch 的 AwsV4Signer 对请求做 SigV4 签名，返回可直接发送的 url/method/headers */
+async function signS3(
+  aws: AwsClient,
+  url: string,
+  init: S3Init,
+): Promise<{ url: string; method: string; headers: Headers }> {
+  const signer = new AwsV4Signer({
+    url,
+    method: init.method || 'GET',
+    headers: init.headers instanceof Headers ? init.headers : new Headers(init.headers || {}),
+    body: init.body ?? undefined,
+    accessKeyId: aws.accessKeyId,
+    secretAccessKey: aws.secretAccessKey,
+    service: 's3',
+    region: aws.region,
+  })
+  const signed = await signer.sign()
+  return { url: signed.url.toString(), method: signed.method, headers: signed.headers }
+}
+
+/**
+ * 原生端执行签名后的 OSS 请求：
+ * - 直接走 CapacitorHttp 原生插件（GET 不再经过 WebView 拦截器，避免拦截器无超时/并发受限导致的偶发失败）；
+ * - 显式设置连接/读取超时；
+ * - 网络错误与 5xx/429 都会退避重试（aws4fetch 本身不重试网络错误）。
+ */
+async function nativeS3Fetch(aws: AwsClient, url: string, init: S3Init): Promise<FetchLikeResponse> {
+  const { url: finalUrl, method, headers } = await signS3(aws, url, init)
+  const headerObj: Record<string, string> = {}
+  headers.forEach((v, k) => {
+    headerObj[k] = v
+  })
+
+  let lastErr: unknown = new Error('OSS 请求失败')
+  for (let attempt = 0; attempt <= NET_RETRIES; attempt++) {
+    try {
+      const res = await CapacitorHttp.request({
+        url: finalUrl,
+        method,
+        headers: headerObj,
+        // 统一按二进制读取：成功体在原生端是 base64（解码回字节），错误体是文本
+        responseType: 'arraybuffer',
+        connectTimeout: NATIVE_CONNECT_TIMEOUT,
+        readTimeout: NATIVE_READ_TIMEOUT,
+      })
+      // 5xx / 429 与网络错误一样可重试
+      if (attempt >= NET_RETRIES || (res.status < 500 && res.status !== 429)) {
+        return new NativeResponse(res.status, res.headers, res.data, res.status < 400)
+      }
+      lastErr = new Error(`OSS 请求失败（HTTP ${res.status}）`)
+    } catch (e) {
+      lastErr = e
+      if (attempt >= NET_RETRIES) throw e
+    }
+    await sleep(NET_BACKOFF_MS[attempt] ?? 2000)
+  }
+  throw lastErr
+}
+
+/** 统一的 S3 fetch：原生 App 走 CapacitorHttp（带超时/重试），Web/插件端走浏览器 fetch */
+async function s3Fetch(aws: AwsClient, url: string, init: S3Init): Promise<FetchLikeResponse> {
+  if (isNativeRuntime() && CapacitorHttp && typeof CapacitorHttp.request === 'function') {
+    return nativeS3Fetch(aws, url, init)
+  }
+  return aws.fetch(url, {
+    method: init.method,
+    headers: init.headers,
+    body: init.body ?? undefined,
+  })
+}
+
 /** S3 错误响应体是 XML：解析出 code/message/requestId 便于用户定位 */
-async function toS3Error(res: Response, key: string): Promise<Error & { status: number; code?: string; message?: string; requestId?: string }> {
+async function toS3Error(res: FetchLikeResponse, key: string): Promise<Error & { status: number; code?: string; message?: string; requestId?: string }> {
   let code = ''
   let message = ''
   let requestId = ''
@@ -205,7 +363,7 @@ export async function createOssClient(creds: CredFields): Promise<OssClient> {
         }
         headers = stripped
       }
-      const res = await aws.fetch(url, {
+      const res = await s3Fetch(aws, url, {
         method: 'GET',
         headers,
       })
@@ -245,7 +403,7 @@ export async function createOssClient(creds: CredFields): Promise<OssClient> {
         if (v !== undefined && v !== null && v !== '') params.set(k, String(v))
       }
       const url = `${base}?${params.toString()}`
-      const res = await aws.fetch(url, { method: 'GET' })
+      const res = await s3Fetch(aws, url, { method: 'GET' })
       if (!res.ok) throw await toS3Error(res, '')
       return parseListBucketResult(await res.text())
     },
@@ -260,6 +418,27 @@ interface OssErrorLike {
   requestId?: string
 }
 
+/** 原生 App 网络类异常码（CapacitorHttp 拒绝时 code = Java 异常类名） */
+const NATIVE_NETWORK_CODE_RE =
+  /unknownhost|connect|timeout|ssl|socket|eof|reset|refused|network|dns/i
+
+/** 判断错误是否属于「网络层失败」（浏览器跨域 / DNS / 超时 / 连接失败等） */
+export function isOssNetworkError(e: unknown): boolean {
+  const err = (e ?? {}) as OssErrorLike
+  const name = String(err.name ?? '')
+  const message = String(err.message ?? '')
+  const code = String(err.code ?? '')
+  return (
+    err.status === 0 ||
+    err.status === -1 ||
+    /xhr|typeerror/i.test(name) ||
+    /XMLHttpRequest|Failed to fetch|NetworkError|network error|fetch failed|cross-origin|CORS|跨域|网络|Failed to execute/i.test(
+      message,
+    ) ||
+    NATIVE_NETWORK_CODE_RE.test(code)
+  )
+}
+
 /** 把对象存储抛出的原始错误转成用户能看懂的中文提示（阿里云 OSS / 各 S3 兼容厂商通用） */
 export function describeOssError(e: unknown): string {
   const err = (e ?? {}) as OssErrorLike
@@ -269,16 +448,33 @@ export function describeOssError(e: unknown): string {
   const message = err.message
   const detail = [message, code, status].filter((v) => v !== undefined && v !== '').join(' / ')
 
+  // 原生 App：CapacitorHttp 拒绝时 code 是 Java 异常类名，映射成具体的网络问题
+  if (isNativeRuntime() && code != null) {
+    const c = String(code).toLowerCase()
+    if (c.includes('unknownhost')) {
+      return `OSS 域名解析失败（DNS 异常），请检查手机网络后重试${detail ? `（${detail}）` : ''}`
+    }
+    if (c.includes('timeout')) {
+      return `连接 OSS 超时，请检查手机网络后重试${detail ? `（${detail}）` : ''}`
+    }
+    if (c.includes('connect') || c.includes('refused') || c.includes('network') || c.includes('route')) {
+      return `无法连接 OSS 服务，请检查手机网络后重试${detail ? `（${detail}）` : ''}`
+    }
+    if (c.includes('ssl') || c.includes('handshake') || c.includes('certificate')) {
+      return `与 OSS 建立 HTTPS 连接失败（证书校验/加密协商），请检查网络或稍后重试${detail ? `（${detail}）` : ''}`
+    }
+    if (c.includes('socket') || c.includes('reset') || c.includes('eof') || c.includes('broken')) {
+      return `与 OSS 的连接被中断，请稍后重试${detail ? `（${detail}）` : ''}`
+    }
+  }
+
   // 浏览器跨域 / 网络层失败：status 为 0 / -1，或 fetch 抛出的 TypeError / Failed to fetch
-  const corsish =
-    status === 0 ||
-    status === -1 ||
-    /xhr|typeerror/i.test(name ?? '') ||
-    /XMLHttpRequest|Failed to fetch|NetworkError|network error|fetch failed|cross-origin|CORS|跨域|网络|Failed to execute/i.test(
-      message ?? '',
-    )
-  if (corsish) {
-    return 'OSS 请求被浏览器拦截或网络不可达，通常是 Bucket 未配置 CORS（网页版请允许 https://localhost:5173，Android APK 请允许 https://localhost），或本地网络/DNS 异常'
+  if (isOssNetworkError(e)) {
+    if (isNativeRuntime()) {
+      // 原生 HTTP 请求不经过浏览器，不存在 CORS 拦截；此处几乎都是网络/超时/DNS/TLS 问题
+      return `无法连接 OSS 存储服务，请检查手机网络（能否访问外网、DNS 解析是否正常）${detail ? `。原始错误：${detail}` : ''}`
+    }
+    return 'OSS 请求被浏览器拦截或网络不可达，通常是 Bucket 未配置 CORS（请在存储桶控制台允许当前网页域名），或本地网络/DNS 异常'
   }
 
   switch (code) {

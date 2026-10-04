@@ -22,10 +22,11 @@ from .routes import sync as sync_routes
 from .services.log_cleanup_worker import log_cleanup_worker
 from .services.reminder_worker import reminder_worker
 
-# 默认允许本机前后端联调及 Capacitor Android WebView（https://localhost）；
+# 默认允许本机前后端联调、Capacitor Android WebView（https://localhost）及官方网页端
+# （https://task.congsec.cn，网页端「自定义服务器」跨源调用本后端时需要）；
 # 可通过环境变量 FRONTEND_ORIGINS 配置局域网访问地址
 # （多个用英文逗号分隔），满足 README 声称的局域网设备访问（BUG-25）
-_DEFAULT_ORIGINS = "http://localhost:5173,https://localhost:5173,http://localhost,https://localhost"
+_DEFAULT_ORIGINS = "http://localhost:5173,https://localhost:5173,http://localhost,https://localhost,http://task.congsec.cn,https://task.congsec.cn"
 FRONTEND_ORIGINS = [
     o.strip()
     for o in os.environ.get("FRONTEND_ORIGINS", _DEFAULT_ORIGINS).split(",")

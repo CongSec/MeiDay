@@ -6,6 +6,8 @@ import { useTasksStore } from '@/stores/tasks'
 import { useStatsStore } from '@/stores/stats'
 import { idbGet, idbPut } from '@/utils/idb'
 import { flushPendingSyncReports } from '@/utils/syncReport'
+import { useWidgetStore } from '@/stores/widget'
+import { persistSessionToConfig } from '@/utils/config'
 
 /**
  * 桌面小组件的同步轮询（精简版）。
@@ -27,6 +29,13 @@ const HIDDEN_INTERVAL_MS = 15_000
 const VERSION_KEY_PREFIX = 'sync:version:'
 
 const active = ref(false)
+/** 本会话是否已成功拉取过数据（区分“正在同步…”与“今日没有待办任务”） */
+const synced = ref(false)
+
+/** 读取“已同步”状态（供原生窗口决定显示“正在同步…”还是真实数据） */
+export function isSynced(): boolean {
+  return synced.value
+}
 let timer: number | undefined
 let stopped = false
 let intervalMs = POLL_INTERVAL_MS
@@ -76,6 +85,7 @@ export async function bootstrapLoad(): Promise<void> {
       console.error('重复任务物化失败', id, e)
     }
   }
+  synced.value = true
 }
 
 /** version=0（无同步日志，如测试号）时的兆底周期刷新间隔 */
@@ -214,6 +224,7 @@ async function pollOnce(): Promise<boolean> {
       pulledAll = await bootstrapThrottled()
     }
     if (pulledAll) await saveVersion(auth.username, cursor)
+    if (pulledAll) synced.value = true
     return true
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) {
@@ -255,10 +266,90 @@ export function stopSyncPoll(): void {
   if (timer !== undefined) window.clearTimeout(timer)
   timer = undefined
 }
+/* ---------------- 离线恢复：解锁失败后等待网络恢复自动回到今日视图 ---------------- */
+let recoveryArmed = false
+let recoveryTimer: number | undefined
+let recoveryBackoffMs = 5000
+let recoveryOnlineHandler: (() => void) | undefined
+
+/**
+ * 完整恢复：重新解锁 OSS 凭证 → 引导加载 → 启动轮询 → 回到今日视图。
+ * 供 main.ts 解锁失败后的自动重试，以及“同步”按钮在轮询未启动时调用。
+ * 返回是否已进入轮询。
+ */
+export async function recoverSession(): Promise<boolean> {
+  const auth = useAuthStore()
+  if (!auth.isLoggedIn) return false
+  // 轮询已在运行：无需恢复
+  if (active.value) return true
+  const unlocked = await auth.tryAutoUnlock()
+  if (!unlocked || !auth.isLoggedIn) return false
+  try {
+    await bootstrapLoad()
+  } catch (e) {
+    console.error('[widget] 引导加载失败（网络恢复后会自动重试）', e)
+  }
+  startSyncPoll()
+  useWidgetStore().setMode('view')
+  await persistSessionToConfig().catch(() => {})
+  return true
+}
+
+export function disarmRecovery(): void {
+  recoveryArmed = false
+  if (recoveryTimer !== undefined) window.clearTimeout(recoveryTimer)
+  recoveryTimer = undefined
+  if (recoveryOnlineHandler) {
+    window.removeEventListener('online', recoveryOnlineHandler)
+    recoveryOnlineHandler = undefined
+  }
+  recoveryBackoffMs = 5000
+}
+
+/**
+ * 挂起“待网络恢复”自动重试：解锁失败（如开机时还没网）时调用。
+ * 监听 online 事件 + 指数退避定时兜底（某些网络环境不会可靠触发 online），
+ * 网络恢复后自动重新解锁并进入同步。
+ */
+export function armRecoveryLoop(): void {
+  if (recoveryArmed) return
+  if (typeof window === 'undefined') return
+  recoveryArmed = true
+  recoveryBackoffMs = 5000
+  const attempt = async () => {
+    if (!recoveryArmed) return
+    // 用户已登出（token 被清空）：没有可恢复的会话，解除循环，避免空转
+    if (!useAuthStore().isLoggedIn) {
+      disarmRecovery()
+      return
+    }
+    const ok = await recoverSession()
+    if (ok) {
+      disarmRecovery()
+    } else {
+      recoveryBackoffMs = Math.min(recoveryBackoffMs * 2, 60_000)
+      recoveryTimer = window.setTimeout(attempt, recoveryBackoffMs)
+    }
+  }
+  recoveryOnlineHandler = () => {
+    if (recoveryTimer !== undefined) window.clearTimeout(recoveryTimer)
+    recoveryTimer = undefined
+    void attempt()
+  }
+  window.addEventListener('online', recoveryOnlineHandler)
+  // 兜底定时器：即使 online 事件没触发，也按退避周期重试
+  recoveryTimer = window.setTimeout(attempt, recoveryBackoffMs)
+}
+
 
 /** 手动立即同步一次（标题栏刷新按钮）；轮询未启动时返回 false */
 export function syncNow(): Promise<boolean> {
-  if (!active.value) return Promise.resolve(false)
+  const auth = useAuthStore()
+  if (!active.value) {
+    // 轮询未启动（离线待恢复 / 冷启动解锁失败）：有登录态则执行完整恢复，而不是直接返回 false
+    if (!auth.isLoggedIn) return Promise.resolve(false)
+    return recoverSession()
+  }
   if (timer !== undefined) window.clearTimeout(timer)
   timer = undefined
   return pollOnce().then((ok) => {

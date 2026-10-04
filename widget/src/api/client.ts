@@ -1,8 +1,6 @@
+import { getApiBase } from '@/utils/serverConfig'
 const TOKEN_KEY = 'st_token'
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000
-
-/** 桌面小组件：通过 VITE_API_BASE_URL 指向后端地址（构建时注入 https://task.congsec.cn） */
-const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? ''
 
 export function getToken(): string {
   return localStorage.getItem(TOKEN_KEY) ?? ''
@@ -153,7 +151,7 @@ async function request<T>(
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   const token = tokenOverride ?? getToken()
   if (token) headers.Authorization = `Bearer ${token}`
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await fetch(`${getApiBase()}${path}`, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),

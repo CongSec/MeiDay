@@ -7,8 +7,19 @@ import { useStatsStore } from '@/stores/stats'
 import { useWidgetStore, type WidgetMode } from '@/stores/widget'
 import { isTaskVisibleToday } from '@/utils/todayFilter'
 import { todayKey } from '@/utils/time'
-import { bootstrapLoad, startSyncPoll, stopSyncPoll, syncNow } from '@/composables/useSyncPoll'
-import { persistSessionToConfig } from '@/utils/config'
+import { bootstrapLoad, startSyncPoll, stopSyncPoll, syncNow, isSynced, disarmRecovery } from '@/composables/useSyncPoll'
+import { persistSessionToConfig, persistServerConfigToConfig } from '@/utils/config'
+import {
+  addServer,
+  checkServerHealth,
+  describeServerProblem,
+  getActiveServer,
+  getOfficialServer,
+  getSavedServers,
+  normalizeServerUrl,
+  removeServer,
+  setActiveServer,
+} from '@/utils/serverConfig'
 import type { Task } from '@/types'
 
 const auth = useAuthStore()
@@ -101,6 +112,101 @@ const loginPw = ref('')
 const loginErr = ref('')
 const loginBusy = ref(false)
 
+/* ---- 服务器地址选择（登录表单上方） ---- */
+const officialServer = getOfficialServer()
+const servers = ref<string[]>(getSavedServers())
+const activeServer = ref(getActiveServer())
+const newServerUrl = ref('')
+const serverBusy = ref(false)
+const serverErr = ref('')
+/** 探测失败后的待确认动作（pywebview 不支持 window.confirm，用行内确认） */
+const pendingAction = ref<{ type: 'add' | 'select'; url: string; message: string } | null>(null)
+
+/** 官方地址固定置顶；自定义地址去重展示 */
+const serverOptions = computed(() =>
+  Array.from(new Set([officialServer, ...servers.value.filter((u) => u !== officialServer)])),
+)
+
+function refreshServers() {
+  servers.value = getSavedServers()
+  activeServer.value = getActiveServer()
+}
+
+async function onAddServer() {
+  serverErr.value = ''
+  pendingAction.value = null
+  const url = normalizeServerUrl(newServerUrl.value)
+  if (!/^https?:\/\/.+/.test(url)) {
+    serverErr.value = '服务器地址需以 http:// 或 https:// 开头'
+    return
+  }
+  serverBusy.value = true
+  try {
+    const health = await checkServerHealth(url)
+    if (!health.ok) {
+      pendingAction.value = { type: 'add', url, message: describeServerProblem(health, url) }
+      return
+    }
+    forceAddServer(url)
+  } finally {
+    serverBusy.value = false
+  }
+}
+
+function forceAddServer(url: string) {
+  addServer(url)
+  refreshServers()
+  newServerUrl.value = ''
+  pendingAction.value = null
+  void persistServerConfigToConfig()
+}
+
+async function onSelectServer(url: string) {
+  if (url === activeServer.value) return
+  serverErr.value = ''
+  pendingAction.value = null
+  serverBusy.value = true
+  try {
+    const health = await checkServerHealth(url)
+    if (!health.ok) {
+      pendingAction.value = { type: 'select', url, message: describeServerProblem(health, url) }
+      return
+    }
+    forceSelectServer(url)
+  } finally {
+    serverBusy.value = false
+  }
+}
+
+async function forceSelectServer(url: string) {
+  setActiveServer(url)
+  activeServer.value = url
+  pendingAction.value = null
+  // 切换服务器：清空旧服务器登录态与记住的密码（含 config.json 镜像），
+  // 避免旧 token/密码在下次启动时被 seedSessionFromConfig 恢复并发往新服务器。
+  // 先持久化服务器配置、再清空会话，顺序执行避免 write_config 读改写竞态丢字段。
+  auth.reset()
+  try {
+    await persistServerConfigToConfig()
+    await persistSessionToConfig()
+  } catch {
+    /* 忽略：config.json 写入失败不影响本次切换 */
+  }
+  loginErr.value = `已切换到 ${url}，请重新登录`
+}
+
+function onRemoveServer(url: string) {
+  removeServer(url)
+  refreshServers()
+  void persistServerConfigToConfig()
+}
+
+function forcePending() {
+  if (!pendingAction.value) return
+  if (pendingAction.value.type === 'add') forceAddServer(pendingAction.value.url)
+  else forceSelectServer(pendingAction.value.url)
+}
+
 async function bootAfterLogin() {
   // 首登先引导加载（等同网页端 TodayView 挂载）：version=0 的账号（如测试号）
   // 没有同步日志，轮询拿不到 changes，必须显式拉取一次数据再进入 2s 轮询。
@@ -118,6 +224,7 @@ async function doLogin() {
   try {
     await auth.login(loginUser.value.trim(), loginPw.value, true)
     await persistSessionToConfig()
+    await persistServerConfigToConfig()
     await bootAfterLogin()
     widget.setMode('view')
   } catch (e) {
@@ -128,6 +235,7 @@ async function doLogin() {
 }
 async function doLogout() {
   stopSyncPoll()
+  disarmRecovery() // 若正在“待网络恢复”重试，登出时解除，避免空转
   await auth.logout()
   projects.resetAll()
   tasks.resetAll()
@@ -175,7 +283,8 @@ function pushView() {
   if (!api?.update_view) return
   try {
     api.update_view({
-      ready: true,
+      // 未登录保持旧语义；已登录但还没成功拉取过数据时显示“正在同步…”，避免误报“今日没有待办任务”
+      ready: !auth.isLoggedIn || isSynced(),
       date: monthDay.value,
       tasks: sorted.value.map((t) => t.name),
     })
@@ -191,6 +300,8 @@ const visibleKey = computed(() => {
   return k
 })
 watch(visibleKey, () => pushView(), { immediate: true })
+// 首次成功拉取数据（离线恢复 / 登录后）时把“正在同步…”切换为真实数据
+watch(() => isSynced(), () => pushView())
 watch(today, () => pushView())
 watch(
   () => widget.mode,
@@ -288,6 +399,60 @@ const settingsBgStyle = computed(() => ({
     <div class="settings-body">
       <!-- ===== 登录表单（未登录） ===== -->
       <section v-if="!auth.isLoggedIn" class="login">
+        <!-- ===== 服务器地址选择（官方固定置顶；可添加/删除自定义地址） ===== -->
+        <div class="server-box">
+          <div class="server-head">
+            <span class="server-title">服务器</span>
+            <span class="server-active" :title="activeServer">{{ activeServer }}</span>
+          </div>
+          <label
+            v-for="s in serverOptions"
+            :key="s"
+            class="server-item"
+            :class="{ 'server-item--active': s === activeServer }"
+          >
+            <input
+              type="radio"
+              name="widget-server"
+              :checked="s === activeServer"
+              :disabled="serverBusy"
+              @change="onSelectServer(s)"
+            />
+            <span class="server-url">{{ s }}</span>
+            <span v-if="s === officialServer" class="server-tag">官方</span>
+            <button
+              v-else
+              type="button"
+              class="server-del"
+              title="删除此服务器"
+              :disabled="serverBusy"
+              @click.stop="onRemoveServer(s)"
+            >
+              ✕
+            </button>
+          </label>
+          <div class="server-add">
+            <input
+              v-model="newServerUrl"
+              class="field-input"
+              placeholder="https://你的服务器地址"
+              :disabled="serverBusy"
+              @keyup.enter="onAddServer"
+            />
+            <button class="ghost-btn server-add-btn" type="button" :disabled="serverBusy" @click="onAddServer">
+              {{ serverBusy ? '检测中…' : '添加' }}
+            </button>
+          </div>
+          <div v-if="pendingAction" class="server-warn">
+            <span>{{ pendingAction.message }} 仍要{{ pendingAction.type === 'add' ? '保存' : '切换' }}吗？</span>
+            <div class="server-warn-actions">
+              <button class="ghost-btn" type="button" :disabled="serverBusy" @click="forcePending">仍然继续</button>
+              <button class="ghost-btn" type="button" @click="pendingAction = null">取消</button>
+            </div>
+          </div>
+          <div v-if="serverErr" class="login-err">{{ serverErr }}</div>
+        </div>
+
         <form class="login-form" @submit.prevent="doLogin">
           <input v-model="loginUser" class="field-input" placeholder="用户名" autocomplete="username" />
           <input
@@ -661,6 +826,104 @@ const settingsBgStyle = computed(() => ({
   text-overflow: ellipsis;
   color: #111;
   font-weight: 600;
+}
+/* 服务器选择 */
+.server-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.5);
+}
+.server-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.server-title {
+  font-size: calc(var(--fs, 16px) * 0.82);
+  font-weight: 600;
+  color: #333;
+}
+.server-active {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: calc(var(--fs, 16px) * 0.72);
+  color: #888;
+}
+.server-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: calc(var(--fs, 16px) * 0.78);
+  color: #333;
+}
+.server-item:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+.server-item--active {
+  background: rgba(59, 130, 246, 0.12);
+  color: #1d4ed8;
+}
+.server-url {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.server-tag {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: rgba(59, 130, 246, 0.15);
+  font-size: calc(var(--fs, 16px) * 0.68);
+  color: #1d4ed8;
+}
+.server-del {
+  flex-shrink: 0;
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: #999;
+  cursor: pointer;
+  font-size: calc(var(--fs, 16px) * 0.8);
+  line-height: 1;
+}
+.server-del:hover {
+  color: #dc2626;
+}
+.server-add {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.server-add-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.server-warn {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(220, 38, 38, 0.08);
+  font-size: calc(var(--fs, 16px) * 0.75);
+  color: #b91c1c;
+}
+.server-warn-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
 }
 
 

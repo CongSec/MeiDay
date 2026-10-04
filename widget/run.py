@@ -110,6 +110,8 @@ def _native():
 DEFAULT_CONFIG = {
     "session": {"token": "", "tokenAt": 0, "savedPw": "", "savedPwAt": 0, "username": ""},
     "widget": {"opacity": 0.6, "width": 360, "posX": None, "posY": None, "autoStart": False, "fontSize": 16},
+    # 服务器配置镜像（config.json → 前端 localStorage）：旧配置无该键时由 _deep_merge 自动补默认值
+    "server": {"servers": [], "active": ""},
 }
 
 
