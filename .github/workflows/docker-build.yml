@@ -33,6 +33,16 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Check required secrets
+        env:
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          if [[ -z "$ACR_USERNAME" || -z "$ACR_PASSWORD" ]]; then
+            echo "::error::缺少 Actions Secret：请在仓库 Settings → Secrets and variables → Actions 配置 ACR_USERNAME 和 ACR_PASSWORD"
+            exit 1
+          fi
+
       - name: Login to Aliyun ACR
         uses: docker/login-action@v3
         with:
