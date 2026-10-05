@@ -68,8 +68,9 @@ jobs:
 
       - uses: actions/setup-java@v4
         with:
+          # Capacitor 8 的 Android 库以 Java 21 源码级别编译，必须 JDK 21
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       # 注意：不装 android-actions/setup-android——ubuntu-latest 运行器自带完整
       # Android SDK（/usr/local/lib/android/sdk），缺失的组件 Gradle 会自动下载。
