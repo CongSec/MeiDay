@@ -12,10 +12,10 @@ MeiDay 专注于“当下”——只做好一件事：**稳定流畅安全的�
 
 不堆砌功能，只追求最纯粹的流畅体验。
 
-> **web端体验地址:**  https://task.congsec.cn
+> **web端体验地址:**   [https://task.congsec.cn](https://task.congsec.cn)
 >
-> **体验测试账号(只读):**  congsec/1234578  
-> **压力测试账号(只读):**  test/12345678
+> **体验测试账号(只读):**   congsec/1234578  
+> **压力测试账号(只读):**   test/12345678
 >
 > OSS AccessKey:LTAI5t88s2Wq3vrhS71vKru2  
 > OSS SecretKey:JfkgheFQRRN7InfV4wR0rZY3NqdLIy  
@@ -28,7 +28,7 @@ MeiDay 专注于“当下”——只做好一件事：**稳定流畅安全的�
 
 完成任务自动封存进「时间胶囊」，像翻开日历一样回看每一天的成果。支持**日历视图**（完成/未完成任务按天归属、跨天任务横条可视化）、**年度热力图**和**工作量趋势图**，让成长轨迹一目了然；重复任务自动枚举所有发生日，回顾不遗漏。
 
-<img width="1106" height="684" alt="Image" src="https://b3logfile.com/file/2026/10/siyuan/1714493573033/assets/PixPin_2026-10-02_15-54-38-20261002171405-rb81p01.gif" />
+![Image](https://b3logfile.com/file/2026/10/siyuan/1714493573033/assets/PixPin_2026-10-02_15-54-38-20261002171405-rb81p01.gif)
 
 ### 数据安全与性能安全
 
@@ -55,7 +55,6 @@ MeiDay 专注于“当下”——只做好一件事：**稳定流畅安全的�
 ### 多端实时同步
 
 Web 端(https://task.congsec.cn)、Android App、思源笔记插件、Windows 桌面小组件共用同一份云端数据，**无本地数据、秒级同步**，任何一端改动，其他端即刻更新。
-
 
 **思源笔记插件端**
 
@@ -158,9 +157,11 @@ npm install
 npm run dev
 ```
 
-### CDN搭建教程
+### 构建教程
 
-#### cdn与存储桶绑定
+#### CDN搭建教程
+
+##### cdn与存储桶绑定
 
 存储桶创建请参考上述教程(存储桶记得设置为公开,跨域设置记得设置为你的访问域名,**其他跨域字段和上述一致**)
 
@@ -174,7 +175,7 @@ npm run dev
 
 ![image](https://b3logfile.com/file/2026/08/siyuan/1714493573033/assets/image-20260825075049-izfqr13.png)
 
-#### 构建前端产物
+##### 构建前端产物
 
 在frontend文件夹中新建文件,`vi .env.web`,填入如下
 
@@ -194,7 +195,7 @@ VITE_CDN_BASE=https://static.congsec.cn
 
 ![image](https://b3logfile.com/file/2026/08/siyuan/1714493573033/assets/image-20260825074322-gcshks6.png)
 
-#### 验证
+##### 验证
 
 `cat frontend/index.html`,存在cdn域名则说明构建成功
 
@@ -204,7 +205,7 @@ VITE_CDN_BASE=https://static.congsec.cn
 
 如果网站界面返回空白的话,可能是跨域的问题,也有可能是cdn的缓存问题,所以去刷新cdn缓存,再等几分钟再次访问尝试
 
-### APP构建教程
+#### APP构建教程
 
 在frontend文件夹中创建`.env.production`文件:填入如下
 
@@ -217,11 +218,11 @@ VITE_API_BASE_URL=https://task.congsec.cn
 
 成功后就会在 frontend\android\app\build\outputs\apk\debug 输出apk文件
 
-### 桌面组件构建教程
+#### 桌面组件构建教程
 
 直接一键运行`python `
 
-### 思源插件构建教程
+#### 思源插件构建教程
 
 将[https://github.com/CongSec/MeiDay](https://github.com/CongSec/MeiDay)这个项目clone下来,在`frontend`​文件夹中构建`npm install`​和`npm run build:plugin`
 
@@ -250,54 +251,6 @@ Copy-Item ".\meiday-siyuan-plugin\dist\*" `
 
 ## Docker 部署（后端）
 
-MeiDay 后端已提供 Docker 镜像（`congsec/meiday`，阿里云 ACR 自动构建）。镜像只运行 FastAPI 后端（端口 8000），前端仍由你的 OSS/CDN 托管。
+支持docker一键部署启动后端,直接使用`docker run -d --name meiday --restart unless-stopped -p 8001:8000 -e FRONTEND_ORIGINS="http://localhost:5173,http://localhost,https://task.congsec.cn" -v meiday_data:/data crpi-8r9w3eevpt68aj3u.cn-hangzhou.personal.cr.aliyuncs.com/congsec/meiday:latest`命令即可
 
-### 1. 拉取并运行
-
-```bash
-# 登录阿里云 ACR（仓库为公开类型，可跳过登录直接拉取）
-docker login --username=aliyun0134115558 crpi-8r9w3eevpt68aj3u.cn-hangzhou.personal.cr.aliyuncs.com
-
-# 拉取最新镜像
-docker pull crpi-8r9w3eevpt68aj3u.cn-hangzhou.personal.cr.aliyuncs.com/congsec/meiday:latest
-
-# 运行（命名卷 meiday_data 持久化 SQLite 数据库与日志）
-docker run -d --name meiday -p 8000:8000 \
-  -v meiday_data:/data \
-  --restart unless-stopped \
-  crpi-8r9w3eevpt68aj3u.cn-hangzhou.personal.cr.aliyuncs.com/congsec/meiday:latest
-```
-
-或使用 docker compose（推荐，支持 `.env` 配置）：
-
-```bash
-cp .env.example .env   # 按需修改 FRONTEND_ORIGINS
-docker compose up -d
-```
-
-### 2. 验证
-
-```bash
-curl http://localhost:8000/api/health
-# 期望输出：{"ok":true}
-docker logs -f meiday   # 查看日志
-```
-
-### 3. 升级
-
-```bash
-docker compose pull && docker compose up -d
-```
-
-数据（用户账号、提醒、审计日志）保存在数据卷中，升级不丢失；如需迁移，备份数据卷 `/data` 下的 `dev.db` 与 `logs/`。
-
-### 4. 环境变量
-
-| 变量 | 说明 | 默认值 |
-| --- | --- | --- |
-| `FRONTEND_ORIGINS` | 前端页面访问白名单（逗号分隔），前端在自定义域名时设置 | `http(s)://localhost`、`http(s)://task.congsec.cn` |
-| `MEIDAY_DATA_DIR` | 数据目录（SQLite + 日志），镜像内固定为 `/data`，一般无需修改 | `/data` |
-
-### 开发者：镜像自动构建
-
-push 到 `main` 自动构建并推送 `latest` + commit 号镜像；打 `v*` 标签（如 `v1.0.0`）自动构建对应版本号镜像。需在仓库配置两个 Actions Secret：`ACR_USERNAME`（阿里云账号全名）与 `ACR_PASSWORD`（容器镜像服务 → 访问凭证 → 固定密码）。
+‍
