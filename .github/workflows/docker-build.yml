@@ -1,0 +1,64 @@
+# ============================================================
+# MeiDay 后端镜像自动构建并推送到阿里云 ACR（个人版）
+# - push 到 main        → 推送 latest + 短 commit 号
+# - 打 v* 标签（如 v1.0.0）→ 推送 v1.0.0 + 1.0.0
+# - 可手动触发（workflow_dispatch）
+# 需要仓库配置两个 Actions Secret：
+#   ACR_USERNAME = 阿里云账号全名（本例 aliyun0134115558）
+#   ACR_PASSWORD = 容器镜像服务 → 访问凭证 → 固定密码
+# ============================================================
+name: Build & Push to Aliyun ACR
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  REGISTRY: crpi-8r9w3eevpt68aj3u.cn-hangzhou.personal.cr.aliyuncs.com
+  IMAGE: congsec/meiday
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Aliyun ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Compute image tags
+        id: meta
+        shell: bash
+        run: |
+          BASE="${{ env.REGISTRY }}/${{ env.IMAGE }}"
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            # 打 v1.0.0 标签 → 推送 v1.0.0 与 1.0.0
+            VERSION="${{ github.ref_name }}"
+            echo "tags=$BASE:${VERSION},$BASE:${VERSION#v}" >> "$GITHUB_OUTPUT"
+          else
+            # main 分支 push → 推送 latest 与 短 commit 号
+            echo "tags=$BASE:latest,$BASE:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}

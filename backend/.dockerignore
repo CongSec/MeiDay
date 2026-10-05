@@ -1,0 +1,24 @@
+# 本地虚拟环境与缓存
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+
+# 运行数据（SQLite 与日志，不应打进镜像；镜像运行时数据走挂载卷）
+dev.db
+dev.db-shm
+dev.db-wal
+*.db
+logs
+*.log
+
+# 环境变量与密钥
+.env
+.env.*
+!.env.example
+
+# 杂项
+*.bak
+*.tmp

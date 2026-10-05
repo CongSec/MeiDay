@@ -247,3 +247,57 @@ Copy-Item ".\meiday-siyuan-plugin\dist\*" `
 
 # ④ 完全退出思源再打开 ← 必须重启，思源不热加载
 ```
+
+## Docker 部署（后端）
+
+MeiDay 后端已提供 Docker 镜像（`congsec/meiday`，阿里云 ACR 自动构建）。镜像只运行 FastAPI 后端（端口 8000），前端仍由你的 OSS/CDN 托管。
+
+### 1. 拉取并运行
+
+```bash
+# 登录阿里云 ACR（仓库为公开类型，可跳过登录直接拉取）
+docker login --username=aliyun0134115558 crpi-8r9w3eevpt68aj3u.cn-hangzhou.personal.cr.aliyuncs.com
+
+# 拉取最新镜像
+docker pull crpi-8r9w3eevpt68aj3u.cn-hangzhou.personal.cr.aliyuncs.com/congsec/meiday:latest
+
+# 运行（命名卷 meiday_data 持久化 SQLite 数据库与日志）
+docker run -d --name meiday -p 8000:8000 \
+  -v meiday_data:/data \
+  --restart unless-stopped \
+  crpi-8r9w3eevpt68aj3u.cn-hangzhou.personal.cr.aliyuncs.com/congsec/meiday:latest
+```
+
+或使用 docker compose（推荐，支持 `.env` 配置）：
+
+```bash
+cp .env.example .env   # 按需修改 FRONTEND_ORIGINS
+docker compose up -d
+```
+
+### 2. 验证
+
+```bash
+curl http://localhost:8000/api/health
+# 期望输出：{"ok":true}
+docker logs -f meiday   # 查看日志
+```
+
+### 3. 升级
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+数据（用户账号、提醒、审计日志）保存在数据卷中，升级不丢失；如需迁移，备份数据卷 `/data` 下的 `dev.db` 与 `logs/`。
+
+### 4. 环境变量
+
+| 变量 | 说明 | 默认值 |
+| --- | --- | --- |
+| `FRONTEND_ORIGINS` | 前端页面访问白名单（逗号分隔），前端在自定义域名时设置 | `http(s)://localhost`、`http(s)://task.congsec.cn` |
+| `MEIDAY_DATA_DIR` | 数据目录（SQLite + 日志），镜像内固定为 `/data`，一般无需修改 | `/data` |
+
+### 开发者：镜像自动构建
+
+push 到 `main` 自动构建并推送 `latest` + commit 号镜像；打 `v*` 标签（如 `v1.0.0`）自动构建对应版本号镜像。需在仓库配置两个 Actions Secret：`ACR_USERNAME`（阿里云账号全名）与 `ACR_PASSWORD`（容器镜像服务 → 访问凭证 → 固定密码）。

@@ -35,7 +35,10 @@ FRONTEND_ORIGINS = [
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 # 同时滚动落盘到 backend/logs/app.log，方便直接查看服务器日志
-LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+# 数据目录：Docker 部署时用环境变量 MEIDAY_DATA_DIR 指定（镜像内默认 /data），
+# 未设置时保持原行为（backend/logs），不影响本地开发。
+DATA_DIR = Path(os.environ.get("MEIDAY_DATA_DIR", str(Path(__file__).resolve().parent.parent)))
+LOG_DIR = DATA_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 _file_handler = RotatingFileHandler(
     LOG_DIR / "app.log", maxBytes=2 * 1024 * 1024, backupCount=5, encoding="utf-8"

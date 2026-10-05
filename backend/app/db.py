@@ -1,8 +1,12 @@
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parent.parent / "dev.db"
+# 数据目录：Docker 部署时用环境变量 MEIDAY_DATA_DIR 指定（镜像内默认 /data），
+# 未设置时保持原行为（backend/ 目录下 dev.db），不影响本地开发。
+DATA_DIR = Path(os.environ.get("MEIDAY_DATA_DIR", str(Path(__file__).resolve().parent.parent)))
+DB_PATH = DATA_DIR / "dev.db"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
