@@ -71,4 +71,8 @@ jobs:
           file: ./backend/Dockerfile
           push: true
           platforms: linux/amd64
+          # ACR 个人版不支持 OCI attestation（provenance）清单，必须关闭，否则推送报
+          # "denied: unknown manifest class for application/vnd.oci.empty.v1+json"
+          provenance: false
+          sbom: false
           tags: ${{ steps.meta.outputs.tags }}
