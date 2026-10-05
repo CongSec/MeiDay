@@ -5,7 +5,7 @@ import { useProjectsStore } from './projects'
 import { useUiStore } from './ui'
 import { useStatsStore } from './stats'
 import { createOssClient, describeOssError, paths } from '@/utils/oss'
-import { applyDeletedTombstones, compareAndSwapPut, filterTasksForProject, lastModifiedOf, lmKeyOf, mergeDeletedTombstones, mergeTasks, versionToken } from '@/utils/sync'
+import { applyDeletedTombstones, compareAndSwapPut, dedupTasksById, filterTasksForProject, lastModifiedOf, lmKeyOf, mergeDeletedTombstones, mergeTasks, versionToken } from '@/utils/sync'
 import { enrichOssError } from '@/utils/ossDiag'
 import { idbClearTrashUserCache, idbGet, idbListKeys, idbPut, idbDel } from '@/utils/idb'
 import { debounce, type Debounced } from '@/utils/debounce'
@@ -448,23 +448,24 @@ export const useTasksStore = defineStore('tasks', {
     todayOrder: [] as string[],
   }),
   getters: {
-    all: (s) => Object.values(s.tasks).flat(),
-    allTrash: (s) => Object.values(s.trash).flat(),
+    /** 全部已加载任务（跨项目），按 id 去重：跨项目移动后同 id 的过期副本只保留 updatedAt 最新一份，
+     *  避免同一个任务被渲染/操作两遍（BUG：重复任务显示）。 */
+    all: (s) => dedupTasksById(Object.values(s.tasks).flat()),
+    /** 全部回收站/时间胶囊任务（跨项目），同样按 id 去重（同 id 可能同时残留在新旧两个项目的回收站） */
+    allTrash: (s) => dedupTasksById(Object.values(s.trash).flat()),
     byProject: (s) => (projectId: string) => s.tasks[projectId] ?? [],
     /** 今日任务侧栏角标：今日视图中可见的进行中任务数 */
     todayCount: (s) => {
       const today = todayKey()
-      return Object.values(s.tasks)
-        .flat()
+      return dedupTasksById(Object.values(s.tasks).flat())
         .filter((t) => t.status === 'pending' && isTaskVisibleToday(t, today)).length
     },
     /** 侧栏头部：全部待办任务数（跨项目，仅统计内存中已加载的项目） */
-    pendingCount: (s) => Object.values(s.tasks).flat().filter((t) => t.status === 'pending' && isRepeatTaskActiveOn(t, todayKey())).length,
+    pendingCount: (s) => dedupTasksById(Object.values(s.tasks).flat()).filter((t) => t.status === 'pending' && isRepeatTaskActiveOn(t, todayKey())).length,
     /** 侧栏头部：今天已完成任务数（跨项目；完成任务时 updatedAt 记为完成时间） */
     completedTodayCount: (s) => {
       const today = todayKey()
-      return Object.values(s.tasks)
-        .flat()
+      return dedupTasksById(Object.values(s.tasks).flat())
         .filter((t) => t.status === 'completed' && dateKeyOf(t.updatedAt) === today).length
     },
     /** 今日相关项目：本地（IDB）缓存里存在“今日可见”任务的项目。

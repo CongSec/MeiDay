@@ -225,12 +225,18 @@ export function seedFromParentConfig(): void {
 
 /** 检测当前页面是否因浏览器「混合内容」策略无法访问 http:// 目标：
  *  HTTPS 页面 → HTTP 地址会被浏览器硬拦截（网页端 HTTPS 部署时，自定义 http:// 服务器不可用）。
- *  原生 APP 已开启 Capacitor allowMixedContent，不视为拦截；小组件/插件页面非 HTTPS，也不受影响。 */
+ *  原生 APP 已开启 Capacitor allowMixedContent，不视为拦截；小组件/插件页面非 HTTPS，也不受影响。
+ *  思源插件（/挂件）把 MeiDay 前端以 iframe 内嵌，iframe 内不存在浏览器「混合内容」硬拦截，
+ *  http:// 地址在插件端实测可用，因此 iframe 环境（非顶层网页）一律不弹「网页端限制」警告。 */
 export function isMixedContentBlocked(target: string): boolean {
   try {
     if (typeof window === 'undefined' || window.location.protocol !== 'https:') return false
     const cap = (window as unknown as { Capacitor?: { isNativePlatform?: () => boolean } }).Capacitor
     if (cap && typeof cap.isNativePlatform === 'function' && cap.isNativePlatform()) return false
+    // 思源插件/挂件等 iframe 内嵌场景：浏览器不会对 http:// 发起混合内容拦截，http 可用，
+    // 不应弹出「当前网页是 HTTPS…网页端无法使用」这类网页端专属提示。
+    // 真正的网页端是顶层窗口（window.self === window.top），才会命中下面的混合内容判断。
+    if (window.self !== window.top) return false
     return /^http:\/\//i.test(normalizeServerUrl(target))
   } catch {
     return false

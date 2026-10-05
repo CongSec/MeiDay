@@ -1,0 +1,200 @@
+# ============================================================
+# MeiDay 仓库：每次 push 到 main 自动构建 3 个产物并发布到 GitHub Release
+#   - MeiDay.apk       （免签名 debug 版，Capacitor/Android）
+#   - MeiDay.exe       （Windows 桌面小组件，PyInstaller）
+#   - package.zip      （思源笔记插件包，内嵌本仓库前端）
+# 版本号规则：在最近一个 v* 标签上 +0.1.0（v1.6.0 -> v1.7.0），
+# 仓库没有标签时从 v1.6.0 开始；也可手动触发时指定版本。
+# 依赖：无需额外 Secrets（用默认 GITHUB_TOKEN 即可）。
+# ============================================================
+name: Build & Release (exe/apk/plugin)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '手动指定版本号（如 1.7.0），留空则自动在上一个版本 +0.1.0'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  # 思源插件/APK 内联的后端 API 地址（可用仓库 Variables 覆盖）
+  MEIDAY_API_BASE_URL: ${{ vars.MEIDAY_API_BASE_URL || 'https://task.congsec.cn' }}
+
+jobs:
+  compute-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 需要全部历史/标签来计算版本
+      - id: version
+        shell: bash
+        env:
+          OVERRIDE: ${{ inputs.version }}
+        run: |
+          if [[ -n "$OVERRIDE" ]]; then
+            echo "version=${OVERRIDE}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          latest=$(git tag -l 'v*' --sort=-v:refname | head -n1 | sed 's/^v//')
+          if [[ -z "$latest" ]]; then
+            version="1.6.0"
+          else
+            IFS='.' read -r major minor _ <<< "$latest"
+            minor=$((minor + 1))
+            version="${major}.${minor}.0"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "下一版本: v${version}"
+
+  # ---------- APK ----------
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Build web assets
+        working-directory: frontend
+        env:
+          VITE_API_BASE_URL: ${{ env.MEIDAY_API_BASE_URL }}
+          VITE_CDN_BASE: ''
+        run: |
+          npm install
+          npm run build
+          npx cap sync android
+
+      - name: Assemble debug APK
+        working-directory: frontend/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Rename APK
+        run: cp frontend/android/app/build/outputs/apk/debug/app-debug.apk MeiDay.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: MeiDay.apk
+          if-no-files-found: error
+
+  # ---------- EXE（Windows 桌面小组件）----------
+  build-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install widget npm deps
+        working-directory: widget
+        run: npm install
+
+      - name: Install python deps
+        working-directory: widget
+        run: pip install -r requirements.txt
+
+      - name: PyInstaller package (builds widget frontend + exe)
+        working-directory: widget
+        run: python build.py
+
+      - name: Rename EXE
+        shell: pwsh
+        run: Copy-Item widget/build/dist/MeiDayWidget.exe MeiDay.exe -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exe
+          path: MeiDay.exe
+          if-no-files-found: error
+
+  # ---------- 思源插件 package.zip ----------
+  build-plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build MeiDay plugin single-file frontend
+        working-directory: frontend
+        env:
+          VITE_API_BASE_URL: ${{ env.MEIDAY_API_BASE_URL }}
+        run: |
+          npm install
+          npm run build:plugin
+
+      - name: Clone plugin shell repo
+        run: git clone --depth 1 https://github.com/CongSec/siyuan-plugin-meiday.git plugin-shell
+
+      - name: Embed built app into plugin shell
+        run: cp frontend/dist-plugin/index.html plugin-shell/src/assets/app.html
+
+      - name: Build plugin package
+        working-directory: plugin-shell
+        run: |
+          npm install
+          npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin
+          path: plugin-shell/package.zip
+          if-no-files-found: error
+
+  # ---------- 发版 ----------
+  release:
+    runs-on: ubuntu-latest
+    needs: [compute-version, build-apk, build-exe, build-plugin]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la artifacts
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          VERSION="${{ needs.compute-version.outputs.version }}"
+          TAG="v${VERSION}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::warning::Release $TAG 已存在，跳过创建（可手动触发并指定新版本号）"
+            exit 0
+          fi
+          gh release create "$TAG" artifacts/* \
+            --title "v${VERSION}" \
+            --generate-notes
+          echo "已发布 v${VERSION}：MeiDay.apk / MeiDay.exe / package.zip"

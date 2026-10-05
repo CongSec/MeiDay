@@ -16,6 +16,7 @@ import {
 import { nowIso, todayKey } from '@/utils/time'
 import type { DiaryBatch, DiaryMessage } from '@/types'
 import { logAudit, safeDetail } from '@/utils/audit'
+import { maybeCompressImage } from '@/utils/diaryImageCompress'
 
 /** 后台上传中的单个文件（用于界面并行展示进度，不阻塞其它发送） */
 export interface DiaryUploadState {
@@ -298,7 +299,7 @@ export const useDiaryStore = defineStore('diary', {
 
     /** 后台上传文件/语音：立即加入上传列表返回，不阻塞界面；
      *  多文件受限并发加密/上传（避免抢带宽），各自完成后追加消息并按写队列落盘。
-     *  文件按原样上传，不做压缩。 */
+     *  超大图片会先压缩（maybeCompressImage，失败回退原文件），其余文件按原样上传。 */
     async sendFile(
       file: File,
       type: 'file' | 'audio' = 'file',
@@ -307,6 +308,9 @@ export const useDiaryStore = defineStore('diary', {
       const dateKey = this.selectedDate
       const dek = getDiaryDek()
       if (!ossClient || !this.username || !dek) throw new Error('日记会话已锁定')
+      // 大图先压缩（仅图片且超过阈值才压缩，任何失败回退原文件），显著减小上传体积，
+      // 降低移动端内存压力（相机原图 3~10MB → 数百 KB）
+      file = await maybeCompressImage(file)
       const fileId = crypto.randomUUID()
       const displayName = opts?.name ?? file.name
       const state: DiaryUploadState = { id: fileId, name: displayName, percent: null }

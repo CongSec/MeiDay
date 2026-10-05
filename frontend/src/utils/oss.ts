@@ -1,6 +1,7 @@
 import { Capacitor, CapacitorHttp } from '@capacitor/core'
 import { AwsClient, AwsV4Signer } from 'aws4fetch'
 import type { CredFields } from '@/types'
+import { bytesToB64 } from './crypto'
 
 /**
  * 对象存储客户端：阿里云 OSS / 腾讯云 COS / 华为云 OBS / 七牛 Kodo / MinIO / R2
@@ -114,7 +115,19 @@ const NET_BACKOFF_MS = [300, 900, 2000]
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
-/** CapacitorHttp 原生响应的 Response 兼容层（arraybuffer 响应为 base64 字符串，解码回字节） */
+/** 大小写不敏感地从响应头里取值（原生端 header key 的大小写不固定） */
+function getHeaderValue(headers: Record<string, string> | undefined, name: string): string | undefined {
+  if (!headers) return undefined
+  const lower = name.toLowerCase()
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === lower && v != null) return String(v)
+  }
+  return undefined
+}
+
+/** CapacitorHttp 原生响应的 Response 兼容层：
+ *  - 非 JSON 内容的 arraybuffer 响应在原生端是 base64 字符串，这里解码回字节；
+ *  - content-type=json 时原生端已 parseJSON 成对象/数组或字符串，直接原样使用，不再二次解码。 */
 class NativeResponse implements FetchLikeResponse {
   status: number
   headers: Headers
@@ -145,7 +158,9 @@ class NativeResponse implements FetchLikeResponse {
       this._text = data
       this._bytes = null
     } else if (data != null) {
-      // content-type=json 时原生端已解析成对象/数组
+      // content-type=json 时原生端已解析成对象/数组；若 data 是字符串值
+      // （如日记批次文件里的 base64 密文），会走上方 typeof data === 'string' 分支，
+      // 且 decodeBase64=false，原样保留，避免二次解码损坏密文
       this._text = JSON.stringify(data)
       this._bytes = null
     } else {
@@ -201,6 +216,14 @@ async function signS3(
  * - 直接走 CapacitorHttp 原生插件（GET 不再经过 WebView 拦截器，避免拦截器无超时/并发受限导致的偶发失败）；
  * - 显式设置连接/读取超时；
  * - 网络错误与 5xx/429 都会退避重试（aws4fetch 本身不重试网络错误）。
+ *
+ * 上传（PUT）body 处理 —— 修复手机端二进制上传损坏：
+ * Android WebView 的 fetch 发送「二进制」ArrayBuffer body 会损坏非 UTF-8 字节
+ * （ASCII 文本无损），导致手机端上传的图片/音频/附件在 OSS 上全部损坏、文本正常。
+ * 因此原生端一律用 CapacitorHttp 原生 HTTP 发送，二进制体 base64 后经
+ * dataType:'file' 交给原生解码回原始字节，字节完整且无 CORS 限制。
+ *  - application/json 等文本体：直接原样传字符串（原生按 UTF-8 写入，字节无损）；
+ *  - 其余任何类型（octet-stream / image/* 等）：base64 + dataType:'file' 原样还原。
  */
 async function nativeS3Fetch(aws: AwsClient, url: string, init: S3Init): Promise<FetchLikeResponse> {
   const { url: finalUrl, method, headers } = await signS3(aws, url, init)
@@ -209,6 +232,25 @@ async function nativeS3Fetch(aws: AwsClient, url: string, init: S3Init): Promise
     headerObj[k] = v
   })
 
+  // 解析待发送的 body：文本原样传字符串；二进制 base64 + dataType:'file'
+  let data: string | undefined
+  let dataType: 'file' | undefined
+  if (init.body != null) {
+    const bodyBytes =
+      init.body instanceof ArrayBuffer
+        ? new Uint8Array(init.body)
+        : typeof init.body === 'string'
+          ? new TextEncoder().encode(init.body)
+          : new Uint8Array(0)
+    const contentType = getHeaderValue(headerObj, 'content-type') ?? ''
+    if (/json|text|xml/i.test(contentType)) {
+      data = new TextDecoder().decode(bodyBytes)
+    } else {
+      data = bytesToB64(bodyBytes)
+      dataType = 'file'
+    }
+  }
+
   let lastErr: unknown = new Error('OSS 请求失败')
   for (let attempt = 0; attempt <= NET_RETRIES; attempt++) {
     try {
@@ -216,6 +258,8 @@ async function nativeS3Fetch(aws: AwsClient, url: string, init: S3Init): Promise
         url: finalUrl,
         method,
         headers: headerObj,
+        data,
+        dataType,
         // 统一按二进制读取：成功体在原生端是 base64（解码回字节），错误体是文本
         responseType: 'arraybuffer',
         connectTimeout: NATIVE_CONNECT_TIMEOUT,
@@ -223,7 +267,12 @@ async function nativeS3Fetch(aws: AwsClient, url: string, init: S3Init): Promise
       })
       // 5xx / 429 与网络错误一样可重试
       if (attempt >= NET_RETRIES || (res.status < 500 && res.status !== 429)) {
-        return new NativeResponse(res.status, res.headers, res.data, res.status < 400)
+        // 原生端对 content-type=json 的响应总是先 parseJSON：对象/数组走 JSON.stringify 还原，
+        // 字符串值（如日记批次文件里的 base64 密文）已是解析后的原文，不能再按 base64 二次解码，
+        // 否则会把密文改写成乱码，导致「解密失败：日记密码不匹配或数据已损坏」（查看当天/回顾均受影响）
+        const contentType = getHeaderValue(res.headers, 'content-type') ?? ''
+        const isJson = /json/i.test(contentType)
+        return new NativeResponse(res.status, res.headers, res.data, res.status < 400 && !isJson)
       }
       lastErr = new Error(`OSS 请求失败（HTTP ${res.status}）`)
     } catch (e) {
@@ -378,7 +427,9 @@ export async function createOssClient(creds: CredFields): Promise<OssClient> {
     async put(key, body, options) {
       const url = `${base}/${encKey(key)}`
       const blob = typeof body === 'string' ? new Blob([body]) : (body as Blob)
-      const res = await aws.fetch(url, {
+      // 统一走 s3Fetch：原生端（Android/iOS）用 CapacitorHttp 原生 HTTP 上传，
+      // 二进制 body 原样还原（见 nativeS3Fetch），Web 端仍用 aws.fetch。
+      const res = await s3Fetch(aws, url, {
         method: 'PUT',
         headers: {
           'Content-Type': blob.type || 'application/octet-stream',
@@ -392,7 +443,7 @@ export async function createOssClient(creds: CredFields): Promise<OssClient> {
 
     async delete(key) {
       const url = `${base}/${encKey(key)}`
-      const res = await aws.fetch(url, { method: 'DELETE' })
+      const res = await s3Fetch(aws, url, { method: 'DELETE' })
       // S3 DELETE 幂等：对象不存在也返回 204，不必抛错
       if (!res.ok && res.status !== 404) throw await toS3Error(res, key)
     },

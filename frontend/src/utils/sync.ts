@@ -1,4 +1,4 @@
-﻿import type { OssClient } from '@/utils/oss'
+import type { OssClient } from '@/utils/oss'
 import type { DeletedProject, Profile, Project, StatsDailyEntry, StatsTaskDelta, Task, UserStats } from '@/types'
 
 /**
@@ -241,6 +241,23 @@ export function mergeTasks(local: Task[], remote: Task[]): Task[] {
  */
 export function filterTasksForProject(tasks: Task[], projectId: string): Task[] {
   return tasks.filter((t) => t.projectId === undefined || t.projectId === projectId)
+}
+
+/**
+ * 按 id 去重（保留 updatedAt 最新的一份），展示/计数层的兜底。
+ *
+ * 跨项目移动任务后，源项目 OSS 文件里可能短暂残留该任务的旧副本（详见 filterTasksForProject），
+ * 直接 Object.values(tasks).flat() 会把同一个任务渲染/计数两遍（BUG：重复任务显示）。
+ * 这里按全局唯一 id 收敛：同一 id 只留 updatedAt 最新的一份，其余视为过期副本丢弃。
+ * 副作用：this.all.find(id) 会稳定命中最新副本，完成任务/删除/编辑等操作作用于最新数据。
+ */
+export function dedupTasksById(tasks: Task[]): Task[] {
+  const byId = new Map<string, Task>()
+  for (const t of tasks) {
+    const cur = byId.get(t.id)
+    if (!cur || compareTime(t.updatedAt, cur.updatedAt) > 0) byId.set(t.id, t)
+  }
+  return [...byId.values()]
 }
 
 /** 合并多个“已从活跃列表移除的任务”集合（回收站 tombstone：含已删除与已完成）；同 id 保留 updatedAt 最新的 tombstone */

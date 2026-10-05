@@ -1,28 +1,32 @@
 import { defineStore } from 'pinia'
 import { useAuthStore } from './auth'
-import { useStatsStore } from './stats'
-import { useUiStore } from './ui'
-import { createOssClient, describeOssError, paths, type OssClient } from '@/utils/oss'
-import { applyDeletedTombstones, compareAndSwapPut, lastModifiedOf, lmKeyOf, mergeDeletedTombstones, mergeTasks, versionToken } from '@/utils/sync'
+import { createOssClient, paths, type OssClient } from '@/utils/oss'
+import { applyDeletedTombstones, lastModifiedOf, lmKeyOf, mergeDeletedTombstones, versionToken } from '@/utils/sync'
 import { idbGet, idbPut, idbDel } from '@/utils/idb'
-import { queueSyncChange } from '@/utils/syncReport'
 import { nowIso, todayKey } from '@/utils/time'
 import { isTaskVisibleToday } from '@/utils/todayFilter'
-import { buildRepeatOccurrence, nextRepeatDate, shiftTaskTimes } from '@/utils/repeat'
-import { canonicalJson, normalizeTasks, taskEffectiveEndTime } from '@/utils/task'
-import { addDaysKey, dateKeyOf, diffDaysKey } from '@/utils/time'
+import { normalizeTasks, taskEffectiveEndTime } from '@/utils/task'
+import { addDaysKey, dateKeyOf } from '@/utils/time'
 import { UNCATEGORIZED, type RepeatMaster, type Task } from '@/types'
 
 /**
- * 桌面小组件的精简版 tasks store。
+ * 桌面小组件的精简版 tasks store —— 完全只读。
  *
  * 只覆盖今日视图需要的最小功能集：
- *  - 拉取项目任务 + 今日跨项目顺序表（loadProject / loadTodayOrder）；
- *  - 完成任务 / 取消完成（确认式保存 + 重复模板生成/删除，与主应用逻辑一致）；
- *  - 拖拽排序（setOrder 写回项目 sort + setTodayOrder 写回全局顺序表）；
- *  - 重复任务到期物化（materializeRepeats）。
+ *  - 拉取项目任务 / 今日跨项目顺序表 / 重复模板（loadProject / syncProject /
+ *    loadTodayOrder / loadRepeats），全部只读 OSS，绝不写回；
+ *  - 数据只进内存与本地 IDB 缓存，不调用任何 OSS PUT，也不上报同步变更；
+ *  - 重复任务到期不再由小组件物化写盘，只展示 App/网页端物化后同步过来的结果。
  *
- * 刻意省略：回收站分片、LRU 逐出、子任务编辑、时间胶囊等今日视图无关逻辑。
+ * 为什么必须只读（BUG 根因）：
+ *  旧版 syncProject 会把“合并结果与远端不一致”时写回 OSS，而合并是
+ *  mergeTasks(local, remote)——任务只在一侧出现就保留。跨项目移动任务后，
+ *  源项目远端文件已无该任务，但本地缓存仍残留旧副本，合并后写回就把旧副本
+ *  复活进源项目文件，造成同 id 任务同时存在于两个项目，小组件显示两份重复任务。
+ *  因此这里同步一律以远端为权威，不并入本地缓存，也不写回。
+ *
+ * 刻意省略：回收站分片、LRU 逐出、子任务编辑、时间胶囊，以及一切写操作
+ * （完成/取消、排序、物化）——桌面小组件是纯展示端。
  * IDB 使用与主应用完全相同的库名/仓库/缓存键，因此主应用已缓存的数据可直接复用。
  */
 
@@ -177,7 +181,19 @@ export const useTasksStore = defineStore('tasks', {
     todayOrder: [] as string[],
   }),
   getters: {
-    all: (s) => Object.values(s.tasks).flat(),
+    /** 全部已加载任务，按 id 去重（保留 updatedAt 最新的一份）。
+     *  跨项目移动任务后，本地缓存可能同时残留新旧两个项目里的同 id 副本，
+     *  若不按 id 去重，同一个任务会被渲染两遍（BUG：小组件显示重复任务）。 */
+    all: (s) => {
+      const byId = new Map<string, Task>()
+      for (const list of Object.values(s.tasks)) {
+        for (const t of list) {
+          const cur = byId.get(t.id)
+          if (!cur || (t.updatedAt || '').localeCompare(cur.updatedAt || '') > 0) byId.set(t.id, t)
+        }
+      }
+      return [...byId.values()]
+    },
     byProject: (s) => (projectId: string) => s.tasks[projectId] ?? [],
     todayRelevantProjectIds: (s) => (projectIds: string[]) => {
       const today = todayKey()
@@ -220,12 +236,12 @@ export const useTasksStore = defineStore('tasks', {
           normalizeTasks(remote)
           const { active, deleted } = splitDeleted(remote)
           const activeFiltered = active.filter((t) => !t.projectId || t.projectId === projectId)
-          const local = (this.tasks[projectId] ?? []).filter((t) => !t.projectId || t.projectId === projectId)
           const remoteTrash = await fetchRemoteTrash(client, auth.username, projectId)
           const tombstones = mergeDeletedTombstones([], deleted, remoteTrash)
-          const merged = sortActiveList(
-            applyDeletedTombstones(mergeTasks(local, activeFiltered), tombstones),
-          )
+          // 只读客户端：远端即权威，不并入本地缓存（本地无任何独立改动）。
+          // 旧实现 mergeTasks(local, activeFiltered) 会把“只在一侧出现”的旧副本
+          // 保留下来，导致移走任务后源项目缓存残留旧副本，界面显示重复任务。
+          const merged = sortActiveList(applyDeletedTombstones(activeFiltered, tombstones))
           this.tasks[projectId] = merged
           await idbPut('tasks', taskCacheKey(auth.username, projectId), merged)
           const newEtag = versionToken(res.res.headers as Record<string, unknown>, res.content) ?? ''
@@ -304,65 +320,7 @@ export const useTasksStore = defineStore('tasks', {
         console.error('加载今日任务顺序失败', e)
       }
     },
-    /** 拖拽排序：整体替换该项目任务数组（顺序即展示顺序），写入 sort=下标 */
-    setOrder(projectId: string, ordered: Task[]) {
-      const prev = this.tasks[projectId] ?? []
-      const prevIndex = new Map(prev.map((t, i) => [t.id, i]))
-      const now = nowIso()
-      for (let i = 0; i < ordered.length; i++) {
-        const t = ordered[i]
-        const oldIdx = prevIndex.get(t.id)
-        const moved = oldIdx === undefined || oldIdx !== i || t.sort !== i
-        t.sort = i
-        if (moved) t.updatedAt = now
-      }
-      this.tasks[projectId] = ordered
-      this._persist(projectId)
-    },
-    /** 保存今日视图的跨项目拖拽顺序（独立小文件 + CAS） */
-    setTodayOrder(orderedIds: string[]) {
-      this.todayOrder = [...orderedIds]
-      void idbPut('kv', todayOrderCacheKey(useAuthStore().username), { ids: this.todayOrder })
-      void this.saveTodayOrderNow()
-    },
-    /** 立即把今日顺序表落盘 OSS（CAS + 冲突合并：本地顺序优先，远端新增 id 追加到末尾） */
-    async saveTodayOrderNow(): Promise<boolean> {
-      const auth = useAuthStore()
-      if (!auth.creds || !auth.username) return false
-      try {
-        const client = await createOssClient(auth.creds)
-        const key = todayOrderFilePath(auth.username)
-        const etagKey = todayOrderEtagKey(auth.username)
-        let knownEtag = await idbGet<string>('kv', etagKey)
-        const payload = { ids: this.todayOrder }
-        for (let attempt = 0; attempt < 3; attempt++) {
-          const result = await compareAndSwapPut<{ ids: string[] }>(client, key, payload, knownEtag)
-          if (result.ok) {
-            if (result.etag) await idbPut('kv', etagKey, result.etag)
-            await idbDel('kv', lmKeyOf(etagKey))
-            await idbPut('kv', todayOrderCacheKey(auth.username), { ids: this.todayOrder })
-            queueSyncChange(auth.username, 'today_order', null)
-            return true
-          }
-          if (result.remote && Array.isArray((result.remote as { ids?: string[] }).ids)) {
-            const remoteIds = (result.remote as { ids: string[] }).ids
-            const seen = new Set(this.todayOrder)
-            this.todayOrder = [...this.todayOrder, ...remoteIds.filter((id) => !seen.has(id))]
-            await idbPut('kv', todayOrderCacheKey(auth.username), { ids: this.todayOrder })
-            knownEtag = result.remoteEtag ?? undefined
-          } else {
-            knownEtag = undefined
-          }
-        }
-        useUiStore().toast('保存今日顺序失败：检测到其他设备持续修改，请稍后重试', 'error')
-        return false
-      } catch (e) {
-        console.error('保存今日任务顺序到 OSS 失败', e)
-        useUiStore().toast(`保存今日顺序失败：${describeOssError(e)}`, 'error')
-        return false
-      }
-    },
-    /** 拉取单个项目：从 OSS 重拉任务并与本地按 updatedAt 合并；远端文件不存在时静默保留本地。 */
+    /** 拉取单个项目：从 OSS 重拉任务（远端即权威，只读不写回）；远端文件不存在时静默保留本地。 */
     async syncProject(projectId: string) {
       if (projectId === UNCATEGORIZED) return
       const auth = useAuthStore()
@@ -392,25 +350,22 @@ export const useTasksStore = defineStore('tasks', {
       }
       const remote = JSON.parse(res.content.toString()) as Task[]
       normalizeTasks(remote)
-      const { active: rawRemoteActive, deleted: remoteDeleted } = splitDeleted(remote)
-      const remoteActive = rawRemoteActive.filter((t) => !t.projectId || t.projectId === projectId)
-      const local = (this.tasks[projectId] ?? []).filter((t) => !t.projectId || t.projectId === projectId)
+      const { active, deleted } = splitDeleted(remote)
+      const remoteActive = active.filter((t) => !t.projectId || t.projectId === projectId)
       const remoteTrash = await fetchRemoteTrash(client, auth.username, projectId)
-      const tombstones = mergeDeletedTombstones([], remoteDeleted, remoteTrash)
-      const merged = sortActiveList(
-        applyDeletedTombstones(mergeTasks(local, remoteActive), tombstones),
-      )
+      const tombstones = mergeDeletedTombstones([], deleted, remoteTrash)
+      // 只读客户端：远端即权威，不并入本地缓存，也绝不把合并结果写回 OSS（方案 A）。
+      // 旧实现 mergeTasks(local, remoteActive) 会保留本地缓存里“已移走任务”的旧副本
+      // （任务只在一侧出现就保留），并在“合并结果与远端不一致”时自动写回，
+      // 把旧副本复活进源项目 OSS 文件，造成同 id 任务同时存在两个项目里，
+      // 小组件显示两份重复任务——这就是修改任务分类后出现重复的根因。
+      const merged = sortActiveList(applyDeletedTombstones(remoteActive, tombstones))
       this.tasks[projectId] = merged
       await idbPut('tasks', taskCacheKey(auth.username, projectId), merged)
       const newEtag = versionToken(res.res.headers as Record<string, unknown>, res.content) ?? ''
       if (newEtag) await idbPut('kv', etagKey, newEtag)
       const newLm = lastModifiedOf(res.res.headers as Record<string, unknown>)
       if (newLm) await idbPut('kv', lmKey, newLm)
-      // 仅排序/字段顺序不同而内容一致时不写回，避免每 2 秒轮询反复改写任务文件
-      // 导致 OSS 版本号跳动、其它端误报“检测到其他设备同时修改”
-      if (canonicalJson(merged) !== canonicalJson(sortActiveList([...rawRemoteActive]))) {
-        await this.saveProjectNow(projectId, [...merged])
-      }
       if (!this.loadedProjects.includes(projectId)) {
         this.loadedProjects = [...this.loadedProjects, projectId]
       }
@@ -456,272 +411,6 @@ export const useTasksStore = defineStore('tasks', {
       }
       this.repeatsLoaded = [...new Set([...this.repeatsLoaded, projectId])]
     },
-    /** 重复任务到期物化：到期的重复模板生成可见任务；过期多日时只保留“今天”这一次。 */
-    async materializeRepeats(projectId?: string) {
-      const auth = useAuthStore()
-      const today = todayKey()
-      const pids = projectId ? [projectId] : Object.keys(this.repeats)
-      for (const pid of pids) {
-        if (!this.repeatsLoaded.includes(pid)) await this.loadRepeats(pid)
-        const masters = this.repeats[pid] ?? []
-        if (!masters.length) continue
-        const remaining: RepeatMaster[] = []
-        const toAdd: Task[] = []
-        let changed = false
-        for (const master of masters) {
-          const rule = master.template.repeat
-          if (!rule) {
-            changed = true
-            continue
-          }
-          const endAfter = rule.endAfter
-          let dueDate = master.dueDate
-          let guard = 0
-          while (dueDate < today && guard < 400) {
-            const nd = nextRepeatDate(rule, dueDate)
-            if (!nd || nd <= dueDate) break
-            dueDate = nd
-            guard++
-          }
-          if (endAfter && dueDate > endAfter) {
-            changed = true
-            continue
-          }
-          if (dueDate > today) {
-            if (dueDate !== master.dueDate) {
-              remaining.push({
-                ...master,
-                dueDate,
-                template: shiftTaskTimes(master.template, diffDaysKey(master.dueDate, dueDate)),
-                updatedAt: nowIso(),
-              })
-              changed = true
-            } else {
-              remaining.push(master)
-            }
-            continue
-          }
-          const template = shiftTaskTimes(master.template, diffDaysKey(master.dueDate, dueDate))
-          toAdd.push({
-            ...template,
-            id: master.template.id,
-            status: 'pending',
-            isReminded: false,
-            createdAt: nowIso(),
-            updatedAt: nowIso(),
-          })
-          changed = true
-        }
-        if (changed) {
-          this.repeats[pid] = remaining
-          this._persistRepeats(pid)
-        }
-        for (const task of toAdd) {
-          const list = this.tasks[pid] ?? []
-          if (list.some((t) => t.id === task.id)) continue
-          this.tasks[pid] = sortActiveList([...list, task])
-          this._persist(pid)
-          if (isTaskVisibleToday(task, todayKey()) && !this.todayOrder.includes(task.id)) {
-            this.todayOrder = [...this.todayOrder, task.id]
-            void this.saveTodayOrderNow()
-          }
-        }
-      }
-    },
-    /** 保存项目任务到 OSS（CAS + 冲突合并） */
-    async saveProject(projectId: string, snapshot?: Task[]): Promise<boolean> {
-      const auth = useAuthStore()
-      if (!auth.creds || !auth.username) return false
-      const client = await createOssClient(auth.creds)
-      let list = (snapshot ?? this.tasks[projectId] ?? []).slice()
-      const key = paths.tasks(auth.username, projectId)
-      const etagKey = `etag:${auth.username}:${projectId}`
-      let knownEtag = await idbGet<string>('kv', etagKey)
-      try {
-        for (let attempt = 0; attempt < 3; attempt++) {
-          const result = await compareAndSwapPut<Task[]>(client, key, list, knownEtag)
-          if (result.ok) {
-            if (result.etag) await idbPut('kv', etagKey, result.etag)
-            await idbDel('kv', lmKeyOf(etagKey))
-            await idbPut('tasks', taskCacheKey(auth.username, projectId), list)
-            queueSyncChange(auth.username, 'tasks', projectId)
-            return true
-          }
-          if (result.remote) {
-            const remoteList = [...(result.remote as Task[])]
-            normalizeTasks(remoteList)
-            const { active: remoteActive, deleted: remoteDeleted } = splitDeleted(remoteList)
-            const filteredRemote = remoteActive.filter((t) => !t.projectId || t.projectId === projectId)
-            const remoteTrash = await fetchRemoteTrash(client, auth.username, projectId)
-            const tombstones = mergeDeletedTombstones([], remoteDeleted, remoteTrash)
-            list = sortActiveList(applyDeletedTombstones(mergeTasks(list, filteredRemote), tombstones))
-            knownEtag = result.remoteEtag ?? undefined
-            if (!snapshot) {
-              this.tasks[projectId] = list
-              await idbPut('tasks', taskCacheKey(auth.username, projectId), list)
-            }
-          } else {
-            knownEtag = undefined
-          }
-        }
-        return false
-      } catch (e) {
-        console.error('保存任务到 OSS 失败', e)
-        return false
-      }
-    },
-    /** 立即保存该项目任务（取消防抖语义已省略，直接保存） */
-    async saveProjectNow(projectId: string, snapshot?: Task[]): Promise<boolean> {
-      return this.saveProject(projectId, snapshot)
-    },
-    /** 保存重复模板到 OSS（CAS + 冲突合并） */
-    async saveRepeats(projectId: string, snapshot?: RepeatMaster[]): Promise<boolean> {
-      const auth = useAuthStore()
-      if (!auth.creds || !auth.username) return false
-      const client = await createOssClient(auth.creds)
-      let list = (snapshot ?? this.repeats[projectId] ?? []).slice()
-      const key = paths.repeats(auth.username, projectId)
-      const etagKey = `etag:${auth.username}:${projectId}:repeats`
-      let knownEtag = await idbGet<string>('kv', etagKey)
-      try {
-        for (let attempt = 0; attempt < 3; attempt++) {
-          const result = await compareAndSwapPut<RepeatMaster[]>(client, key, list, knownEtag)
-          if (result.ok) {
-            if (result.etag) await idbPut('kv', etagKey, result.etag)
-            await idbDel('kv', lmKeyOf(etagKey))
-            await idbPut('repeats', repeatsCacheKey(auth.username, projectId), list)
-            queueSyncChange(auth.username, 'repeats', projectId)
-            return true
-          }
-          if (result.remote) {
-            const remote = result.remote as RepeatMaster[]
-            const seen = new Set(list.map((m) => m.id))
-            const merged = [...list, ...(remote ?? []).filter((m) => !seen.has(m.id))]
-            list = merged
-            knownEtag = result.remoteEtag ?? undefined
-            if (!snapshot) {
-              this.repeats[projectId] = list
-              await idbPut('repeats', repeatsCacheKey(auth.username, projectId), list)
-            }
-          } else {
-            knownEtag = undefined
-          }
-        }
-        return false
-      } catch (e) {
-        console.error('保存重复模板到 OSS 失败', e)
-        return false
-      }
-    },
-    async saveRepeatsNow(projectId: string): Promise<boolean> {
-      return this.saveRepeats(projectId)
-    },
-    _persist(projectId: string) {
-      const auth = useAuthStore()
-      void idbPut('tasks', taskCacheKey(auth.username, projectId), this.tasks[projectId] ?? [])
-      void this.saveProjectNow(projectId)
-    },
-    _persistRepeats(projectId: string) {
-      const auth = useAuthStore()
-      void idbPut('repeats', repeatsCacheKey(auth.username, projectId), this.repeats[projectId] ?? [])
-      void this.saveRepeatsNow(projectId)
-    },
-    _deleteMasterForTask(taskId: string) {
-      for (const pid of Object.keys(this.repeats)) {
-        const masters = this.repeats[pid] ?? []
-        if (!masters.some((m) => m.sourceTaskId === taskId)) continue
-        this.repeats[pid] = masters.filter((m) => m.sourceTaskId !== taskId)
-        this._persistRepeats(pid)
-      }
-    },
-    /** 完成任务/取消完成的核心翻转（applyStats=false 时跳过统计，供确认式流程在 OSS 成功后补记） */
-    _flipComplete(id: string, applyStats: boolean): boolean {
-      const task = this.all.find((t) => t.id === id)
-      if (!task) return false
-      const completing = task.status !== 'completed'
-      if (completing && task.repeat) {
-        const occ = buildRepeatOccurrence(task, todayKey())
-        if (occ) {
-          const masters = this.repeats[task.projectId] ?? []
-          if (!masters.some((m) => m.sourceTaskId === task.id)) {
-            const now = nowIso()
-            this.repeats[task.projectId] = [
-              ...masters,
-              {
-                id: task.id,
-                projectId: task.projectId,
-                sourceTaskId: task.id,
-                rootTaskId: task.repeatRootId ?? task.id,
-                dueDate: occ.dueDate,
-                template: occ.template,
-                createdAt: now,
-                updatedAt: now,
-              },
-            ]
-            this._persistRepeats(task.projectId)
-          }
-        }
-      } else if (!completing && task.repeat) {
-        this._deleteMasterForTask(task.id)
-      }
-      task.status = completing ? 'completed' : 'pending'
-      const now = nowIso()
-      task.updatedAt = now
-      for (const s of task.subtasks ?? []) {
-        if (s.completed !== completing) {
-          s.completed = completing
-          s.updatedAt = now
-        }
-      }
-      this._persist(task.projectId)
-      if (applyStats) {
-        useStatsStore().addDelta(completing ? 1 : -1, task.id)
-      }
-      return completing
-    },
-    /** 确认式完成/取消完成：先翻转，立即写盘（重复任务同时写重复模板），OSS 全部成功才返回 true；失败回滚。 */
-    async toggleCompleteConfirmed(id: string): Promise<boolean> {
-      if (toggleSaving.has(id)) return false
-      toggleSaving.add(id)
-      try {
-        const auth = useAuthStore()
-        const task = this.all.find((t) => t.id === id)
-        if (!task) return false
-        const pid = task.projectId
-        if (!this.repeatsLoaded.includes(pid)) await this.loadRepeats(pid).catch(() => {})
-        const tasksSnap = (this.tasks[pid] ?? []).slice()
-        const repeatsSnap = (this.repeats[pid] ?? []).slice()
-        const taskSnap = JSON.parse(JSON.stringify(task))
-        const completing = this._flipComplete(id, false)
-        const okTasks = await this.saveProjectNow(pid)
-        const repeatsChanged = !!task.repeat && JSON.stringify(this.repeats[pid]) !== JSON.stringify(repeatsSnap)
-        const okRepeats = repeatsChanged ? await this.saveRepeatsNow(pid) : true
-        if (okTasks && okRepeats) {
-          await useStatsStore().addDelta(completing ? 1 : -1, task.id)
-          return true
-        }
-        const rollbackIdx = tasksSnap.findIndex((x) => x.id === id)
-        if (rollbackIdx >= 0) tasksSnap[rollbackIdx] = taskSnap
-        this.tasks[pid] = tasksSnap
-        this.repeats[pid] = repeatsSnap
-        await idbPut('tasks', taskCacheKey(auth.username, pid), tasksSnap)
-        await idbPut('repeats', repeatsCacheKey(auth.username, pid), repeatsSnap)
-        return false
-      } finally {
-        toggleSaving.delete(id)
-      }
-    },
-    /** 立即落盘所有未保存变更（页面隐藏/退出前调用） */
-    async flushAll() {
-      const jobs: Promise<boolean>[] = []
-      for (const [pid, list] of Object.entries(this.tasks)) {
-        jobs.push(this.saveProject(pid, [...list]))
-      }
-      for (const [pid, list] of Object.entries(this.repeats)) {
-        jobs.push(this.saveRepeats(pid, [...list]))
-      }
-      await Promise.allSettled(jobs)
-    },
     resetAll() {
       this.tasks = {}
       this.repeats = {}
@@ -731,5 +420,3 @@ export const useTasksStore = defineStore('tasks', {
     },
   },
 })
-
-const toggleSaving = new Set<string>()

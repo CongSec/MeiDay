@@ -10,17 +10,17 @@ import { useWidgetStore } from '@/stores/widget'
 import { persistSessionToConfig } from '@/utils/config'
 
 /**
- * 桌面小组件的同步轮询（精简版）。
+ * 桌面小组件的同步轮询（精简版，完全只读）。
  *
  * 与主应用 useSyncPoll 逻辑一致：
  *  - 纯 2 秒轮询中心服务器的总版本号 + 变更列表；
- *  - 本端先补报离线期间的待发上报，再判断是否需要拉取，避免把自己刚上报的变更拉回来；
- *  - 按变更类型只拉变化的资源（tasks 额外物化重复任务），全部成功才推进游标；
+ *  - 本端先补报离线期间的待发上报，再判断是否需要拉取（只读端自身不再产生新上报）；
+ *  - 按变更类型只拉变化的资源，全部成功才推进游标；
  *  - 失败指数退避（最多 30s）；401 停止；后台标签页放慢到 15s，回前台立即同步。
  *
  * 与主应用的差异：widget 的 tasks store 没有 syncAll / loadTrash / flushProfile，
- * 这里用「逐项目 syncProject + materializeRepeats」代替；trash 变更直接忽略
- * （今日视图不展示回收站）。
+ * 这里用「逐项目 syncProject」代替；trash 变更直接忽略（今日视图不展示回收站）；
+ * 重复任务到期由 App/网页端物化，小组件不再自行物化写盘（只读）。
  */
 
 const POLL_INTERVAL_MS = 2000
@@ -58,15 +58,15 @@ function isIgnorableError(e: unknown): boolean {
   return err?.code === 'NoSuchKey' || err?.code === 'NoSuchBucket' || err?.status === 404
 }
 
-async function syncProjectWithRepeats(projectId: string): Promise<void> {
+async function syncProjectOnce(projectId: string): Promise<void> {
   const tasks = useTasksStore()
   await tasks.syncProject(projectId)
-  await tasks.materializeRepeats(projectId)
 }
 
 /** 首次登录 / 无同步日志（version=0，如测试号）时的引导加载。
  *  等同网页端 TodayView 挂载逻辑：先从 IDB 判断缓存是否齐全，
- *  再按需拉取相关项目任务、今日顺序，并物化重复任务。 */
+ *  再按需拉取相关项目任务与今日顺序。重复任务到期由 App/网页端物化，
+ *  小组件只读展示物化结果，不自行物化。 */
 export async function bootstrapLoad(): Promise<void> {
   const projects = useProjectsStore()
   const tasks = useTasksStore()
@@ -78,13 +78,6 @@ export async function bootstrapLoad(): Promise<void> {
   // s.tasks/s.repeats 还是空的，todayRelevantProjectIds 会算出空集，导致页面空白。
   await tasks.loadAllProgressive(allIds)
   await tasks.loadTodayOrder()
-  for (const id of allIds) {
-    try {
-      await tasks.materializeRepeats(id)
-    } catch (e) {
-      console.error('重复任务物化失败', id, e)
-    }
-  }
   synced.value = true
 }
 
@@ -121,7 +114,7 @@ async function fullSync(): Promise<boolean> {
   let failed = 0
   for (const id of ids) {
     try {
-      await syncProjectWithRepeats(id)
+      await syncProjectOnce(id)
     } catch (e) {
       if (isIgnorableError(e)) continue
       failed++
@@ -148,13 +141,10 @@ async function pullChanges(changes: SyncStateItem[]): Promise<boolean> {
           await projects.load()
           break
         case 'tasks':
-          if (c.project_id) await syncProjectWithRepeats(c.project_id)
+          if (c.project_id) await syncProjectOnce(c.project_id)
           break
         case 'repeats':
-          if (c.project_id) {
-            await tasks.loadRepeats(c.project_id)
-            await tasks.materializeRepeats(c.project_id)
-          }
+          if (c.project_id) await tasks.loadRepeats(c.project_id)
           break
         case 'stats':
           await stats.load()
@@ -164,7 +154,7 @@ async function pullChanges(changes: SyncStateItem[]): Promise<boolean> {
           break
         case 'trash':
           // 回收站/时间胶囊变更：重新拉取对应项目，用回收站墓碑剔除已入舱/已软删任务
-          if (c.project_id) await syncProjectWithRepeats(c.project_id)
+          if (c.project_id) await syncProjectOnce(c.project_id)
           break
         default:
           break
@@ -210,13 +200,6 @@ async function pollOnce(): Promise<boolean> {
       const projectIds = [...projects.projects.map((p) => p.id)]
       await tasks.loadAllProgressive(projectIds)
       await tasks.loadTodayOrder()
-      for (const id of projectIds) {
-        try {
-          await tasks.materializeRepeats(id)
-        } catch (e) {
-          console.error('重复任务物化失败', id, e)
-        }
-      }
       cursor = state.version
     } else if (state.version === 0) {
       // 无同步日志的账号（如测试号）：since=0 永远拿不到 changes，
