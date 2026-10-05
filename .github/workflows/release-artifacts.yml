@@ -71,7 +71,8 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
+      # 注意：不装 android-actions/setup-android——ubuntu-latest 运行器自带完整
+      # Android SDK（/usr/local/lib/android/sdk），缺失的组件 Gradle 会自动下载。
 
       - name: Build web assets
         working-directory: frontend
@@ -122,6 +123,10 @@ jobs:
 
       - name: PyInstaller package (builds widget frontend + exe)
         working-directory: widget
+        env:
+          # Windows runner 默认 cp1252 编码，打印中文会报 UnicodeEncodeError，强制 UTF-8
+          PYTHONUTF8: '1'
+          PYTHONIOENCODING: utf-8
         run: python build.py
 
       - name: Rename EXE
