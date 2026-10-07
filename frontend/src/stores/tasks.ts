@@ -14,7 +14,7 @@ import { addDaysKey, dateKeyOf, diffDaysKey, nowIso, todayKey } from '@/utils/ti
 import { isRepeatTaskActiveOn, isTaskVisibleToday } from '@/utils/todayFilter'
 import { buildOccurrenceTemplate, buildReminderPayload, buildRepeatOccurrence, nextRepeatDate, repeatShapeEquals, rootIdOf, shiftTaskTimes, skipProcessedRepeatDays } from '@/utils/repeat'
 import { api } from '@/api/client'
-import { logAudit, safeDetail } from '@/utils/audit'
+import { logAudit, logAttachmentDeletion, safeDetail } from '@/utils/audit'
 import { UNCATEGORIZED, type AttachmentMeta, type RepeatMaster, type Subtask, type Task } from '@/types'
 import { canonicalJson, compareSortTime, newSubtask, normalizeTask, normalizeTasks, pendingSubtaskReminders, taskEffectiveEndTime, taskEffectiveSortTime } from '@/utils/task'
 import { deleteAttachments } from '@/utils/attachments'
@@ -2537,6 +2537,16 @@ export const useTasksStore = defineStore('tasks', {
       // 同时清理该子任务在用户 OSS 中的附件二进制
       const auth = useAuthStore()
       if (auth.creds && sub?.attachments?.length) void deleteAttachments(auth.creds, sub.attachments)
+      // 附件删除审计日志（统一行为名「删除附件」，来源=删除子任务）
+      if (sub?.attachments?.length) {
+        logAttachmentDeletion({
+          source: '删除子任务',
+          count: sub.attachments.length,
+          orphanCount: 0,
+          totalSize: sub.attachments.reduce((s, a) => s + (a.size || 0), 0),
+          files: sub.attachments.map((a) => ({ name: a.name, taskName: task.name })),
+        })
+      }
       logAudit('删除子任务', safeDetail(`子任务ID：${sub?.id || '未知'}，所属任务ID：${task.id}`))
     },
     /** 子任务字段内联编辑后触发落盘（防抖统一在 _persist 内）。
@@ -2603,6 +2613,16 @@ export const useTasksStore = defineStore('tasks', {
           ...(target.subtasks ?? []).flatMap((sub) => sub.attachments ?? []),
         ]
         if (auth.creds && atts.length) void deleteAttachments(auth.creds, atts)
+        // 附件删除审计日志（统一行为名「删除附件」，来源=永久删除任务）
+        if (atts.length) {
+          logAttachmentDeletion({
+            source: '永久删除任务',
+            count: atts.length,
+            orphanCount: 0,
+            totalSize: atts.reduce((s, a) => s + (a.size || 0), 0),
+            files: atts.map((a) => ({ name: a.name, taskName: target.name })),
+          })
+        }
       }
       logAudit('永久删除任务', safeDetail(`任务ID：${id}，项目ID：${projectId}`))
     },

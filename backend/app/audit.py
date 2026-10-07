@@ -1,6 +1,7 @@
 import ipaddress
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -174,15 +175,50 @@ def log_action(
         logger.exception("写入审计日志失败")
 
 
+def _escape_like(text: str) -> str:
+    """转义 LIKE 通配符，让用户输入按字面匹配（百分号 % 与下划线 _ 不再生效）。"""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _normalize_end(end: str) -> str:
+    """把起止输入规范化，保证时间范围按【闭区间】命中。
+
+    created_at 存储为秒级 ISO（如 2026-10-08T09:30:00+08:00），字符串直接可比；
+    前端 datetime-local 只给到分钟（2026-10-08T09:30），若不做处理，
+    `created_at <= '...T09:30'` 会漏掉该分钟内 09:30:00 之后的日志。
+    因此按输入精度自动补到该区间末尾（分钟补 :59.999，秒补 .999），
+    使结束值大于该时刻内任意秒级时间戳。无法识别时原样返回。
+    """
+    e = end.strip()
+    if not e:
+        return ""
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", e):
+        return e + ".999"
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", e):
+        return e + ":59.999"
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", e):
+        return e + "T23:59:59.999"
+    return e
+
+
 def query_logs(
     *,
     username: str = "",
     action: str = "",
     ip: str = "",
     security: str = "",
+    start: str = "",
+    end: str = "",
+    keyword: str = "",
     limit: int = 100,
     offset: int = 0,
 ) -> tuple[list[dict], int]:
+    """按时间倒序返回操作日志，支持 行为/IP/安全/时间段/关键词 过滤与分页。
+
+    - start/end：对 created_at 闭区间过滤（end 自动补秒/毫秒保证含末区间整条日志）；
+    - keyword：对 时间(含空格显示形态)/用户/行为/方式/路径/状态/IP/行为详情(detail)
+      做包含匹配（LIKE，按字面匹配），任一命中即返回。
+    """
     where: list[str] = []
     params: list = []
     if username:
@@ -197,6 +233,32 @@ def query_logs(
     if security in ("0", "1"):
         where.append("is_security=?")
         params.append(int(security))
+    start = start.strip()
+    end = end.strip()
+    if start:
+        where.append("created_at >= ?")
+        params.append(start)
+    if end:
+        where.append("created_at <= ?")
+        params.append(_normalize_end(end))
+    keyword = keyword.strip()
+    if keyword:
+        like = f"%{_escape_like(keyword)}%"
+        # 时间同时匹配原始 ISO 与前端显示形态（T→空格）；状态按文本匹配（如搜 200）
+        where.append(
+            "("
+            "username LIKE ? ESCAPE '\\' "
+            "OR action LIKE ? ESCAPE '\\' "
+            "OR method LIKE ? ESCAPE '\\' "
+            "OR path LIKE ? ESCAPE '\\' "
+            "OR ip LIKE ? ESCAPE '\\' "
+            "OR detail LIKE ? ESCAPE '\\' "
+            "OR created_at LIKE ? ESCAPE '\\' "
+            "OR replace(created_at, 'T', ' ') LIKE ? ESCAPE '\\' "
+            "OR CAST(status AS TEXT) LIKE ? ESCAPE '\\'"
+            ")"
+        )
+        params.extend([like] * 9)
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     with get_conn() as conn:
         total = conn.execute(
@@ -209,20 +271,39 @@ def query_logs(
     return [dict(r) for r in rows], total
 
 
+def get_all_usernames() -> list[str]:
+    """返回全部用户名，供自动清理按用户独立保留遍历。"""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT username FROM users ORDER BY username").fetchall()
+    return [r["username"] for r in rows]
+
+
 def _retention_key(username: Optional[str] = None) -> str:
     """保留设置按用户隔离：传 username 用个人 key，否则用全局默认 key。"""
     return RETENTION_KEY if not username else f"{RETENTION_KEY}:{username}"
 
 
 def get_log_retention_days(username: Optional[str] = None) -> int:
-    """读取日志保留天数设置（按用户隔离，BUG-09），未设置或非法时回退默认 30 天。"""
+    """读取日志保留天数设置（按用户隔离），未设置时回退全局默认，再回退硬编码 30 天。
+
+    查找顺序（settings 表）：
+    1. 传了 username 时先读个人 key log_retention_days:{username}；
+    2. 个人未设置 → 读全局 key log_retention_days；
+    3. 全局也未设置或值非法 → DEFAULT_LOG_RETENTION_DAYS（30）。
+    所有取值夹在 1-365 之间。
+    """
+    keys = []
+    if username:
+        keys.append(_retention_key(username))  # 个人 key 优先
+    keys.append(RETENTION_KEY)  # 全局 key 兜底
     try:
         with get_conn() as conn:
-            row = conn.execute(
-                "SELECT value FROM settings WHERE key=?", (_retention_key(username),)
-            ).fetchone()
-        if row and str(row["value"]).isdigit():
-            return max(1, min(365, int(row["value"])))
+            for key in keys:
+                row = conn.execute(
+                    "SELECT value FROM settings WHERE key=?", (key,)
+                ).fetchone()
+                if row and str(row["value"]).isdigit():
+                    return max(1, min(365, int(row["value"])))
     except Exception:
         logger.exception("读取日志保留天数失败")
     return DEFAULT_LOG_RETENTION_DAYS
@@ -240,30 +321,49 @@ def set_log_retention_days(days: int, username: Optional[str] = None) -> int:
     return days
 
 
-def delete_logs_older_than(days: int) -> int:
+def delete_logs_older_than(
+    days: int,
+    *,
+    username: Optional[str] = None,
+    null_only: bool = False,
+) -> int:
     """删除创建时间早于 N 天前的日志，返回删除条数。
 
     安全留痕：删除前先把过期日志原样复制到 audit_logs_backup 备份表
     （保留原 id，archived_at 记录归档时间；archived_by 为空串表示自动清理触发），
     随后才从 audit_logs 删除，确保自动清理后服务器侧仍保留可审计的备份。
     两步在同一事务中执行：复制失败则整体回滚，绝不清掉日志却丢备份。
+
+    清理范围（按用户独立保留后由清理 worker 逐用户调用）：
+    - username="alice"               → 只清该用户超过其保留期的日志；
+    - username=None + null_only=True → 只清无用户名的系统日志（IS NULL 或空串）；
+    - username=None + null_only=False → 不限定用户，按同一 cutoff 全量清理（兼容旧行为）。
     """
     cutoff = (datetime.now(TZ) - timedelta(days=days)).isoformat(timespec="seconds")
     now = datetime.now(TZ).isoformat(timespec="seconds")
+    if username is not None:
+        scope_sql, scope_params = "username = ?", [username]
+    elif null_only:
+        scope_sql, scope_params = "(username IS NULL OR username = '')", []
+    else:
+        scope_sql, scope_params = "1 = 1", []
     with get_conn() as conn:
         conn.execute(
-            """INSERT OR IGNORE INTO audit_logs_backup
+            f"""INSERT OR IGNORE INTO audit_logs_backup
                (id, created_at, username, action, method, path, status, ip,
                 user_agent, detail, duration_ms, is_security, is_high_risk,
                 acknowledged_at, remind_count, archived_at, archived_by)
                SELECT id, created_at, username, action, method, path, status, ip,
                       user_agent, detail, duration_ms, is_security, is_high_risk,
                       acknowledged_at, remind_count, ?, ''
-               FROM audit_logs WHERE created_at < ?""",
-            (now, cutoff),
+               FROM audit_logs WHERE {scope_sql} AND created_at < ?""",
+            # 注意绑定顺序:SELECT 列里的 ?(archived_at)先于 WHERE 里的占位符,
+            # 所以 now 必须排在 scope 参数之前,否则 archived_at 会被绑成 scope 值。
+            [now, *scope_params, cutoff],
         )
         cur = conn.execute(
-            "DELETE FROM audit_logs WHERE created_at < ?", (cutoff,)
+            f"DELETE FROM audit_logs WHERE {scope_sql} AND created_at < ?",
+            [*scope_params, cutoff],
         )
         return cur.rowcount
 

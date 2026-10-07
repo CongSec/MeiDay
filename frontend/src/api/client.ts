@@ -303,12 +303,27 @@ export const api = {
   checkOss(body: { oss_ak: string; oss_sk: string; bucket: string; endpoint: string }) {
     return request<OssCheckResult>('POST', '/api/credentials/oss-check', body)
   },
-  /** 按 行为/IP/安全标签 过滤操作日志；security：''=全部，'1'=仅安全，'0'=仅非安全 */
-  getLogs(params: { action?: string; ip?: string; security?: '' | '0' | '1'; limit?: number; offset?: number } = {}) {
+  /** 按 行为/IP/安全标签/时间段/关键词 过滤操作日志；security：''=全部，'1'=仅安全，'0'=仅非安全 */
+  getLogs(params: {
+    action?: string
+    ip?: string
+    security?: '' | '0' | '1'
+    /** 时间范围起（YYYY-MM-DDTHH:MM，含） */
+    start?: string
+    /** 时间范围止（YYYY-MM-DDTHH:MM，含） */
+    end?: string
+    /** 全局关键词：匹配 时间/用户/行为+详情/方式/路径/状态/IP */
+    keyword?: string
+    limit?: number
+    offset?: number
+  } = {}) {
     const qs = new URLSearchParams()
     if (params.action) qs.set('action', params.action)
     if (params.ip) qs.set('ip', params.ip)
     if (params.security) qs.set('security', params.security)
+    if (params.start) qs.set('start', params.start)
+    if (params.end) qs.set('end', params.end)
+    if (params.keyword) qs.set('keyword', params.keyword)
     qs.set('limit', String(params.limit ?? 100))
     qs.set('offset', String(params.offset ?? 0))
     return request<{ total: number; offset: number; limit: number; items: AuditLog[] }>(

@@ -33,7 +33,7 @@ export interface OssClient {
     query: Record<string, string | number | undefined>,
     options?: Record<string, unknown>,
   ): Promise<{
-    objects: { name: string; lastModified?: string }[]
+    objects: { name: string; lastModified?: string; size?: number }[]
     isTruncated: boolean
     nextMarker?: string
   }>
@@ -328,16 +328,21 @@ function headersToObj(h: Headers): Record<string, string> {
 
 /** 解析 S3 ListObjects（V1）返回的 XML，转成 ali-oss list 的返回结构 */
 function parseListBucketResult(xml: string): {
-  objects: { name: string; lastModified?: string }[]
+  objects: { name: string; lastModified?: string; size?: number }[]
   isTruncated: boolean
   nextMarker?: string
 } {
   const doc = new DOMParser().parseFromString(xml, 'application/xml')
   const contents = Array.from(doc.getElementsByTagName('Contents'))
-  const objects = contents.map((c) => ({
-    name: c.getElementsByTagName('Key')[0]?.textContent ?? '',
-    lastModified: c.getElementsByTagName('LastModified')[0]?.textContent ?? undefined,
-  }))
+  const objects = contents.map((c) => {
+    const sizeText = c.getElementsByTagName('Size')[0]?.textContent
+    return {
+      name: c.getElementsByTagName('Key')[0]?.textContent ?? '',
+      lastModified: c.getElementsByTagName('LastModified')[0]?.textContent ?? undefined,
+      // 部分实现（如 MinIO）不返回 Size，缺失时由调用方兜底
+      size: sizeText && sizeText !== '' ? Number(sizeText) : undefined,
+    }
+  })
   const isTruncated = doc.getElementsByTagName('IsTruncated')[0]?.textContent === 'true'
   let nextMarker = doc.getElementsByTagName('NextMarker')[0]?.textContent ?? undefined
   // 部分实现截断时未回填 NextMarker：按 S3 规范用最后一个 key 作 marker 翻页

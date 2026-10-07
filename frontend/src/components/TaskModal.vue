@@ -9,6 +9,7 @@ import { deleteAttachments, downloadAttachment, formatSize, isPreviewable } from
 import { base64ToFile, imageFileName, imageFingerprint, MAX_SHOWN_IMAGES, readRecentImages, type RecentImageData } from '@/utils/recentImages'
 import { cancelSessionUploads, cancelUploadByMetaId, commitUploads, enqueueUploads, getActiveUploadCount, getSessionInflight, subscribeUploads, type BackgroundUploadState, type InFlightUpload } from '@/utils/backgroundUpload'
 import AttachmentPreviewModal from './AttachmentPreviewModal.vue'
+import { logAttachmentDeletion } from '@/utils/audit'
 import { ensureLegalCalendar } from '@/utils/legalWorkday'
 import { currentOrNextOccurrence, firstOccurrenceDate, isNewStyleRepeat, repeatShapeEquals } from '@/utils/repeat'
 import { REPEAT_TYPES } from '@/types'
@@ -274,6 +275,16 @@ function cleanupNewUploads() {
   if (!auth.creds) return
   const newOnes = attachments.value.filter((a) => !originalIds.value.has(a.id))
   if (newOnes.length) void deleteAttachments(auth.creds, newOnes)
+  // 附件删除审计日志（统一行为名「删除附件」，来源=上传清理；未保存故无对应任务）
+  if (newOnes.length) {
+    logAttachmentDeletion({
+      source: '上传清理',
+      count: newOnes.length,
+      orphanCount: newOnes.length,
+      totalSize: newOnes.reduce((s, a) => s + (a.size || 0), 0),
+      files: newOnes.map((a) => ({ name: a.name, taskName: '' })),
+    })
+  }
 }
 
 /** 编辑已有主任务时移入回收站：先关弹窗，由父组件弹出确认框 */
@@ -772,6 +783,16 @@ async function submit() {
     // BUG-16: 真正删除“本次移除”的附件 OSS 文件（确认保存成功后才执行）
     if (removedAttachments.value.length && auth.creds) {
       void deleteAttachments(auth.creds, removedAttachments.value)
+    }
+    // 附件删除审计日志（统一行为名「删除附件」，来源=任务编辑，任务名=当前任务）
+    if (removedAttachments.value.length) {
+      logAttachmentDeletion({
+        source: '任务编辑',
+        count: removedAttachments.value.length,
+        orphanCount: 0,
+        totalSize: removedAttachments.value.reduce((s, a) => s + (a.size || 0), 0),
+        files: removedAttachments.value.map((a) => ({ name: a.name, taskName: task.name })),
+      })
     }
     // 保存成功：未传完的附件由后台队列继续上传，完成后写回任务 JSON 并统一提示
     commitUploads(sessionUid.value, { projectId: task.projectId, savedMetaIds })

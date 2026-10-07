@@ -10,11 +10,12 @@ import TaskModal from '@/components/TaskModal.vue'
 import TimeCapsuleCalendar from '@/components/TimeCapsuleCalendar.vue'
 import TimeCapsuleHeatmap from '@/components/TimeCapsuleHeatmap.vue'
 import TimeCapsuleTrend from '@/components/TimeCapsuleTrend.vue'
+import TimeCapsuleResources from '@/components/TimeCapsuleResources.vue'
 import type JSZip from 'jszip'
 import { deleteAttachments, downloadAttachment } from '@/utils/attachments'
 import { createOssClient } from '@/utils/oss'
 import { dateKeyOf, formatTodayTitle, nowIso, todayKey } from '@/utils/time'
-import { logAudit } from '@/utils/audit'
+import { logAudit, logAttachmentDeletion, type AttachmentDeletionFile } from '@/utils/audit'
 import { UNCATEGORIZED, type AttachmentMeta, type DeletedProject, type Project, type Task } from '@/types'
 
 const auth = useAuthStore()
@@ -86,12 +87,13 @@ const editOpen = ref(false)
 const editTemplateMasterId = ref<string | null>(null)
 
 /** 多视图：当前视图（默认落到日历图；数据按所选年份一次性加载进内存，切换视图不触发网络请求） */
-const viewMode = ref<'list' | 'calendar' | 'heatmap' | 'trend'>('calendar')
+const viewMode = ref<'list' | 'calendar' | 'heatmap' | 'trend' | 'resources'>('calendar')
 const VIEW_TABS: { key: typeof viewMode.value; label: string; icon: string }[] = [
   { key: 'list', label: '项目图', icon: 'menu' },
   { key: 'calendar', label: '日历图', icon: 'calendar' },
   { key: 'heatmap', label: '热力图', icon: 'flame' },
   { key: 'trend', label: '趋势图', icon: 'chart' },
+  { key: 'resources', label: '资源图', icon: 'image' },
 ]
 /** 多视图当前查看的年份 / 月份（默认今年 / 当月） */
 const viewYear = ref(CURRENT_YEAR)
@@ -260,7 +262,7 @@ async function confirmYearPick() {
 }
 
 /** 切换多视图：数据已按所选年份一次性加载进内存，切换视图只改展示，不触发网络请求 */
-function switchView(mode: 'list' | 'calendar' | 'heatmap' | 'trend') {
+function switchView(mode: 'list' | 'calendar' | 'heatmap' | 'trend' | 'resources') {
   viewMode.value = mode
 }
 
@@ -797,6 +799,9 @@ async function clearTrash() {
     let cleared = 0
     let deletedAtts = 0
     const clearedPids = new Set<string>()
+    // 附件删除审计日志汇总（来源=清空时间胶囊，任务名映射到各任务）
+    const delFiles: AttachmentDeletionFile[] = []
+    let delTotalSize = 0
     for (const p of all) {
       const atts = collectAttachments(p.tasks)
       // 删除物理分片文件（含旧版 trash.json / today_trash.json），项目名随之从扫描结果消失
@@ -808,6 +813,17 @@ async function clearTrash() {
         await deleteAttachments(auth.creds, atts)
         deletedAtts += atts.length
       }
+      // 收集附件 → 任务名映射（主任务与子任务附件都归主任务名）
+      const nameByKey = new Map<string, string>()
+      for (const t of p.tasks) {
+        const tname = t.name || '未命名任务'
+        for (const a of t.attachments ?? []) if (a?.key) nameByKey.set(a.key, tname)
+        for (const sb of t.subtasks ?? []) for (const a of sb.attachments ?? []) if (a?.key) nameByKey.set(a.key, tname)
+      }
+      for (const a of atts) {
+        delTotalSize += a.size || 0
+        delFiles.push({ name: a.name, taskName: nameByKey.get(a.key) ?? '' })
+      }
     }
     // 本地扫描结果同步移除被清空的项目
     scanIds.value = scanIds.value.filter((pid) => !clearedPids.has(pid))
@@ -815,6 +831,16 @@ async function clearTrash() {
     if (clearedPids.has(UNCATEGORIZED)) scanHasUncategorized.value = false
     ui.toast(`已清空时间胶囊（${cleared} 条，清理附件 ${deletedAtts} 个）`)
     logAudit('清空时间胶囊', `${cleared} 条，附件 ${deletedAtts} 个`)
+    // 附件删除审计日志（统一行为名「删除附件」，来源=清空时间胶囊）
+    if (deletedAtts) {
+      logAttachmentDeletion({
+        source: '清空时间胶囊',
+        count: deletedAtts,
+        orphanCount: 0,
+        totalSize: delTotalSize,
+        files: delFiles,
+      })
+    }
   } catch (e) {
     ui.toast((e as Error).message || '清空失败，请检查网络或 OSS 配置', 'error')
   } finally {
@@ -995,7 +1021,7 @@ async function onCalendarComplete(task: Task) {
       <input ref="fileInput" type="file" accept=".zip,.json,application/json,application/zip" class="hidden" @change="onImportFile" />
     </div>
 
-    <!-- 多视图切换：项目（默认）/ 日历 / 热力图 / 趋势 -->
+    <!-- 多视图切换：项目 / 日历 / 热力图 / 趋势 / 资源 -->
     <div class="mt-3 flex flex-wrap items-center gap-1.5">
       <button
         v-for="tab in VIEW_TABS"
@@ -1183,8 +1209,9 @@ async function onCalendarComplete(task: Task) {
       </div>
       <template v-else>
         <div class="mb-3 text-[11px] text-slate-400">当前展示 {{ viewYear }} 年数据；切换年份请点击「扫描时间胶囊文件」。</div>
+        <TimeCapsuleResources v-if="viewMode === 'resources'" :year="viewYear" />
         <TimeCapsuleCalendar
-          v-if="viewMode === 'calendar'"
+          v-else-if="viewMode === 'calendar'"
           :tasks="completedCapsuleTasks"
           :pending="pendingActiveTasks"
           :repeats="repeatMastersForCalendar"

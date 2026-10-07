@@ -45,14 +45,27 @@ def get_logs(
     action: str = Query(default="", description="按行为过滤"),
     ip: str = Query(default="", description="按 IP 过滤"),
     security: str = Query(default="", description="安全过滤：空=全部，1=仅安全，0=仅非安全"),
+    start: str = Query(default="", description="时间范围起（YYYY-MM-DDTHH:MM，含）"),
+    end: str = Query(default="", description="时间范围止（YYYY-MM-DDTHH:MM，含，自动含末区间整条日志）"),
+    keyword: str = Query(default="", max_length=100, description="全局关键词：匹配 时间/用户/行为+详情/方式/路径/状态/IP"),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
-    """按时间倒序返回【当前登录用户自己】的操作日志，支持 行为/IP/安全 过滤与分页。
+    """按时间倒序返回【当前登录用户自己】的操作日志，支持 行为/IP/安全/时间段/关键词 过滤与分页。
 
     权限隔离：强制以当前会话用户过滤，其他用户（含其注册/登录等）的日志不可见。
     """
-    rows, total = query_logs(username=username, action=action, ip=ip, security=security, limit=limit, offset=offset)
+    rows, total = query_logs(
+        username=username,
+        action=action,
+        ip=ip,
+        security=security,
+        start=start,
+        end=end,
+        keyword=keyword,
+        limit=limit,
+        offset=offset,
+    )
     return {"total": total, "offset": offset, "limit": limit, "items": rows}
 
 
@@ -105,6 +118,8 @@ def log_client_action(
         or body.action.startswith("显示密钥")
         or body.action.startswith("隐藏密钥")
         or body.action.startswith(DIARY_PREFIX)
+        # 附件删除不可逆（只删 OSS 二进制），统一标为安全操作，日志页红盾展示
+        or body.action.startswith("删除附件")
     )
     log_action(
         body.action,

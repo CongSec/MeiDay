@@ -16,6 +16,11 @@ const action = ref('')
 const ip = ref('')
 /** 安全筛选：''=全部，'1'=仅安全，'0'=仅非安全 */
 const security = ref<'' | '0' | '1'>('')
+/** 时间段筛选：自定义起止（datetime-local，YYYY-MM-DDTHH:MM，含） */
+const startTime = ref('')
+const endTime = ref('')
+/** 全局关键词：匹配 时间/用户/行为+详情/方式/路径/状态/IP */
+const keyword = ref('')
 const limit = ref(100)
 const offset = ref(0)
 const autoRefresh = ref(false)
@@ -116,6 +121,9 @@ async function load() {
       action: action.value,
       ip: ip.value,
       security: security.value,
+      start: startTime.value,
+      end: endTime.value,
+      keyword: keyword.value.trim(),
       limit: limit.value,
       offset: offset.value,
     })
@@ -316,6 +324,34 @@ onUnmounted(() => {
           <option value="1">仅安全</option>
           <option value="0">仅非安全</option>
         </select>
+      </div>
+      <div>
+        <label class="text-[11px] text-slate-400 block mb-1">开始时间</label>
+        <input
+          v-model="startTime"
+          type="datetime-local"
+          class="w-44 border rounded-lg px-2.5 py-1.5 text-sm bg-white"
+          @keydown.enter="applyFilter"
+        />
+      </div>
+      <div>
+        <label class="text-[11px] text-slate-400 block mb-1">结束时间</label>
+        <input
+          v-model="endTime"
+          type="datetime-local"
+          class="w-44 border rounded-lg px-2.5 py-1.5 text-sm bg-white"
+          @keydown.enter="applyFilter"
+        />
+      </div>
+      <div class="flex-1 min-w-[240px]">
+        <label class="text-[11px] text-slate-400 block mb-1">搜索</label>
+        <input
+          v-model="keyword"
+          type="text"
+          placeholder="时间 / 用户 / 行为+详情 / 方式 / 路径 / 状态 / IP"
+          class="w-full border rounded-lg px-2.5 py-1.5 text-sm bg-white"
+          @keydown.enter="applyFilter"
+        />
       </div>
       <div>
         <label class="text-[11px] text-slate-400 block mb-1">每页</label>

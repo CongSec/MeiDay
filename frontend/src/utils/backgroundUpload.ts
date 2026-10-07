@@ -1,4 +1,5 @@
 import { deleteAttachments, uploadAttachment } from './attachments'
+import { logAttachmentDeletion } from './audit'
 import { useTasksStore } from '@/stores/tasks'
 import { useUiStore } from '@/stores/ui'
 import type { AttachmentMeta, CredFields } from '@/types'
@@ -126,6 +127,19 @@ function cleanupSessionIfEmpty(uid: string) {
   emitGlobal()
 }
 
+/** 记录一次上传清理（取消/失败）删除孤文件的审计日志：统一来源「上传清理」，未保存故无对应任务 */
+function logCleanupDeletion(metas: AttachmentMeta[] | undefined) {
+  const list = metas ?? []
+  if (!list.length) return
+  logAttachmentDeletion({
+    source: '上传清理',
+    count: list.length,
+    orphanCount: list.length,
+    totalSize: list.reduce((s, a) => s + (a.size || 0), 0),
+    files: list.map((a) => ({ name: a.name, taskName: '' })),
+  })
+}
+
 /** 单个附件失败的统一处理：提示 + 删除已产生的孤文件（每个只弹一次） */
 function toastFailure(item: BackgroundUploadState) {
   if (item.failureToasted) return
@@ -134,7 +148,10 @@ function toastFailure(item: BackgroundUploadState) {
     `附件「${item.file.name}」上传失败${item.error ? `：${item.error}` : ''}`,
     'error',
   )
-  if (item.meta) void deleteAttachments(item.creds, [item.meta])
+  if (item.meta) {
+    void deleteAttachments(item.creds, [item.meta])
+    logCleanupDeletion([item.meta])
+  }
 }
 
 /** 已提交保存的上传完成：把附件 meta 写回任务/子任务 JSON；任务不存在则删孤文件并提示 */
@@ -248,7 +265,10 @@ export function cancelUploads(uid: string, ids: Iterable<string>) {
       byUid.get(uid)?.delete(id)
       continue
     }
-    if (item.meta) void deleteAttachments(item.creds, [item.meta])
+    if (item.meta) {
+      void deleteAttachments(item.creds, [item.meta])
+      logCleanupDeletion([item.meta])
+    }
     if (item.state === 'done') {
       item.state = 'cancelled'
       items.delete(id)
@@ -348,6 +368,7 @@ async function runQueue() {
           item.state = 'cancelled'
           notify(item.uid, item)
           void deleteAttachments(item.creds, [meta])
+          logCleanupDeletion([meta])
           cleanupSessionIfEmpty(item.uid)
           continue
         }
@@ -359,7 +380,10 @@ async function runQueue() {
         item.error = (e as Error).message || '上传失败'
         notify(item.uid, item)
         if (item.committed) toastFailure(item)
-        else if (item.meta) void deleteAttachments(item.creds, [item.meta])
+        else if (item.meta) {
+          void deleteAttachments(item.creds, [item.meta])
+          logCleanupDeletion([item.meta])
+        }
         cleanupSessionIfEmpty(item.uid)
       }
     }
