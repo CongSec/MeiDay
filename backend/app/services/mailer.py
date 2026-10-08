@@ -1,11 +1,45 @@
+import asyncio
 import html
+import os
+import socket
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 
 import aiosmtplib
 
-SMTP_HOST = "smtp.qq.com"
-SMTP_PORT = 465
+# SMTP 服务器默认 QQ 邮箱；可用环境变量覆盖（如服务器无法解析 smtp.qq.com 时，
+# 可把 MEIDAY_SMTP_HOST 指向可解析的主机名或 IP，MEIDAY_SMTP_PORT 指定端口）。
+SMTP_HOST = os.environ.get("MEIDAY_SMTP_HOST", "smtp.qq.com").strip() or "smtp.qq.com"
+try:
+    SMTP_PORT = int(os.environ.get("MEIDAY_SMTP_PORT", "465").strip() or "465")
+except ValueError:
+    SMTP_PORT = 465
+
+
+async def _smtp_send(msg: EmailMessage, *, smtp_user: str, smtp_pass: str) -> None:
+    """统一 SMTP 发送入口：DNS 解析失败（getaddrinfo）等连接级瞬时错误自动重试一次。
+
+    - gaierror 发生在连接建立之前（域名解析阶段），未发送任何邮件数据，重试不会重复发信；
+    - 重试间隔 2 秒，覆盖 DNS 服务器瞬时故障/缓存未命中等常见瞬态问题；
+    - 其他错误（认证失败、协议错误、超时等）不重试，直接上抛由调用方记录。
+    """
+    for attempt in (1, 2):
+        try:
+            await aiosmtplib.send(
+                msg,
+                hostname=SMTP_HOST,
+                port=SMTP_PORT,
+                use_tls=True,
+                username=smtp_user,
+                password=smtp_pass,
+                timeout=30,
+            )
+            return
+        except socket.gaierror:
+            if attempt == 1:
+                await asyncio.sleep(2)
+                continue
+            raise
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-CN">
@@ -57,15 +91,95 @@ async def send_reminder_email(smtp_user: str, smtp_pass: str, to: str, task: dic
         f"提醒时间：{task['reminder_time']}"
     )
     msg.add_alternative(_html(task), subtype="html")
-    await aiosmtplib.send(
-        msg,
-        hostname=SMTP_HOST,
-        port=SMTP_PORT,
-        use_tls=True,
-        username=smtp_user,
-        password=smtp_pass,
-        timeout=30,
+    await _smtp_send(msg, smtp_user=smtp_user, smtp_pass=smtp_pass)
+
+
+# ---- 消息通知回调邮件（外部系统调用 /api/callback 触发） ----
+# title 作邮件主题、content 作邮件正文；正文保留换行并做 HTML 转义。
+# 另有一封「报错回显」邮件：dst 非法或发送失败时发往账号配置的收件邮箱，让主人知晓。
+CALLBACK_TEMPLATE = """<!DOCTYPE html>
+<html lang="zh-CN">
+<body style="font-family: Arial, sans-serif; max-width: 560px; margin: 0 auto; padding: 24px;">
+  <h2 style="color:#dc2626;">🔔 {title}</h2>
+  <div style="font-size:15px;color:#1f2937;line-height:1.7;white-space:pre-wrap;">{body}</div>
+  <p style="color:#999;font-size:12px;margin-top:24px;">本邮件由 MeiDay 自动发送，请勿回复。</p>
+</body>
+</html>"""
+
+ERROR_ECHO_TEMPLATE = """<!DOCTYPE html>
+<html lang="zh-CN">
+<body style="font-family: Arial, sans-serif; max-width: 560px; margin: 0 auto; padding: 24px;">
+  <h2 style="color:#dc2626;">🔔 外部回调发送失败</h2>
+  <p style="font-size:15px;color:#1f2937;line-height:1.7;">有外部系统调用你的「消息通知回调」时发送失败，原因：<b>{reason}</b></p>
+  <table style="border-collapse: collapse; width: 100%; margin-top: 12px;">
+    <tr><td style="padding:6px 0;color:#666;width:100px;">邮件标题</td><td style="padding:6px 0;font-weight:600;">{title}</td></tr>
+    <tr><td style="padding:6px 0;color:#666;">目标收件</td><td style="padding:6px 0;font-weight:600;font-family:monospace;">{target}</td></tr>
+    <tr><td style="padding:6px 0;color:#666;">时间</td><td style="padding:6px 0;font-weight:600;">{time}</td></tr>
+    <tr><td style="padding:6px 0;color:#666;">来源 IP</td><td style="padding:6px 0;font-weight:600;font-family:monospace;">{ip}</td></tr>
+  </table>
+  <p style="color:#999;font-size:12px;margin-top:24px;">如非本人操作，请及时在设置页点击「刷新」更换回调 ID。本邮件由 MeiDay 自动发送，请勿回复。</p>
+</body>
+</html>"""
+
+
+async def send_callback_email(smtp_user: str, smtp_pass: str, to: str, title: str, content: str) -> None:
+    """外部回调触发的通知邮件：title 作主题、content 作正文（保留换行、HTML 转义）。"""
+    subject = (title or "").strip() or "【MeiDay 通知】"
+    body_text = content or ""
+    msg = EmailMessage()
+    msg["From"] = smtp_user
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.set_content(body_text or "（无内容）")
+    html_body = _esc(body_text).replace("\n", "<br>")
+    msg.add_alternative(
+        CALLBACK_TEMPLATE.format(title=_esc(subject), body=html_body or "（无内容）"),
+        subtype="html",
     )
+    await _smtp_send(msg, smtp_user=smtp_user, smtp_pass=smtp_pass)
+
+
+async def send_callback_error_email(
+    smtp_user: str,
+    smtp_pass: str,
+    to: str,
+    *,
+    title: str,
+    content: str,
+    target: str,
+    reason: str,
+    ip: str,
+) -> None:
+    """报错回显邮件：外部回调发送失败时发往账号配置的收件邮箱，告知主人失败原因。
+
+    仅含标题/目标/时间/IP 与原因，正文截断展示；发送失败由调用方静默记录（不回退、不重试）。
+    """
+    preview = " ".join((content or "").split())[:200] or "（无正文）"
+    now = datetime.now(timezone(timedelta(hours=8))).isoformat(timespec="seconds").replace("T", " ")
+    subject = "【MeiDay 通知】外部回调发送失败"
+    msg = EmailMessage()
+    msg["From"] = smtp_user
+    msg["To"] = to
+    msg["Subject"] = subject
+    text = (
+        f"外部系统调用你的「消息通知回调」时发送失败：{reason}\n\n"
+        f"邮件标题：{(title or '').strip() or '-'}\n正文预览：{preview}\n"
+        f"目标收件：{target or '-'}\n时间：{now}\n来源 IP：{ip or '未知IP'}\n\n"
+        "如非本人操作，请及时在设置页点击「刷新」更换回调 ID。"
+    )
+    msg.set_content(text)
+    msg.add_alternative(
+        ERROR_ECHO_TEMPLATE.format(
+            reason=_esc(reason),
+            title=_esc((title or "").strip() or "-"),
+            target=_esc(target or "-"),
+            time=_esc(now),
+            ip=_esc(ip or "未知IP"),
+        ),
+        subtype="html",
+    )
+    await _smtp_send(msg, smtp_user=smtp_user, smtp_pass=smtp_pass)
+
 
 # ---- 安全通知邮件（登录 / 密钥 / 隐私日记相关） ----
 # 文案与主题按类型区分；仅含 IP 与时间，绝不包含任何密钥/凭证明文。
@@ -141,12 +255,4 @@ async def send_security_email(
         SECURITY_TEMPLATE.format(body=_esc(body), time=_esc(now), ip=_esc(ip or "未知IP")),
         subtype="html",
     )
-    await aiosmtplib.send(
-        msg,
-        hostname=SMTP_HOST,
-        port=SMTP_PORT,
-        use_tls=True,
-        username=smtp_user,
-        password=smtp_pass,
-        timeout=30,
-    )
+    await _smtp_send(msg, smtp_user=smtp_user, smtp_pass=smtp_pass)

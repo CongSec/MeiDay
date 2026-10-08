@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
-import { downloadAttachment, formatSize, previewKind } from '@/utils/attachments'
+import { downloadAttachment, formatSize, ossFileName, previewKind } from '@/utils/attachments'
 import type { AttachmentMeta } from '@/types'
 import AppIcon from '@/components/AppIcon.vue'
 
@@ -67,7 +67,7 @@ function download() {
     <div class="modal-panel rounded-2xl w-full max-w-3xl max-h-[90vh] flex flex-col animate-modal-pop">
       <div class="flex items-center justify-between px-4 py-3 border-b border-slate-100">
         <div class="min-w-0 flex-1">
-          <div class="text-sm font-semibold text-slate-800 truncate flex items-center gap-2" :title="meta.name"><AppIcon name="paperclip" :size="15" class="text-brand shrink-0" />{{ meta.name }}</div>
+          <div class="text-sm font-semibold text-slate-800 truncate flex items-center gap-2" :title="meta.key || meta.name"><AppIcon name="paperclip" :size="15" class="text-brand shrink-0" />{{ ossFileName(meta.key) || meta.name }}</div>
           <div class="text-[11px] text-slate-400">{{ formatSize(meta.size) }} · {{ meta.uploadedAt }}</div>
         </div>
         <div class="flex items-center gap-2">

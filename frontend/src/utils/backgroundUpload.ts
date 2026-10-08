@@ -1,4 +1,4 @@
-import { deleteAttachments, uploadAttachment } from './attachments'
+import { deleteAttachments, ossFileName, uploadAttachment } from './attachments'
 import { logAttachmentDeletion } from './audit'
 import { useTasksStore } from '@/stores/tasks'
 import { useUiStore } from '@/stores/ui'
@@ -136,7 +136,7 @@ function logCleanupDeletion(metas: AttachmentMeta[] | undefined) {
     count: list.length,
     orphanCount: list.length,
     totalSize: list.reduce((s, a) => s + (a.size || 0), 0),
-    files: list.map((a) => ({ name: a.name, taskName: '' })),
+    files: list.map((a) => ({ name: ossFileName(a.key) || a.name, taskName: '' })),
   })
 }
 

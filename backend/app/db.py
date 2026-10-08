@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS smtp_creds (
     smtp_user TEXT NOT NULL,
     smtp_pass TEXT NOT NULL,
     notify_email TEXT NOT NULL,
+    -- 消息通知回调 ID（10 位随机数）：外部系统凭此 ID 调用 /api/callback 触发邮件通知
+    callback_id TEXT,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -268,6 +270,16 @@ def _migrate_notify_prefs_diary(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE notify_prefs ADD COLUMN diary_unlock_failed INTEGER NOT NULL DEFAULT 1")
 
 
+def _migrate_smtp_callback_id(conn: sqlite3.Connection) -> None:
+    """旧库 smtp_creds 表没有 callback_id 列，启动时补齐（消息通知回调的 10 位随机 ID）。
+
+    该列可空：账号首次查看回调设置时按需生成并落库，无需强制存量行补齐。
+    """
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(smtp_creds)").fetchall()]
+    if "callback_id" not in cols:
+        conn.execute("ALTER TABLE smtp_creds ADD COLUMN callback_id TEXT")
+
+
 def init_db() -> None:
     with get_conn() as conn:
         conn.executescript(SCHEMA)
@@ -277,6 +289,7 @@ def init_db() -> None:
         _migrate_audit_logs_v2(conn)
         _migrate_users_v2(conn)
         _migrate_notify_prefs_diary(conn)
+        _migrate_smtp_callback_id(conn)
         # 登录成功通知默认开启、查看密钥通知不可关闭：强制存量行也置为开启
         conn.execute("UPDATE notify_prefs SET login_success=1, key_view=1")
         # 清理已删除用户遗留的孤儿提醒数据（可能来自外键关闭时期写入的旧库），

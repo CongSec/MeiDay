@@ -5,7 +5,7 @@ import { useResourcesStore, type ResourceItem } from '@/stores/resources'
 import { useUiStore } from '@/stores/ui'
 import AppIcon from '@/components/AppIcon.vue'
 import AttachmentPreviewModal from '@/components/AttachmentPreviewModal.vue'
-import { formatSize, previewKind } from '@/utils/attachments'
+import { formatSize, ossFileName, previewKind } from '@/utils/attachments'
 import { getThumbnailUrl } from '@/utils/thumbCache'
 import type { AttachmentMeta } from '@/types'
 
@@ -73,6 +73,11 @@ function toMeta(item: ResourceItem): AttachmentMeta {
     key: item.key,
     uploadedAt: item.time,
   }
+}
+
+/** 卡片显示名：OSS 对象末段（实际文件名/UUID，便于与控制台核对）；无 key 时回退原文件名 */
+function dispName(item: ResourceItem): string {
+  return ossFileName(item.key) || item.name
 }
 
 async function ensureThumb(item: ResourceItem) {
@@ -160,7 +165,7 @@ const filtered = computed(() => {
       arr.sort((a, b) => a.size - b.size)
       break
     case 'name-asc':
-      arr.sort((a, b) => a.name.localeCompare(b.name))
+      arr.sort((a, b) => dispName(a).localeCompare(dispName(b)))
       break
   }
   return arr
@@ -405,7 +410,7 @@ function fileExtLabel(item: ResourceItem): string {
           <!-- 缩略图 / 类型占位 -->
           <button
             class="flex aspect-square w-full items-center justify-center bg-slate-100"
-            :title="item.name"
+            :title="dispName(item)"
             @click="openPreview(item)"
           >
             <img
@@ -424,7 +429,7 @@ function fileExtLabel(item: ResourceItem): string {
           <!-- 删除按钮（无确认，点击即删） -->
           <button
             class="absolute right-1.5 top-1.5 z-10 inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/90 text-red-500 shadow-sm hover:bg-red-50"
-            :title="'删除 ' + item.name + '（仅删存储文件，任务记录中该附件将无法打开）'"
+            :title="'删除 ' + dispName(item) + '（仅删存储文件，任务记录中该附件将无法打开）'"
             :disabled="deleting"
             @click.stop="removeItems([item])"
           >
@@ -434,7 +439,7 @@ function fileExtLabel(item: ResourceItem): string {
           <!-- 信息区 -->
           <div class="px-1.5 pb-1.5 pt-1 text-[11px] leading-snug">
             <div class="flex items-center gap-1">
-              <span class="truncate font-medium text-slate-700" :title="item.name">{{ item.name }}</span>
+              <span class="truncate font-medium text-slate-700" :title="dispName(item)">{{ dispName(item) }}</span>
               <span
                 v-if="item.orphan"
                 class="shrink-0 rounded-full bg-red-50 px-1 py-px text-[10px] text-red-500"

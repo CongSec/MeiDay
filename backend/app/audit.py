@@ -36,6 +36,10 @@ ACTION_LABELS = {
     ("GET", "/api/logs"): "查看操作日志",
     ("GET", "/api/notify-prefs"): "查询通知设置",
     ("PUT", "/api/notify-prefs"): "更新通知设置",
+    ("GET", "/api/callback"): "外部回调触发",
+    ("POST", "/api/callback"): "外部回调触发",
+    ("GET", "/api/callback/info"): "查询回调设置",
+    ("POST", "/api/callback/refresh"): "更新回调设置",
 }
 
 # 后台邮件操作的行为名（非 HTTP 请求，由 reminder worker 写入）

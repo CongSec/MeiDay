@@ -5,7 +5,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useTasksStore } from '@/stores/tasks'
 import { dateKeyOf, fromLocalInput, nowIso, toLocalInput, todayKey } from '@/utils/time'
 import { useUiStore } from '@/stores/ui'
-import { deleteAttachments, downloadAttachment, formatSize, isPreviewable } from '@/utils/attachments'
+import { deleteAttachments, downloadAttachment, formatSize, isPreviewable, ossFileName } from '@/utils/attachments'
 import { base64ToFile, imageFileName, imageFingerprint, MAX_SHOWN_IMAGES, readRecentImages, type RecentImageData } from '@/utils/recentImages'
 import { cancelSessionUploads, cancelUploadByMetaId, commitUploads, enqueueUploads, getActiveUploadCount, getSessionInflight, subscribeUploads, type BackgroundUploadState, type InFlightUpload } from '@/utils/backgroundUpload'
 import AttachmentPreviewModal from './AttachmentPreviewModal.vue'
@@ -791,7 +791,7 @@ async function submit() {
         count: removedAttachments.value.length,
         orphanCount: 0,
         totalSize: removedAttachments.value.reduce((s, a) => s + (a.size || 0), 0),
-        files: removedAttachments.value.map((a) => ({ name: a.name, taskName: task.name })),
+        files: removedAttachments.value.map((a) => ({ name: ossFileName(a.key) || a.name, taskName: task.name })),
       })
     }
     // 保存成功：未传完的附件由后台队列继续上传，完成后写回任务 JSON 并统一提示
@@ -1118,7 +1118,7 @@ onUnmounted(() => {
               class="flex items-center gap-2 rounded-lg border border-slate-100 bg-slate-50/70 px-2.5 py-1 text-xs"
             >
               <span class="shrink-0 text-brand/70 flex items-center"><AppIcon name="paperclip" :size="13" /></span>
-              <span class="flex-1 min-w-0 truncate text-slate-700" :title="a.name">{{ a.name }}</span>
+              <span class="flex-1 min-w-0 truncate text-slate-700" :title="a.key || a.name">{{ ossFileName(a.key) || a.name }}</span>
               <span class="shrink-0 text-slate-400">{{ formatSize(a.size) }}</span>
               <button
                 v-if="isPreviewable(a)"

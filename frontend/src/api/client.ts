@@ -376,6 +376,19 @@ export const api = {
   getSyncState(since = 0) {
     return request<SyncState>('GET', `/api/sync/state?since=${since}`)
   },
+  /** 消息通知回调：查询当前账号回调 ID（无则自动生成） */
+  getCallbackInfo() {
+    return request<CallbackInfo>('GET', '/api/callback/info')
+  },
+  /** 消息通知回调：重新随机生成回调 ID（旧 ID 立即作废） */
+  refreshCallbackId() {
+    return request<CallbackInfo>('POST', '/api/callback/refresh')
+  },
+}
+
+/** 消息通知回调信息 */
+export interface CallbackInfo {
+  id: string
 }
 
 /** 同步协调中心：客户端可上报的资源类型（与各 store 一一对应） */

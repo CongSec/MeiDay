@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { createOssClient } from '@/utils/oss'
 import { logAttachmentDeletion, type AttachmentDeletionFile } from '@/utils/audit'
+import { ossFileName } from '@/utils/attachments'
 import { useAuthStore } from './auth'
 import { useTasksStore } from './tasks'
 import { useProjectsStore } from './projects'
@@ -372,7 +373,7 @@ export const useResourcesStore = defineStore('resources', {
         if (results[i]) {
           ok++
           deletedKeys.add(it.key)
-          files.push({ name: it.name, taskName: it.orphan ? '' : it.taskName })
+          files.push({ name: ossFileName(it.key) || it.name, taskName: it.orphan ? '' : it.taskName })
           if (it.orphan) orphanCount++
           totalSize += it.size || 0
         } else {

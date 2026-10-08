@@ -17,7 +17,7 @@ import { api } from '@/api/client'
 import { logAudit, logAttachmentDeletion, safeDetail } from '@/utils/audit'
 import { UNCATEGORIZED, type AttachmentMeta, type RepeatMaster, type Subtask, type Task } from '@/types'
 import { canonicalJson, compareSortTime, newSubtask, normalizeTask, normalizeTasks, pendingSubtaskReminders, taskEffectiveEndTime, taskEffectiveSortTime } from '@/utils/task'
-import { deleteAttachments } from '@/utils/attachments'
+import { deleteAttachments, ossFileName } from '@/utils/attachments'
 const saveDebouncers = new Map<string, Debounced<[]>>()
 const trashDebouncers = new Map<string, Debounced<[]>>()
 // 每项目在途保存 Promise：确认式保存/即时保存共用，串行化同一文件的写入，
@@ -2544,7 +2544,7 @@ export const useTasksStore = defineStore('tasks', {
           count: sub.attachments.length,
           orphanCount: 0,
           totalSize: sub.attachments.reduce((s, a) => s + (a.size || 0), 0),
-          files: sub.attachments.map((a) => ({ name: a.name, taskName: task.name })),
+          files: sub.attachments.map((a) => ({ name: ossFileName(a.key) || a.name, taskName: task.name })),
         })
       }
       logAudit('删除子任务', safeDetail(`子任务ID：${sub?.id || '未知'}，所属任务ID：${task.id}`))
@@ -2620,7 +2620,7 @@ export const useTasksStore = defineStore('tasks', {
             count: atts.length,
             orphanCount: 0,
             totalSize: atts.reduce((s, a) => s + (a.size || 0), 0),
-            files: atts.map((a) => ({ name: a.name, taskName: target.name })),
+            files: atts.map((a) => ({ name: ossFileName(a.key) || a.name, taskName: target.name })),
           })
         }
       }

@@ -25,7 +25,7 @@ export function safeDetail(text: string, max = 200): string {
   return s.length > max ? `${s.slice(0, max)}…` : s
 }
 
-/** 附件删除日志：单个被删附件的文件名 + 其对应任务名（孤儿/未保存留空） */
+/** 附件删除日志：单个被删附件的 OSS 文件名（key 末段 UUID，便于与控制台核对）+ 其对应任务名（孤儿/未保存留空） */
 export interface AttachmentDeletionFile {
   name: string
   /** 附件对应的任务名；孤儿（上传未保存等无对应任务）为空 */

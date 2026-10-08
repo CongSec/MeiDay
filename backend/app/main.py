@@ -14,6 +14,7 @@ from .audit import action_label, client_ip, log_action
 from .auth import username_from_token
 from .db import init_db
 from .routes import auth as auth_routes
+from .routes import callback as callback_routes
 from .routes import captcha as captcha_routes
 from .routes import credentials as cred_routes
 from .routes import logs as logs_routes
@@ -153,6 +154,7 @@ app.include_router(cred_routes.router)
 app.include_router(logs_routes.router)
 app.include_router(notify_routes.router)
 app.include_router(sync_routes.router)
+app.include_router(callback_routes.router)
 
 
 @app.get("/api/health")

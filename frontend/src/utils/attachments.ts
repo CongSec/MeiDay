@@ -2,6 +2,14 @@ import { createOssClient, describeOssError, paths } from './oss'
 import { nowIso } from './time'
 import type { AttachmentMeta, CredFields } from '@/types'
 
+/** OSS 对象 key 的末段 = 对象在存储桶里的实际文件名（形如 UUID，不含目录路径）。
+ *  供任务编辑 / 日志 / 资源图等处显示，便于与 OSS 控制台对象名核对；下载与预览仍用原文件名。 */
+export function ossFileName(key: string): string {
+  if (!key) return ''
+  const seg = key.split('/')
+  return seg[seg.length - 1] ?? ''
+}
+
 /** 单个附件上传的总超时：防止 OSS 请求因弱网/挂起而无限等待，导致“一直显示正在上传中” */
 const UPLOAD_TIMEOUT_MS = 5 * 60 * 1000
 

@@ -10,6 +10,7 @@ import { api } from '@/api/client'
 import type { NotifyPrefs } from '@/api/client'
 import { logAudit, safeDetail } from '@/utils/audit'
 import { hintFromDiag } from '@/utils/ossDiag'
+import { getApiBase } from '@/utils/serverConfig'
 import type { CredFields } from '@/types'
 
 const auth = useAuthStore()
@@ -55,6 +56,40 @@ async function setNotifyPref(key: 'login_success' | 'login_failed', val: boolean
     notifySaving.value = false
   }
 }
+
+/** 消息通知回调：收件邮箱下方一行提示内展示真实回调地址，点「刷新」换新 ID（旧 ID 作废） */
+const callbackId = ref('')
+const callbackBusy = ref(false)
+
+async function loadCallbackId() {
+  try {
+    const r = await api.getCallbackInfo()
+    callbackId.value = r.id
+  } catch {
+    // 加载失败不阻塞设置页，回调提示行不展示
+  }
+}
+
+async function refreshCallbackId() {
+  if (callbackBusy.value) return
+  callbackBusy.value = true
+  try {
+    const r = await api.refreshCallbackId()
+    callbackId.value = r.id
+    ui.toast('已生成新的回调 ID，旧 ID 已作废')
+    logAudit('修改设置', safeDetail('刷新消息通知回调 ID'))
+  } catch (e) {
+    ui.toast((e as Error).message || '刷新失败', 'error')
+  } finally {
+    callbackBusy.value = false
+  }
+}
+
+const callbackUrl = computed(() => {
+  const base =
+    getApiBase() || (typeof window !== 'undefined' ? window.location.origin : '')
+  return callbackId.value && base ? `${base}/api/callback?id=${callbackId.value}` : ''
+})
 
 const mobileActions = inject<{ title: string } | null>('mobile-actions', null)
 
@@ -120,6 +155,7 @@ onMounted(() => {
   if (mobileActions) mobileActions.title = MOBILE_TITLE
   logAudit('打开设置')
   void loadNotifyPrefs()
+  void loadCallbackId()
   // 从 OSS 加载用户统计（使用天数 / 累计完成数）；失败不阻塞设置页
   void statsStore.load().catch(() => {})
 })
@@ -324,6 +360,14 @@ async function save() {
             </button>
           </div>
           <div v-if="f.key === 'notifyEmail'" class="pt-1">
+            <div v-if="callbackId" class="text-[11px] text-slate-400 leading-relaxed break-all">
+              消息通知回调：{{ callbackUrl }}&amp;title=邮件标题&amp;content=邮件正文&amp;dst=指定收件邮箱(可选)
+              <span
+                class="cursor-pointer select-none text-brand whitespace-nowrap"
+                :class="{ 'opacity-60 pointer-events-none': callbackBusy }"
+                @click="refreshCallbackId"
+              >刷新</span>
+            </div>
             <button
               type="button"
               class="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm text-brand hover:bg-brand/5"
