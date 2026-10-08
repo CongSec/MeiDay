@@ -36,7 +36,14 @@ DIARY_HIGH_RISK_PREFIXES = (
 )
 # 所有隐私日记行为均视为安全相关
 DIARY_PREFIX = "日记-"
-
+# 时间胶囊行为 -> 安全邮件类型（导出/导入/清空均恒开通知，与日记导出/导入/删除同级）
+CAPSULE_EMAIL_KINDS = {
+    "导出时间胶囊备份": "capsule_export",
+    "导入时间胶囊备份": "capsule_import",
+    "清空时间胶囊": "capsule_clear",
+}
+# 时间胶囊高危行为（清空不可逆；导出/导入为数据离站/入站），前端统一显示为"安全"
+CAPSULE_PREFIXES = ("导出时间胶囊备份", "导入时间胶囊备份", "清空时间胶囊")
 
 
 @router.get("/logs")
@@ -112,7 +119,7 @@ def log_client_action(
     """
     is_high_risk = body.action.startswith("显示密钥") or any(
         body.action.startswith(p) for p in DIARY_HIGH_RISK_PREFIXES
-    )
+    ) or any(body.action.startswith(p) for p in CAPSULE_PREFIXES)
     is_security = (
         is_high_risk
         or body.action.startswith("显示密钥")
@@ -139,9 +146,10 @@ def log_client_action(
             notify_security_event, username, "key_view",
             client_ip(request), request.headers.get("user-agent", ""),
         )
-    kind = DIARY_EMAIL_KINDS.get(body.action)
+    kind = DIARY_EMAIL_KINDS.get(body.action) or CAPSULE_EMAIL_KINDS.get(body.action)
     if kind:
-        # 隐私日记安全通知：解锁成功/失败（受日记内开关控制）、改密/导出/导入/删除（不可关闭）
+        # 隐私日记/时间胶囊安全通知：日记解锁成功/失败受日记内开关控制；
+        # 日记改密/导出/导入/删除与时间胶囊导出/导入/清空均不可关闭（恒开）。
         background_tasks.add_task(
             notify_security_event, username, kind,
             client_ip(request), request.headers.get("user-agent", ""),

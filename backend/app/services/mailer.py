@@ -196,6 +196,9 @@ SECURITY_SUBJECTS = {
     "diary_export": "【MeiDay 安全通知】隐私日记被导出",
     "diary_import": "【MeiDay 安全通知】隐私日记被导入",
     "diary_delete": "【MeiDay 安全通知】隐私日记被删除",
+    "capsule_export": "【MeiDay 安全通知】时间胶囊备份被导出",
+    "capsule_import": "【MeiDay 安全通知】时间胶囊备份被导入",
+    "capsule_clear": "【MeiDay 安全通知】时间胶囊被清空",
 }
 
 SECURITY_BODIES = {
@@ -209,6 +212,9 @@ SECURITY_BODIES = {
     "diary_export": "[{ip}] 导出了你的隐私日记",
     "diary_import": "[{ip}] 导入了你的隐私日记",
     "diary_delete": "[{ip}] 删除了你的隐私日记",
+    "capsule_export": "[{ip}] 导出了你的时间胶囊备份",
+    "capsule_import": "[{ip}] 导入了你的时间胶囊备份",
+    "capsule_clear": "[{ip}] 清空了你的时间胶囊",
 }
 
 SECURITY_TEMPLATE = """<!DOCTYPE html>
