@@ -7,7 +7,7 @@ import { createDiaryMeta, rewrapDiaryMeta, unwrapDiary } from '@/utils/diaryCryp
 import {
   deleteDiaryBatch, deleteDiaryFile, deleteDiaryPeriod, exportDiary, getDiaryFileUrl, getDiaryMeta,
   importDiary, listDiaryDayBatches, listDiaryMonthDays, listDiaryPeriodMessages, loadDiaryBatch,
-  putDiaryMeta, saveDiaryBatch, uploadDiaryFile,
+  putDiaryMeta, saveDiaryBatch, uploadDiaryFile, type DiaryImportResult,
 } from '@/utils/diaryStorage'
 import { releaseAllDiaryFileUrls, releaseDiaryFileUrl } from '@/utils/diaryBlobCache'
 import {
@@ -460,14 +460,15 @@ export const useDiaryStore = defineStore('diary', {
     },
 
     /** 导入（zip，逐条合并；先解密验证再写回）。
-     *  跨账号包（含 dek.json）需提供导出密码，导入时会重加密成当前账号 DEK。 */
-    async importPeriod(file: File, exportPassword?: string): Promise<number> {
+     *  跨账号包（含 dek.json）需提供导出密码，导入时会重加密成当前账号 DEK。
+     *  返回 { imported, failed }：单条写入失败不中断整包，失败条目可幂等重试补齐。 */
+    async importPeriod(file: File, exportPassword?: string): Promise<DiaryImportResult> {
       if (!ossClient || !this.username || !getDiaryDek()) throw new Error('日记会话已锁定')
       this.importing = true
       try {
         // 先等既有写队列落盘，避免导入写回与排队中的 flush 互相干扰
         await flushAllPending(20000)
-        const count = await importDiary(ossClient, this.username, getDiaryDek()!, file, exportPassword)
+        const result = await importDiary(ossClient, this.username, getDiaryDek()!, file, exportPassword)
         // 合并后重建内存缓存（保留本会话消息，loadDay 会再合并），保证日历/时间线一致
         this.days = {}
         this.loadedDates = {}
@@ -475,8 +476,11 @@ export const useDiaryStore = defineStore('diary', {
         this.reviewDays = []
         await this.refreshMonth(Number(this.selectedDate.slice(0, 4)), Number(this.selectedDate.slice(5, 7)))
         await this.loadDay(this.selectedDate)
-        logAudit('日记-导入', safeDetail(`共 ${count} 条密文记录`))
-        return count
+        logAudit(
+          '日记-导入',
+          safeDetail(`共 ${result.imported} 条密文记录${result.failed.length ? `，${result.failed.length} 条写入失败` : ''}`),
+        )
+        return result
       } finally {
         this.importing = false
       }

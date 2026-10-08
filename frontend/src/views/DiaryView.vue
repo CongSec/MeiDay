@@ -430,8 +430,19 @@ async function onFileChosen(e: Event): Promise<void> {
 
 async function runImport(file: File, exportPassword?: string): Promise<void> {
   try {
-    const count = await diary.importPeriod(file, exportPassword)
-    ui.toast(`导入成功，共 ${count} 条密文记录`)
+    const result = await diary.importPeriod(file, exportPassword)
+    if (result.failed.length > 0) {
+      // 部分写入失败：明确告知已写入与失败条目，可幂等重试补齐
+      const firstFew = result.failed
+        .slice(0, 5)
+        .map((f) => f.name)
+        .join('、')
+      const msg = `已导入 ${result.imported} 条，${result.failed.length} 条失败（${firstFew}${result.failed.length > 5 ? ' 等' : ''}）；可重试，重复导入不会产生重复数据`
+      if (exportPassword !== undefined) importError.value = msg
+      ui.toast(msg, 'error')
+    } else {
+      ui.toast(`导入成功，共 ${result.imported} 条密文记录`)
+    }
   } catch (err) {
     const msg = describeDiaryError(err, '导入失败（密码不匹配或文件损坏）')
     if (exportPassword !== undefined) importError.value = msg

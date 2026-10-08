@@ -392,18 +392,25 @@ async function validateImportEntries(entries: JSZip.JSZipObject[], dek: Uint8Arr
   }
 }
 
+/** 导入结果：imported=成功写入的条目数；failed=写入失败的条目（多为瞬时网络错误，可幂等重试补齐） */
+export interface DiaryImportResult {
+  imported: number
+  failed: { name: string; reason: string }[]
+}
+
 /** 导入：
  *  - 若 zip 含 dek.json：先尝试用当前 DEK（同账号导出）解密；失败则视为跨账号，
  *    需提供导出密码解开源 DEK，再重加密成当前 DEK 写回；
  *  - 若 zip 无 dek.json：老版同账号导出，直接用当前 DEK。
- *  全部校验通过才写入，避免半途失败；非法路径（../ 等）直接拒绝。 */
+ *  全部校验通过才写入，避免半途失败；非法路径（../ 等）直接拒绝。
+ *  写入阶段逐条容错：单条失败不中断整包，记录失败条目继续其余，保证重试幂等、可补齐。 */
 export async function importDiary(
   client: OssClient,
   username: string,
   currentDek: Uint8Array,
   file: File,
   exportPassword?: string,
-): Promise<number> {
+): Promise<DiaryImportResult> {
   const zip = await JSZip.loadAsync(await file.arrayBuffer())
   const entries = Object.values(zip.files).filter((f) => !f.dir)
   if (!entries.length) throw new Error('压缩包为空或格式不正确')
@@ -442,56 +449,62 @@ export async function importDiary(
   // 写入阶段：逐条合并（未导入的批次保持不动）。
   // 批次文件：读取云端同批次 → 按消息 id 去重合并（zip 中消息优先）→ 加密写回，避免整体覆盖导致新消息丢失；
   // 附件：云端已存在则跳过，不存在才写入（跨账号时先用源 DEK 解密再重加密成当前 DEK）。
+  // 单条失败（多为瞬时网络错误）不中断整包：记录失败条目，其余继续，保证重试幂等、可补齐。
   let imported = 0
+  const failed: { name: string; reason: string }[] = []
   for (const entry of entries) {
     const name = normalizeEntryName(entry.name)
     if (name === EXPORT_DEK_ENTRY) continue
-    const bytes = new Uint8Array(await entry.async('uint8array'))
-    if (name.endsWith('.json')) {
-      const m = /^(\d{4})\/(\d{2})\/(\d{2})\/([^/]+)\.json$/.exec(name)
-      if (!m) continue
-      const dateKey = `${m[1]}-${m[2]}-${m[3]}`
-      const batchId = m[4]
-      const importedPlain = await decryptDay(sourceDek, decoder.decode(bytes))
-      const importedBatch = JSON.parse(importedPlain) as DiaryBatch
-      const importedMsgs = importedBatch.messages ?? []
-      // 云端现有同批次（可能包含导入 zip 之后新增的消息；始终用当前 DEK 读）
-      const existing = await loadDiaryBatch(client, username, currentDek, dateKey, batchId)
-      const byId = new Map<string, DiaryMessage>()
-      for (const msg of existing?.messages ?? []) byId.set(msg.id, msg)
-      for (const msg of importedMsgs) byId.set(msg.id, msg)
-      const merged: DiaryBatch = {
-        v: 1,
-        batchId,
-        messages: Array.from(byId.values()),
-        createdAt: existing?.createdAt ?? importedBatch.createdAt ?? new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      }
-      await saveDiaryBatch(client, username, currentDek, dateKey, merged)
-      imported++
-    } else {
-      const fullKey = `users/${username}/diary/${name}`
-      const exists = await client
-        .get(fullKey)
-        .then(() => true)
-        .catch((e: unknown) => {
-          const err = e as { code?: string | number; status?: number }
-          if (err.status === 404 || err.code === 'NoSuchKey') return false
-          throw e
-        })
-      if (!exists) {
-        const payload = crossAccount
-          ? await encryptFileBytes(currentDek, await decryptFileBytes(sourceDek, bytes))
-          : bytes
-        await client.put(
-          fullKey,
-          new Blob([payload as unknown as BlobPart], { type: 'application/octet-stream' }),
-        )
+    try {
+      const bytes = new Uint8Array(await entry.async('uint8array'))
+      if (name.endsWith('.json')) {
+        const m = /^(\d{4})\/(\d{2})\/(\d{2})\/([^/]+)\.json$/.exec(name)
+        if (!m) continue
+        const dateKey = `${m[1]}-${m[2]}-${m[3]}`
+        const batchId = m[4]
+        const importedPlain = await decryptDay(sourceDek, decoder.decode(bytes))
+        const importedBatch = JSON.parse(importedPlain) as DiaryBatch
+        const importedMsgs = importedBatch.messages ?? []
+        // 云端现有同批次（可能包含导入 zip 之后新增的消息；始终用当前 DEK 读）
+        const existing = await loadDiaryBatch(client, username, currentDek, dateKey, batchId)
+        const byId = new Map<string, DiaryMessage>()
+        for (const msg of existing?.messages ?? []) byId.set(msg.id, msg)
+        for (const msg of importedMsgs) byId.set(msg.id, msg)
+        const merged: DiaryBatch = {
+          v: 1,
+          batchId,
+          messages: Array.from(byId.values()),
+          createdAt: existing?.createdAt ?? importedBatch.createdAt ?? new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }
+        await saveDiaryBatch(client, username, currentDek, dateKey, merged)
         imported++
+      } else {
+        const fullKey = `users/${username}/diary/${name}`
+        const exists = await client
+          .get(fullKey)
+          .then(() => true)
+          .catch((e: unknown) => {
+            const err = e as { code?: string | number; status?: number }
+            if (err.status === 404 || err.code === 'NoSuchKey') return false
+            throw e
+          })
+        if (!exists) {
+          const payload = crossAccount
+            ? await encryptFileBytes(currentDek, await decryptFileBytes(sourceDek, bytes))
+            : bytes
+          await client.put(
+            fullKey,
+            new Blob([payload as unknown as BlobPart], { type: 'application/octet-stream' }),
+          )
+          imported++
+        }
       }
+    } catch (e) {
+      failed.push({ name, reason: e instanceof Error ? e.message : String(e) })
     }
   }
-  return imported
+  return { imported, failed }
 }
 
 /** 按月或按年删除日记（含引用的附件密文；未涉及月份保持不动）。

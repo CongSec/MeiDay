@@ -1516,9 +1516,12 @@ export const useTasksStore = defineStore('tasks', {
         try {
           const remote = await fetchRemoteTrashShard(client, auth.username, projectId, m)
           if (remote.length) {
-            const merged = mergeUnique(remote, byMonth.get(m) ?? [])
+            // 时感知合并（与 CAS 冲突合并 mergeTasks 同一语义）：updatedAt 更新者胜、平局本地（内存）胜。
+            // 修复导入备份到未加载月份时，mergeUnique(remote, memory) 让远端旧数据盲目覆盖备份新数据、
+            // 且内存与 OSS 分叉的问题（备份更新→恢复备份；云端更新→不降级云端）。
+            const merged = mergeTasks(byMonth.get(m) ?? [], remote)
             byMonth.set(m, merged)
-            this.trash[projectId] = mergeUnique(this.trash[projectId] ?? [], merged)
+            this.trash[projectId] = mergeTasks(this.trash[projectId] ?? [], merged)
           }
         } catch {
           /* 拉取失败按内存内容写（该月未加载，属边缘场景，不阻塞保存） */

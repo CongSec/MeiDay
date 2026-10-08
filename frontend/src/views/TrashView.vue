@@ -557,8 +557,18 @@ const clearBusy = ref(false)
 const clearOpen = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 
-/** 收集全部回收站数据（含项目名）：加载所有项目的回收站文件，返回便于导出/清空的结构 */
-async function collectAllTrash(): Promise<{ projectId: string; name: string; tasks: Task[]; project?: Project | DeletedProject }[]> {
+/** 收集回收站失败项：pid + 失败原因（load-error=项目文件加载失败；shard-error=更早分片拉取失败；capped=超过 600 个月上限） */
+interface TrashCollectFailure {
+  pid: string
+  reason: 'load-error' | 'shard-error' | 'capped'
+}
+
+/** 收集全部回收站数据（含项目名）：加载所有项目的回收站文件，返回便于导出/清空的结构。
+ *  failed 记录加载失败/被截断的项目——导出/清空时据此提示数据可能不完整。 */
+async function collectAllTrash(): Promise<{
+  projects: { projectId: string; name: string; tasks: Task[]; project?: Project | DeletedProject }[]
+  failed: TrashCollectFailure[]
+}> {
   if (!projects.loaded) await projects.load()
   const res = await tasks.listTrashProjects()
   const pids = new Set<string>(res.ids)
@@ -567,24 +577,30 @@ async function collectAllTrash(): Promise<{ projectId: string; name: string; tas
   if (!res.listed) for (const p of projects.projects) pids.add(p.id)
   pids.add(UNCATEGORIZED)
   const out: { projectId: string; name: string; tasks: Task[]; project?: Project | DeletedProject }[] = []
+  const failed: TrashCollectFailure[] = []
   for (const pid of pids) {
     if (!tasks.trashLoaded.includes(pid)) {
       try {
         await tasks.loadTrash(pid)
       } catch {
+        failed.push({ pid, reason: 'load-error' })
         continue
       }
     }
     // 导出/清空需要完整数据：把更早分片也全部拉进内存（防御性上限 600 个月）
     let guard = 0
+    let shardFailed = false
     while (tasks.trashHasMore[pid] && guard < 600) {
       try {
         if (!(await tasks.loadMoreTrash(pid))) break
       } catch {
+        failed.push({ pid, reason: 'shard-error' })
+        shardFailed = true
         break
       }
       guard += 1
     }
+    if (!shardFailed && tasks.trashHasMore[pid]) failed.push({ pid, reason: 'capped' })
     const arr = tasks.trash[pid] ?? []
     if (!arr.length) continue
     const meta = projectById(pid)
@@ -595,7 +611,7 @@ async function collectAllTrash(): Promise<{ projectId: string; name: string; tas
       project: pid === UNCATEGORIZED || !meta ? undefined : { ...meta },
     })
   }
-  return out
+  return { projects: out, failed }
 }
 
 /** 收集任务及其子任务的附件元数据（按 OSS key 去重） */
@@ -616,6 +632,14 @@ function collectAttachments(list: Task[]): AttachmentMeta[] {
   return out
 }
 
+/** 把备份中「导出账号」的附件 key 重映射到当前账号命名空间（users/<导出账号>/attachments/... → users/<当前账号>/attachments/...）。
+ *  非标准 key（无法解析出用户名/任务/附件段）或本来就是当前账号的 key 原样返回。 */
+function remapAttachmentKey(key: string, currentUsername: string): string {
+  const m = /^users\/([^/]+)\/attachments\/([^/]+)\/([^/]+)$/.exec(key)
+  if (!m || m[1] === currentUsername) return key
+  return `users/${currentUsername}/attachments/${m[2]}/${m[3]}`
+}
+
 /** 按需加载 jszip：仅导出/导入回收站备份时才拉取压缩库，避免进入回收站页即下载 */
 async function loadJSZip() {
   return (await import('jszip')).default
@@ -626,12 +650,19 @@ async function exportTrash() {
   if (exportBusy.value) return
   exportBusy.value = true
   try {
-    const projectsData = await collectAllTrash()
+    const { projects: projectsData, failed } = await collectAllTrash()
     if (!projectsData.length) {
       ui.toast('时间胶囊为空，无需导出', 'error')
       return
     }
-    const payload = { exportedAt: nowIso(), version: 1, projects: projectsData }
+    const payload: {
+      exportedAt: string
+      version: number
+      projects: typeof projectsData
+      incomplete?: TrashCollectFailure[]
+    } = { exportedAt: nowIso(), version: 1, projects: projectsData }
+    // 有项目/分片加载失败：仍在 zip 里标记 incomplete（旧版导入端只读 .projects，会忽略该字段，安全）
+    if (failed.length) payload.incomplete = failed
     const zip = new (await loadJSZip())()
     zip.file('data.json', JSON.stringify(payload, null, 2))
     // 附件：逐个下载原始字节写入 zip（attachments/{key}）；单附件失败不中断
@@ -659,12 +690,19 @@ async function exportTrash() {
     a.remove()
     URL.revokeObjectURL(url)
     const count = projectsData.reduce((n, p) => n + p.tasks.length, 0)
+    // 有项目/分片加载失败：仍导出已有数据，但明确警告备份可能不完整（不再静默）
+    const loadWarn = failed.length
+      ? `；${failed.length} 个项目/分片加载失败（${failed.map((f) => f.pid.slice(0, 8)).slice(0, 5).join('、')}${failed.length > 5 ? ' 等' : ''}），备份可能不完整`
+      : ''
     ui.toast(
       failedAtts
-        ? `已导出 ${count} 条时间胶囊记录（${failedAtts} 个附件下载失败）`
-        : `已导出 ${count} 条时间胶囊记录及 ${allAtts.length} 个附件`,
+        ? `已导出 ${count} 条时间胶囊记录${loadWarn}（${failedAtts} 个附件下载失败）`
+        : `已导出 ${count} 条时间胶囊记录及 ${allAtts.length} 个附件${loadWarn}`,
     )
-    logAudit('导出时间胶囊备份', `项目 ${projectsData.length} 个，任务 ${count} 条，附件 ${allAtts.length} 个（失败 ${failedAtts}）`)
+    logAudit(
+      '导出时间胶囊备份',
+      `项目 ${projectsData.length} 个，任务 ${count} 条，附件 ${allAtts.length} 个（失败 ${failedAtts}）${failed.length ? `；${failed.length} 个加载失败：${failed.map((f) => `${f.pid}:${f.reason}`).slice(0, 10).join('、')}` : ''}`,
+    )
   } catch (e) {
     ui.toast((e as Error).message || '导出失败，请检查网络或 OSS 配置', 'error')
   } finally {
@@ -711,6 +749,7 @@ async function onImportFile(e: Event) {
     let touched = 0
     let attOk = 0
     let attFailed = 0
+    let remappedCount = 0
     let profileChanged = false
     for (const p of data.projects) {
       const pid = typeof p?.projectId === 'string' && p.projectId ? p.projectId : UNCATEGORIZED
@@ -743,12 +782,21 @@ async function onImportFile(e: Event) {
           profileChanged = true
         }
       }
-      // 附件：按原 key 把 zip 中的二进制上传回用户 OSS（保持任务 JSON 无需改写）
+      // 附件：把 zip 中的二进制上传回用户 OSS。
+      // 跨账号/换环境导入时，把备份里「导出账号」的附件 key 重映射到当前账号命名空间
+      // （users/<导出账号>/attachments/... → users/<当前账号>/attachments/...），并同步改写任务
+      // JSON 里的 meta.key，保证资源图可见、不与共享桶内其它账号的数据交叉（go-forward，不迁移存量）。
       if (auth.creds) {
         const metas = collectAttachments(list)
         const client = await createOssClient(auth.creds)
         for (const meta of metas) {
-          const blob = attBlobs.get(meta.key)
+          const originalKey = meta.key
+          const remapped = remapAttachmentKey(originalKey, auth.username)
+          if (remapped !== originalKey) {
+            meta.key = remapped
+            remappedCount += 1
+          }
+          const blob = attBlobs.get(originalKey)
           if (!blob) {
             attFailed += 1
             continue
@@ -776,7 +824,10 @@ async function onImportFile(e: Event) {
           ? `已导入 ${count} 条时间胶囊记录（附件 ${attOk} 个成功${attFailed ? `，${attFailed} 个缺失/失败` : ''}）`
           : `已导入 ${count} 条时间胶囊记录`,
       )
-      logAudit('导入时间胶囊备份', `${count} 条，附件 ${attOk} 成功 ${attFailed} 失败`)
+      logAudit(
+        '导入时间胶囊备份',
+        `${count} 条，附件 ${attOk} 成功 ${attFailed} 失败${remappedCount > 0 ? `，重映射附件 ${remappedCount} 个` : ''}`,
+      )
     } else {
       ui.toast('备份文件中没有可导入的任务', 'error')
     }
@@ -790,7 +841,7 @@ async function clearTrash() {
   if (clearBusy.value) return
   clearBusy.value = true
   try {
-    const all = await collectAllTrash()
+    const { projects: all, failed } = await collectAllTrash()
     if (!all.length) {
       ui.toast('时间胶囊已为空')
       clearOpen.value = false
@@ -829,8 +880,12 @@ async function clearTrash() {
     scanIds.value = scanIds.value.filter((pid) => !clearedPids.has(pid))
     for (const pid of clearedPids) delete scanLatest.value[pid]
     if (clearedPids.has(UNCATEGORIZED)) scanHasUncategorized.value = false
-    ui.toast(`已清空时间胶囊（${cleared} 条，清理附件 ${deletedAtts} 个）`)
-    logAudit('清空时间胶囊', `${cleared} 条，附件 ${deletedAtts} 个`)
+    // 有项目/分片加载失败：未加载的部分不会被删除（安全），但提示用户结果不完整、需重试
+    const loadWarn = failed.length
+      ? `；${failed.length} 个项目/分片加载失败未清理，请检查网络后重试`
+      : ''
+    ui.toast(`已清空时间胶囊（${cleared} 条，清理附件 ${deletedAtts} 个）${loadWarn}`)
+    logAudit('清空时间胶囊', `${cleared} 条，附件 ${deletedAtts} 个${failed.length ? `；${failed.length} 个加载失败未清理` : ''}`)
     // 附件删除审计日志（统一行为名「删除附件」，来源=清空时间胶囊）
     if (deletedAtts) {
       logAttachmentDeletion({
