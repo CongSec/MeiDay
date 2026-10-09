@@ -2360,8 +2360,11 @@ export const useTasksStore = defineStore('tasks', {
     softDelete(id: string) {
       const task = this.all.find((t) => t.id === id)
       if (!task) return
-      task.status = task.status === 'completed' ? 'completed' : 'deleted'
-      task.updatedAt = nowIso()
+      // 已完成任务删除进回收站：保留完成时间（updatedAt=完成时间），恢复后不误计为当天完成
+      if (task.status !== 'completed') {
+        task.status = 'deleted'
+        task.updatedAt = nowIso()
+      }
       this.tasks[task.projectId] = this.tasks[task.projectId].filter((t) => t.id !== id)
       this.trash[task.projectId] = mergeUnique(this.trash[task.projectId] ?? [], [task])
       this._persist(task.projectId)
@@ -2442,8 +2445,10 @@ export const useTasksStore = defineStore('tasks', {
       const oldPid = task.projectId
       // 已删除项目的任务恢复时重新归属到有效项目，避免成为刷新后不可见的“孤儿”
       if (toProjectId) task.projectId = toProjectId
-      task.status = task.status === 'completed' ? 'completed' : 'pending'
-      task.updatedAt = nowIso()
+      const completing = task.status === 'completed'
+      task.status = completing ? 'completed' : 'pending'
+      // 已完成任务恢复：保留完成时间（updatedAt），避免恢复后误计为当天完成；仅待办恢复才刷新
+      if (!completing) task.updatedAt = nowIso()
       if (trashPid !== undefined) {
         // 无论目标项目改到哪里，都必须从它原本所在的 trash 键中移除
         const sourcePid = trashPid
@@ -2632,7 +2637,12 @@ export const useTasksStore = defineStore('tasks', {
     /** 项目删除：全部任务（含已有回收站）并入 trash 保留，活跃列表清空 */
     markAllDeleted(projectId: string) {
       const active = this.tasks[projectId] ?? []
-      const moved = active.map((t) => ({ ...t, status: t.status === 'completed' ? 'completed' as const : 'deleted' as const, updatedAt: nowIso() }))
+      // 已完成任务整项目删除：保留完成时间（updatedAt），恢复项目时不误计为当天完成；仅未完成转 deleted 才刷新
+      const moved = active.map((t) =>
+        t.status === 'completed'
+          ? { ...t, status: 'completed' as const }
+          : { ...t, status: 'deleted' as const, updatedAt: nowIso() },
+      )
       this.trash[projectId] = mergeUnique(this.trash[projectId] ?? [], moved)
       this.tasks[projectId] = []
       // 项目归档进回收站：其重复模板一并删除，周期提醒停止（恢复项目时任务重新承担）
@@ -2643,14 +2653,29 @@ export const useTasksStore = defineStore('tasks', {
       this._persist(projectId)
       this._persistTrash(projectId)
     },
-    /** 整项目恢复：把该项目回收站里的全部任务还原为活跃任务（状态置回 pending），
-     *  并删除该项目全部回收站分片文件（含旧版 trash.json），使其从回收站扫描结果中消失 */
+    /** 整项目恢复：未完成任务还原为活跃待办；今天完成的回到活跃“已完成”；历史完成的留在回收站/时间胶囊
+     *  （三者的完成时间 updatedAt 一律保留，恢复后不会误计为“今天完成”）。
+     *  回收站分片只保留归档记录，删除其余分片文件（含旧版 trash.json），使项目从“已删除项目”扫描结果中消失 */
     async restoreProjectTasks(projectId: string) {
       const deleted = this.trash[projectId] ?? []
       // 先删物理分片（含未加载的旧月份），再清内存，避免刷新后旧分片残留
       await this.purgeTrashFiles(projectId)
       if (deleted.length) {
-        const restored = deleted.map((t) => ({ ...t, status: t.status === 'completed' ? 'completed' as const : 'pending' as const, updatedAt: nowIso() }))
+        const today = todayKey()
+        // 分流恢复，避免历史完成的任务被误计为“今天完成”：
+        // - 未完成（deleted）→ 待办，刷新 updatedAt；
+        // - 今天完成的 → 回到活跃“已完成”，保留完成时间（updatedAt）；
+        // - 历史完成的 → 留在回收站/时间胶囊（保留完成时间，恢复后立即按原日期归档，不污染今日统计）
+        const restored: Task[] = []
+        const archived: Task[] = []
+        for (const t of deleted) {
+          if (t.status === 'completed') {
+            if (dateKeyOf(t.updatedAt) === today) restored.push({ ...t, status: 'completed' as const })
+            else archived.push({ ...t, status: 'completed' as const })
+          } else {
+            restored.push({ ...t, status: 'pending' as const, updatedAt: nowIso() })
+          }
+        }
         // 恢复的重复任务由任务自己承担后续周期：删除其重复模板，避免与模板重复生成/重复提醒
         const ids = new Set(deleted.map((t) => t.id))
         const masters = this.repeats[projectId] ?? []
@@ -2659,24 +2684,34 @@ export const useTasksStore = defineStore('tasks', {
           this._persistRepeats(projectId)
         }
         this.tasks[projectId] = sortActiveList(mergeUnique(this.tasks[projectId] ?? [], restored))
-        this.trash[projectId] = []
+        // purgeTrashFiles 已清空内存回收站：这里只写回“历史完成”的归档记录
+        this.trash[projectId] = archived
         this._persist(projectId)
         this._persistTrash(projectId, true)
       }
     },
-    /** 重名合并：把已删除项目的活跃+回收站任务并入同名现有项目（回收站任务还原为活跃），
-     *  并删除旧项目全部回收站分片文件 */
+    /** 重名合并：把已删除项目的活跃+回收站任务并入同名现有项目（未完成/今天完成的回收站任务还原为活跃，
+     *  历史完成的保留在目标项目回收站/时间胶囊），并删除旧项目全部回收站分片文件 */
     async mergeProjectInto(fromId: string, toId: string) {
       const active = (this.tasks[fromId] ?? []).map((t) => ({ ...t, projectId: toId }))
-      const deleted = (this.trash[fromId] ?? []).map((t) => ({
-        ...t,
-        projectId: toId,
-        status: t.status === 'completed' ? 'completed' as const : 'pending' as const,
-        updatedAt: nowIso(),
-      }))
-      this.tasks[toId] = sortActiveList(mergeUnique(this.tasks[toId] ?? [], [...active, ...deleted]))
+      // 与恢复项目同规则分流：未完成 → 待办（刷新 updatedAt）；今天完成的 → 活跃“已完成”（保留完成时间）；
+      // 历史完成的 → 目标项目回收站/时间胶囊（保留完成时间，避免误计为当天完成）
+      const today = todayKey()
+      const restored: Task[] = []
+      const archived: Task[] = []
+      for (const t of this.trash[fromId] ?? []) {
+        const base = { ...t, projectId: toId }
+        if (t.status === 'completed') {
+          if (dateKeyOf(t.updatedAt) === today) restored.push({ ...base, status: 'completed' as const })
+          else archived.push({ ...base, status: 'completed' as const })
+        } else {
+          restored.push({ ...base, status: 'pending' as const, updatedAt: nowIso() })
+        }
+      }
+      this.tasks[toId] = sortActiveList(mergeUnique(this.tasks[toId] ?? [], [...active, ...restored]))
       this.tasks[fromId] = []
       this.trash[fromId] = []
+      this.trash[toId] = mergeUnique(this.trash[toId] ?? [], archived)
       await this.purgeTrashFiles(fromId)
       // 重名合并：重复模板随项目一并合并到目标项目
       const fromMasters = this.repeats[fromId] ?? []
@@ -2692,6 +2727,7 @@ export const useTasksStore = defineStore('tasks', {
       this._persist(toId)
       this._persist(fromId)
       this._persistTrash(fromId)
+      if (archived.length) this._persistTrash(toId, true)
     },
     /**
      * 确认式保存任务：先并入内存，立即写入 OSS，全部成功才返回 true（调用方据此弹成功提示）；

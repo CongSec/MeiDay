@@ -1,8 +1,6 @@
 # ============================================================
 # MeiDay 后端镜像自动构建并推送到阿里云 ACR（个人版）
-# - push 到 main        → 推送 latest + 短 commit 号
-# - 打 v* 标签（如 v1.0.0）→ 推送 v1.0.0 + 1.0.0
-# - 可手动触发（workflow_dispatch）
+# - 手动触发（workflow_dispatch）→ 推送 latest + 短 commit 号
 # 需要仓库配置两个 Actions Secret：
 #   ACR_USERNAME = 阿里云账号全名（本例 aliyun0134115558）
 #   ACR_PASSWORD = 容器镜像服务 → 访问凭证 → 固定密码
@@ -10,11 +8,6 @@
 name: Build & Push to Aliyun ACR
 
 on:
-  push:
-    branches:
-      - main
-    tags:
-      - 'v*'
   workflow_dispatch:
 
 env:

@@ -128,8 +128,11 @@ async function pollOnce(): Promise<boolean> {
     const reported = await flushPendingSyncReports(auth.username)
     let cur = await loadVersion(auth.username)
     if (reported !== undefined && reported > cur) cur = reported
-    // 2) 查询服务端版本与变更
-    const state = await api.getSyncState(cur)
+    // 2) 查询服务端版本与变更；同时并行查一次未读公告（公告失败不影响同步退避）
+    const [state, ann] = await Promise.all([
+      api.getSyncState(cur),
+      api.getUnreadAnnouncements().catch(() => null),
+    ])
     let pulledAll = true
     let cursor = cur
     if (state.full_sync) {
@@ -154,6 +157,11 @@ async function pollOnce(): Promise<boolean> {
     }
     // 3) 只有全部拉取成功才推进本地版本游标；失败则不推进，下一轮重试失败资源
     if (pulledAll) await saveVersion(auth.username, cursor)
+    // 4) 有未读公告时派发事件，通知主界面弹窗（弹窗中用户逐条阅读时由主界面去重，
+    //    避免正在看的公告被打断；弹完后下一轮轮询自动接上新的未读）
+    if (ann && ann.items.length) {
+      window.dispatchEvent(new CustomEvent('st:announcements', { detail: ann.items }))
+    }
     return true
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) {

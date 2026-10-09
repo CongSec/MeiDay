@@ -14,6 +14,7 @@ from .audit import action_label, client_ip, log_action
 from .auth import username_from_token
 from .db import init_db
 from .routes import auth as auth_routes
+from .routes import announcements as announcements_routes
 from .routes import callback as callback_routes
 from .routes import captcha as captcha_routes
 from .routes import credentials as cred_routes
@@ -149,6 +150,7 @@ async def audit_middleware(request: Request, call_next):
 
 
 app.include_router(auth_routes.router)
+app.include_router(announcements_routes.router)
 app.include_router(captcha_routes.router)
 app.include_router(cred_routes.router)
 app.include_router(logs_routes.router)

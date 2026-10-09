@@ -15,6 +15,8 @@ import { useSync } from '@/composables/useSync'
 import { startSyncPoll, stopSyncPoll } from '@/composables/useSyncPoll'
 import { isNativeRuntime } from '@/utils/oss'
 import { ensureLegalCalendar } from '@/utils/legalWorkday'
+import { api, type AnnouncementItem } from '@/api/client'
+import AnnouncementModal from '@/components/AnnouncementModal.vue'
 import type { Task } from '@/types'
 
 const auth = useAuthStore()
@@ -233,6 +235,7 @@ onUnmounted(() => {
   document.removeEventListener('touchstart', onDrawerTouchStart)
   document.removeEventListener('touchmove', onDrawerTouchMove)
   document.removeEventListener('touchend', onDrawerTouchEnd)
+  window.removeEventListener('st:announcements', onAnnouncementsEvent)
   // 离开主界面（登出/跳登录）即停止同步轮询
   stopSyncPoll()
 })
@@ -241,6 +244,8 @@ onMounted(async () => {
   document.addEventListener('touchstart', onDrawerTouchStart, { passive: false })
   document.addEventListener('touchmove', onDrawerTouchMove, { passive: false })
   document.addEventListener('touchend', onDrawerTouchEnd, { passive: true })
+  // 在线期间新公告：由同步轮询（useSyncPoll）每 2 秒查询后派发事件驱动弹窗
+  window.addEventListener('st:announcements', onAnnouncementsEvent)
   if (auth.token && !auth.userKey) {
     try {
       const me = await auth.fetchMe()
@@ -267,6 +272,61 @@ async function bootstrap() {
   // 预取今年/明年的法定节假日安排（重复任务「每个法定工作日」用），失败静默走内置兜底
   void ensureLegalCalendar(new Date().getFullYear())
   void ensureLegalCalendar(new Date().getFullYear() + 1)
+  // 中心公告：登录后拉取未读公告，逐条弹窗（失败静默，不阻塞进入主界面）
+  void checkAnnouncements()
+}
+
+/** ---- 中心公告：登录后逐条弹窗 ---- */
+const unreadAnn = ref<AnnouncementItem[]>([])
+const annIndex = ref(0)
+const annVisible = ref(false)
+const annBusy = ref(false)
+
+/** 展示一批未读公告（id 升序）。正在逐条弹窗中时不打断：用户看完当前一批后，
+ *  下一轮同步轮询会再次派发事件，自动接上剩余/新增的未读。 */
+function showAnnouncements(items: AnnouncementItem[]) {
+  if (annVisible.value) return
+  if (!items.length) return
+  unreadAnn.value = items
+  annIndex.value = 0
+  annVisible.value = true
+}
+
+async function checkAnnouncements() {
+  try {
+    const { items } = await api.getUnreadAnnouncements()
+    showAnnouncements(items)
+  } catch {
+    /* 公告拉取失败静默：不阻塞用户进入主界面 */
+  }
+}
+
+/** 同步轮询发现新公告时派发的事件（useSyncPoll 每 2 秒查询一次） */
+function onAnnouncementsEvent(e: Event) {
+  const detail = (e as CustomEvent<AnnouncementItem[]>).detail
+  if (Array.isArray(detail)) showAnnouncements(detail)
+}
+
+/** 当前弹窗的公告（由模板按 annIndex 取） */
+const currentAnnouncement = computed(() => unreadAnn.value[annIndex.value])
+
+async function onAnnRead() {
+  if (annBusy.value) return
+  const cur = currentAnnouncement.value
+  if (!cur) return
+  annBusy.value = true
+  try {
+    await api.markAnnouncementRead(cur.id)
+  } catch {
+    /* 已读标记失败静默：本地照常推进，避免卡住用户 */
+  } finally {
+    annBusy.value = false
+  }
+  if (annIndex.value < unreadAnn.value.length - 1) {
+    annIndex.value++
+  } else {
+    annVisible.value = false
+  }
 }
 
 async function onUnlock() {
@@ -399,6 +459,14 @@ async function onImported(list: Task[]) {
 
     <ProjectModal v-model:open="projectModalOpen" />
     <ImportModal v-model:open="importModalOpen" @imported="onImported" />
+
+    <!-- 中心公告：登录后逐条弹未读公告，全部看完才消失 -->
+    <AnnouncementModal
+      v-if="annVisible && currentAnnouncement"
+      :title="currentAnnouncement.title"
+      :content="currentAnnouncement.content"
+      @read="onAnnRead"
+    />
 
 
     <div v-if="ui.ossError" class="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-sm flex items-center justify-center px-4">

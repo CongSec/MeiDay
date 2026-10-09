@@ -384,6 +384,22 @@ export const api = {
   refreshCallbackId() {
     return request<CallbackInfo>('POST', '/api/callback/refresh')
   },
+  /** 中心公告：拉取当前登录用户的未读公告列表（id 升序，旧→新，供逐条弹窗） */
+  getUnreadAnnouncements() {
+    return request<{ items: AnnouncementItem[] }>('GET', '/api/announcements/unread')
+  },
+  /** 中心公告：把已读游标推进到 announcement_id（只前进不后退，多设备同步） */
+  markAnnouncementRead(announcementId: number) {
+    return request<{ ok: true }>('POST', '/api/announcements/read', { announcement_id: announcementId })
+  },
+}
+
+/** 中心公告条目（纯文本标题+内容，无 Markdown 渲染） */
+export interface AnnouncementItem {
+  id: number
+  title: string
+  content: string
+  created_at: string
 }
 
 /** 消息通知回调信息 */

@@ -90,8 +90,11 @@ def register(body: RegisterRequest, request: Request = None):
             raise HTTPException(status_code=409, detail="用户名已存在")
         try:
             # 存储 argon2(SHA-256(password))：明文密码不落地、不传输
+            # 公告已读游标 last_seen_announcement_id 初始化为“当前最新公告 id”：
+            # 新用户不弹注册前的历史公告，只弹此后新发布的公告（与存量用户迁移口径一致）。
             conn.execute(
-                "INSERT INTO users (username, argon2_hash, salt, encrypted_creds, auth_version) VALUES (?,?,?,?,?)",
+                "INSERT INTO users (username, argon2_hash, salt, encrypted_creds, auth_version, last_seen_announcement_id) "
+                "VALUES (?,?,?,?,?, COALESCE((SELECT MAX(id) FROM announcements), 0))",
                 (username, hash_verifier(body.passwordHash), username, body.encrypted_creds, 1),
             )
             if body.smtp_plain and body.smtp_plain.smtp_user and body.smtp_plain.smtp_pass and body.smtp_plain.notify_email:

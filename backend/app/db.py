@@ -136,6 +136,14 @@ CREATE TABLE IF NOT EXISTS sync_changes (
     project_id TEXT,
     ts TEXT NOT NULL
 );
+-- 中心公告：管理员通过发布脚本（publish.py）直接写入，用户登录后弹窗展示。
+-- 纯文本标题+内容，不做 Markdown 渲染；用户已读状态走 users.last_seen_announcement_id 游标。
+CREATE TABLE IF NOT EXISTS announcements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 -- 提醒 worker 每 60 秒轮询未发送提醒（is_reminded=0）：联合索引避免大表全表扫描
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(is_reminded, reminder_time);
 CREATE INDEX IF NOT EXISTS idx_sync_changes_user ON sync_changes(username, id);
@@ -280,6 +288,34 @@ def _migrate_smtp_callback_id(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE smtp_creds ADD COLUMN callback_id TEXT")
 
 
+def _migrate_users_last_seen(conn: sqlite3.Connection) -> None:
+    """旧库 users 表没有 last_seen_announcement_id 列，启动时补齐（公告已读游标）。
+
+    已读游标 = 用户已读到哪条公告（公告 id 单调递增），
+    /api/announcements/unread 只返回 id 大于游标的公告。
+    游标初始化为“当前最新公告 id”：存量用户不弹历史公告，只弹此后新发布的公告；
+    新注册用户在注册时同样初始化为当时的最新公告 id（见 routes/auth.py），
+    因此新用户也不弹注册前的历史公告。
+    """
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
+    if "last_seen_announcement_id" in cols:
+        return
+    conn.execute(
+        "ALTER TABLE users ADD COLUMN last_seen_announcement_id INTEGER NOT NULL DEFAULT 0"
+    )
+    # 仅首次启用公告功能时执行一次：把游标为 0 的存量用户统一推进到
+    # “当前最新公告 id”，避免老用户一登录就被历史公告刷屏（与“新用户不弹历史公告”口径一致）。
+    # 注意：此推进只在“加列”那一刻执行，之后每次启动都不再动游标，
+    # 否则发布公告后服务器重启会把未登录用户的游标误推进，吞掉新公告。
+    max_id = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) FROM announcements"
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE users SET last_seen_announcement_id=? WHERE last_seen_announcement_id=0",
+        (max_id,),
+    )
+
+
 def init_db() -> None:
     with get_conn() as conn:
         conn.executescript(SCHEMA)
@@ -290,6 +326,7 @@ def init_db() -> None:
         _migrate_users_v2(conn)
         _migrate_notify_prefs_diary(conn)
         _migrate_smtp_callback_id(conn)
+        _migrate_users_last_seen(conn)
         # 登录成功通知默认开启、查看密钥通知不可关闭：强制存量行也置为开启
         conn.execute("UPDATE notify_prefs SET login_success=1, key_view=1")
         # 清理已删除用户遗留的孤儿提醒数据（可能来自外键关闭时期写入的旧库），

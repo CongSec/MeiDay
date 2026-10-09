@@ -1,5 +1,5 @@
 # ============================================================
-# MeiDay 仓库：每次 push 到 main 自动构建 3 个产物并发布到 GitHub Release
+# MeiDay 仓库：手动触发时构建 3 个产物并发布到 GitHub Release
 #   - MeiDay.apk       （免签名 debug 版，Capacitor/Android）
 #   - MeiDay.exe       （Windows 桌面小组件，PyInstaller）
 #   - package.zip      （思源笔记插件包，内嵌本仓库前端）
@@ -10,9 +10,6 @@
 name: Build & Release (exe/apk/plugin)
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       version:
