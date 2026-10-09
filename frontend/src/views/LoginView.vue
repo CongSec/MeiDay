@@ -22,6 +22,9 @@ import {
 const auth = useAuthStore()
 const router = useRouter()
 
+/** 开发模式标记：登录页用于提示“未选择服务器时请求走 dev 同源代理” */
+const isDev = import.meta.env.DEV
+
 const mode = ref<'login' | 'register'>('login')
 const username = ref('')
 const password = ref('')
@@ -65,7 +68,8 @@ async function onAddServer() {
   serverBusy.value = true
   try {
     // HTTPS 网页端访问 http:// 地址会被浏览器「混合内容」策略硬拦截，直接给出明确提示
-    if (isMixedContentBlocked(url)) {
+    const mixedBlocked = isMixedContentBlocked(url)
+    if (mixedBlocked) {
       if (!window.confirm('当前网页是 HTTPS，浏览器会拦截对 http:// 地址的请求（混合内容限制），该地址在网页端无法使用。建议给服务器启用 HTTPS，或在 APP / 桌面小组件 / 思源插件中使用。仍要保存吗？')) {
         return
       }
@@ -78,7 +82,16 @@ async function onAddServer() {
     addServer(url)
     refreshServers()
     newServerUrl.value = ''
-    ui.toast('服务器地址已保存')
+    // 保存成功后直接激活该地址，避免“填了却没生效、流量仍走默认代理”的困惑；
+    // 被混合内容拦截的地址（生产网页端的 http:// 服务器）只保存不激活，因为激活了也无法使用
+    if (!mixedBlocked && url !== activeServer.value) {
+      setActiveServer(url)
+      activeServer.value = url
+      auth.reset()
+      ui.toast(`已切换到 ${url}，请重新登录`, 'error')
+    } else {
+      ui.toast('服务器地址已保存')
+    }
   } finally {
     serverBusy.value = false
   }
@@ -230,6 +243,9 @@ async function submit() {
               ✕
             </button>
           </label>
+        </div>
+        <div v-if="isDev && !activeServer" class="mt-1.5 text-[11px] leading-snug text-slate-400">
+          开发模式：未选择服务器时请求走 dev 同源代理（vite /api → 本地后端 127.0.0.1:8000）。点选上方地址即可真正切换后端。
         </div>
         <div class="mt-2 flex gap-2">
           <input

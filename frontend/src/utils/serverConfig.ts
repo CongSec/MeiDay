@@ -12,6 +12,19 @@ const OFFICIAL_SERVER = 'https://task.congsec.cn'
 /** 构建时注入的默认地址：生产构建（APP/插件/小组件）= 官方；开发模式为空 = 走同源代理 */
 const BUILTIN_SERVER = ((import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '').trim().replace(/\/+$/, '')
 
+/** 开发环境同源代理桥前缀：vite dev 中间件把 /__api/<base> 转发到目标后端 */
+const DEV_PROXY_PREFIX = '/__api/'
+
+/**
+ * 开发模式（import.meta.env.DEV）下，把外部 http(s) 服务器地址改写为 dev 代理同源路径。
+ * 浏览器因此只发同源请求，绕开「HTTPS 页面请求 http:// 局域网」的混合内容硬拦截与跨域 CORS 限制，
+ * 且与页面来源无关（localhost / 局域网 IP / 手机）。生产构建不启用，行为保持原样（直连 + CORS）。
+ */
+export function devProxyBase(base: string): string {
+  if (!import.meta.env.DEV || !/^https?:\/\//.test(base)) return base
+  return `${DEV_PROXY_PREFIX}${encodeURIComponent(base)}`
+}
+
 export const SERVERS_KEY = 'st_servers'
 export const ACTIVE_KEY = 'st_server_active'
 
@@ -90,6 +103,9 @@ export function getActiveServer(): string {
   } catch {
     /* ignore */
   }
+  // 开发模式未选中任何服务器时，请求默认走同源代理（本地后端），UI 不应冒充官方地址为“当前”，
+  // 如实返回空串，由界面提示“本地开发/同源代理”。生产构建仍回退官方地址。
+  if (import.meta.env.DEV) return ''
   return BUILTIN_SERVER || OFFICIAL_SERVER
 }
 
@@ -107,6 +123,17 @@ export function setActiveServer(raw: string): void {
 
 /** 运行时 API 基址：自定义 active > 构建默认；开发模式为空 = 同源代理 */
 export function getApiBase(): string {
+  try {
+    const active = localStorage.getItem(ACTIVE_KEY)
+    if (active) return devProxyBase(active)
+  } catch {
+    /* ignore */
+  }
+  return devProxyBase(BUILTIN_SERVER)
+}
+
+/** 未套 dev 代理桥的原始基址（仅用于界面展示真实地址，如设置页回调 URL 示例） */
+export function getRawApiBase(): string {
   try {
     const active = localStorage.getItem(ACTIVE_KEY)
     if (active) return active
@@ -133,7 +160,7 @@ async function probeOnce(base: string, timeoutMs: number): Promise<{ reachable: 
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), timeoutMs)
   try {
-    const res = await fetch(`${base}/api/health`, { signal: ctrl.signal, cache: 'no-store' })
+    const res = await fetch(`${devProxyBase(base)}/api/health`, { signal: ctrl.signal, cache: 'no-store' })
     return { reachable: true, status: res.status }
   } catch (e) {
     if (e instanceof Error && e.name === 'AbortError') return { reachable: false, aborted: true }
@@ -161,7 +188,7 @@ export async function checkServerHealth(raw: string, timeoutMs = 6000): Promise<
     const ctrl = new AbortController()
     const timer = setTimeout(() => ctrl.abort(), Math.min(4000, timeoutMs))
     try {
-      await fetch(`${base}/api/health`, { mode: 'no-cors', signal: ctrl.signal, cache: 'no-store' })
+      await fetch(`${devProxyBase(base)}/api/health`, { mode: 'no-cors', signal: ctrl.signal, cache: 'no-store' })
       return { ok: false, kind: 'cors', detail: 'reachable-but-cors' }
     } finally {
       clearTimeout(timer)
@@ -229,6 +256,8 @@ export function seedFromParentConfig(): void {
  *  思源插件（/挂件）把 MeiDay 前端以 iframe 内嵌，iframe 内不存在浏览器「混合内容」硬拦截，
  *  http:// 地址在插件端实测可用，因此 iframe 环境（非顶层网页）一律不弹「网页端限制」警告。 */
 export function isMixedContentBlocked(target: string): boolean {
+  // 开发模式由 dev 代理桥把请求改写为同源路径，不再受浏览器混合内容限制，直接放行
+  if (import.meta.env.DEV) return false
   try {
     if (typeof window === 'undefined' || window.location.protocol !== 'https:') return false
     const cap = (window as unknown as { Capacitor?: { isNativePlatform?: () => boolean } }).Capacitor

@@ -10,7 +10,7 @@ import { api } from '@/api/client'
 import type { NotifyPrefs } from '@/api/client'
 import { logAudit, safeDetail } from '@/utils/audit'
 import { hintFromDiag } from '@/utils/ossDiag'
-import { getApiBase } from '@/utils/serverConfig'
+import { getRawApiBase } from '@/utils/serverConfig'
 import type { CredFields } from '@/types'
 
 const auth = useAuthStore()
@@ -86,8 +86,9 @@ async function refreshCallbackId() {
 }
 
 const callbackUrl = computed(() => {
+  // 用未代理的原始基址展示真实后端地址（dev 代理桥路径只对内部请求有意义）
   const base =
-    getApiBase() || (typeof window !== 'undefined' ? window.location.origin : '')
+    getRawApiBase() || (typeof window !== 'undefined' ? window.location.origin : '')
   return callbackId.value && base ? `${base}/api/callback?id=${callbackId.value}` : ''
 })
 
