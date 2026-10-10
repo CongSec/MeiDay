@@ -324,6 +324,9 @@ async function fetchRemoteTrash(client: OssClient, username: string, projectId: 
 /** 旧版 projects/{pid}/trash.json 迁移：检测到旧文件且 trash/ 目录内无分片时，按 updatedAt 拆月写入分片，
  *  全部成功后才删除旧文件；失败/网络异常保留旧文件下次重试。迁移完成标记存 IDB，避免每次打开重复检查。 */
 async function migrateLegacyTrash(client: OssClient, username: string, projectId: string): Promise<void> {
+  // 空用户名（凭证已就绪但会话用户名尚未就绪的竞态窗口 / 旧版本残留）必须直接跳过：
+  // 否则会把旧文件拆分成 users//projects/... 的空用户名分片（历史“空文件夹”数据的直接来源）
+  if (!username) return
   const flagKey = `trashMigrated:${username}:${projectId}`
   // 未分类回收站只有 today_trash.json，不存在旧版 projects//trash.json，跳过旧回收站迁移
   if (projectId === UNCATEGORIZED) return
@@ -524,7 +527,7 @@ export const useTasksStore = defineStore('tasks', {
           void this._persistTrash(projectId, true)
         }
       }
-      if (!auth.creds) {
+      if (!auth.creds || !auth.username) {
         await this.sweepCompleted(projectId)
         return
       }
@@ -634,7 +637,7 @@ export const useTasksStore = defineStore('tasks', {
       const cacheKey = todayOrderCacheKey(auth.username)
       const cached = await idbGet<{ ids?: string[] }>('kv', cacheKey)
       if (Array.isArray(cached?.ids)) this.todayOrder = cached.ids
-      if (!auth.creds) return
+      if (!auth.creds || !auth.username) return
       try {
         const client = await createOssClient(auth.creds)
         const etagKey = todayOrderEtagKey(auth.username)
@@ -771,7 +774,7 @@ export const useTasksStore = defineStore('tasks', {
           this.trashLoadedMonths[projectId] = [...months].sort()
         }
       }
-      if (!auth.creds) {
+      if (!auth.creds || !auth.username) {
         if (!this.trashLoaded.includes(projectId)) this.trashLoaded.push(projectId)
         return
       }
@@ -1463,6 +1466,8 @@ export const useTasksStore = defineStore('tasks', {
       month: string | undefined,
       list: Task[],
     ): Promise<{ ok: boolean; merged: Task[] }> {
+      // 纵深防御：空用户名绝不写盘，否则会生成 users//projects/... 的空用户名键
+      if (!username) return { ok: false, merged: list }
       const key = trashFilePath(username, projectId, month)
       const etagKey = `etag:${username}:${projectId}:trash${month ? `:${month}` : ''}`
       const cacheKey = trashCacheKey(username, projectId, month)
@@ -1642,7 +1647,7 @@ export const useTasksStore = defineStore('tasks', {
       if (this.repeatsLoaded.includes(projectId)) return
       const cached = await idbGet<RepeatMaster[]>('repeats', repeatsCacheKey(auth.username, projectId))
       if (cached) this.repeats[projectId] = cached
-      if (!auth.creds) return
+      if (!auth.creds || !auth.username) return
       const etagKey = `etag:${auth.username}:${projectId}:repeats`
       const lmKey = lmKeyOf(etagKey)
       try {

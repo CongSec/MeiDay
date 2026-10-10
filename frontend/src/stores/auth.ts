@@ -29,6 +29,11 @@ export const useAuthStore = defineStore('auth', {
       this.token = r.sessionToken
       setToken(r.sessionToken)
       this.userKey = await deriveUserKey(password, username)
+      // 关键修复：先落用户名，再尝试解密 OSS 凭证。否则在 decryptCreds 完成、
+      // fetchMe 尚未返回之间，会出现“creds 已就绪但 username 为空串”的窗口，
+      // 此刻任何回收站/任务保存都会写出 users//projects/... 的空用户名键
+      // （历史上 OSS 里“空文件夹”的直接来源）。fetchMe 随后会用服务端确认的用户名覆盖。
+      this.username = username
       // 尝试解密 OSS 凭证：失败（旧密码/凭证损坏等）不再中断登录，否则会把用户
       // 锁在登录页却只显示莫名的“操作失败”。失败时置空 creds 并提示重新配置。
       this.credError = ''
@@ -95,6 +100,9 @@ export const useAuthStore = defineStore('auth', {
     },
     async saveCredentials(fields: CredFields) {
       if (!this.userKey) throw new Error('会话密钥缺失，请重新登录')
+      // 修复：用户名缺失（异常会话）时拒绝保存凭证——防止在 username 为空的情况下
+      // 出现“creds 已就绪但 username 为空串”的幽灵状态，后续任何写入都会落到 users// 空用户名命名空间
+      if (!this.username) throw new Error('会话用户名缺失，请重新登录后再配置 OSS')
       const encrypted = await encryptCreds(this.userKey, fields)
       // 发件邮箱 / SMTP 授权码 / 收件邮箱可留空：必须始终携带 smtp_plain（含空字符串），
       // 后端才能区分“未配置邮件”（全空 → 清除旧 SMTP 配置）与“未提交该字段”（null → 不动）。
@@ -112,7 +120,10 @@ export const useAuthStore = defineStore('auth', {
       // 先落盘未保存变更，再清空内存从 OSS 重新加载，避免改完凭证即丢未保存任务（BUG-21）
       const { useProjectsStore } = await import('./projects')
       const { useTasksStore } = await import('./tasks')
-      await Promise.allSettled([useTasksStore().flushAll(), useProjectsStore().flushProfile()])
+      // 修复：用户名缺失（异常会话）时跳过刷盘——此时落盘只会写进 users// 空用户名命名空间
+      if (this.username) {
+        await Promise.allSettled([useTasksStore().flushAll(), useProjectsStore().flushProfile()])
+      }
       useProjectsStore().resetAll()
       useTasksStore().resetAll()
     },
