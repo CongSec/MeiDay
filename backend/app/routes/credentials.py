@@ -157,7 +157,30 @@ def sync_reminders(body: RemindersSyncRequest, username: str = Depends(get_usern
                     is_reminded = prev["is_reminded"]
                 else:
                     rt = _parse_reminder_time(task.reminderTime)
-                    if rt is not None and rt <= now:
+                    # BUG-34 纵深防御（覆盖所有客户端 / 旧数据）：指定日期(dates)重复任务，
+                    # 若同步上来的提醒日期不在日期列表内（例如编辑日期列表删掉了当天后，
+                    # 旧客户端/旧版本仍把“当天 15:00”同步上来），直接注册会让提醒钉在
+                    # 非重复日上到点照发。这里把“未来但日期非法”的提醒推进到列表中的下一次
+                    # （保时刻）；日期合法或已过期的由下方分支统一处理。
+                    if (
+                        rt is not None
+                        and rt > now
+                        and task.repeatRule
+                        and task.repeatRule.get("type") == "dates"
+                        and task.reminderTime[:10] not in {str(d) for d in (task.repeatRule.get("dates") or [])}
+                    ):
+                        dates = sorted({str(d) for d in (task.repeatRule.get("dates") or [])})
+                        nxt_date = next((d for d in dates if d > task.reminderTime[:10]), None)
+                        if nxt_date is None:
+                            # 日期列表已无可推进项：不注册该提醒行
+                            continue
+                        offset = diff_days_key(task.reminderTime[:10], nxt_date)
+                        reminder_time = add_days(task.reminderTime, offset)
+                        if task.startTime:
+                            start_time = add_days(task.startTime, offset)
+                        if task.endTime:
+                            end_time = add_days(task.endTime, offset)
+                    elif rt is not None and rt <= now:
                         # 提醒时间已过（新建时设到过去 / 改成过去）：按规则推进到
                         # 下一个未来时间点，避免刚同步进来就立刻发一封过期邮件。
                         nxt = None

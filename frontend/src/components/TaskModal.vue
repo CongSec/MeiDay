@@ -11,7 +11,7 @@ import { cancelSessionUploads, cancelUploadByMetaId, commitUploads, enqueueUploa
 import AttachmentPreviewModal from './AttachmentPreviewModal.vue'
 import { logAttachmentDeletion } from '@/utils/audit'
 import { ensureLegalCalendar } from '@/utils/legalWorkday'
-import { currentOrNextOccurrence, firstOccurrenceDate, isNewStyleRepeat, repeatShapeEquals } from '@/utils/repeat'
+import { currentOrNextOccurrence, firstOccurrenceDate, isNewStyleRepeat, isRepeatDay, repeatShapeEquals } from '@/utils/repeat'
 import { REPEAT_TYPES } from '@/types'
 import type { AttachmentMeta, RepeatRule, RepeatType, Subtask, Task } from '@/types'
 import AppIcon from '@/components/AppIcon.vue'
@@ -724,14 +724,22 @@ async function submit() {
     }
   }
   // 提醒时间：新模型只保留时分，日期取“当前/下一次重复日”（相位以 rule.start 为准）
-  // 编辑已有任务时沿用原任务日期（reminderTime/startTime/endTime），绝不把提醒拉回今天，
+  // 编辑已有任务时默认沿用原任务日期（reminderTime/startTime/endTime），绝不把提醒拉回今天，
   // 否则完成态源任务 / 未来模板编辑会被「今天」参与生成重复任务；仅新建任务才取今天/下一次重复日。
+  // 例外（BUG-34）：若旧日期已不在新规则的出现日里——例如「指定日期」列表删掉了当天、
+  // 或规则被整体修改——继续沿用会让提醒时间钉在已删除/已过期的日期上（表现为：改日期列表
+  // 后仍按旧日期提醒；改提醒时间时提交“旧日期+新时分”被服务器回退保护丢弃）。此时重新锚定
+  // 到“今天或下一次重复日”，保证提醒只落在新规则的有效重复日上。
   let reminderTime: string | null = null
   if (reminder.value) {
     if (isNewModel && repeat) {
-      const occDate = props.task
-        ? (dateKeyOf(props.task.reminderTime || props.task.startTime || props.task.endTime) || repeat.start || todayKey())
-        : currentOrNextOccurrence(repeat, repeat.start ?? todayKey(), todayKey())
+      let occDate = props.task
+        ? (dateKeyOf(props.task.reminderTime || props.task.startTime || props.task.endTime) || '')
+        : ''
+      const start = repeat.start ?? todayKey()
+      if (!occDate || !(repeat.start && isRepeatDay(repeat, repeat.start, occDate))) {
+        occDate = currentOrNextOccurrence(repeat, start, todayKey())
+      }
       reminderTime = fromLocalInput(`${occDate}T${reminder.value}`)
     } else {
       // 兼容从重复模式切回遗留的纯时分值：补当天日期，避免存非法 ISO
