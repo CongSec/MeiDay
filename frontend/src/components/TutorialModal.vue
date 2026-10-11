@@ -107,11 +107,12 @@ function codeLine() {
               框框内分别填写
               <code class="rounded bg-slate-100 px-1 py-0.5 text-xs font-mono">https://task.congsec.cn</code>、
               <code class="rounded bg-slate-100 px-1 py-0.5 text-xs font-mono">https://localhost</code>、
+			  <code class="rounded bg-slate-100 px-1 py-0.5 text-xs font-mono">http://127.0.0.1:5173</code>、
               <code class="rounded bg-slate-100 px-1 py-0.5 text-xs font-mono">*</code>、
               <code class="rounded bg-slate-100 px-1 py-0.5 text-xs font-mono">Etag</code>
               这四个字段，再者记得勾选请求方式（也就是图中第四步）。
             </p>
-            <TutorialImage src="https://congsec.oss-cn-beijing.aliyuncs.com/tuhcuanchajian/image-20260828073139-2ugq2xr.png" alt="设置跨域" />
+            <TutorialImage src="http://congsec.oss-cn-beijing.aliyuncs.com/congsec/siyuan-assets/image-20261011082347-ylrmaq7.png" alt="设置跨域" />
           </section>
 
           <section class="space-y-3 rounded-xl bg-slate-50 border border-slate-100 p-4">
