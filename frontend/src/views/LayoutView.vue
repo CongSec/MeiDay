@@ -267,13 +267,12 @@ async function bootstrap() {
   await tasks.loadFromIdb([...projects.projects.map((p) => p.id)])
   // 今日任务跨项目顺序表：先从本地缓存恢复（不访问 OSS），再交由同步轮询刷新
   await tasks.loadTodayOrder()
-  // 登录/自动解锁完成后启动同步协调轮询（幂等）
+  // 登录/自动解锁完成后启动同步协调轮询（幂等）。首轮 pollOnce 立即执行，
+  // 会把未读公告一并带回（已合并进 /api/sync/state），经 st:announcements 事件弹窗。
   startSyncPoll()
   // 预取今年/明年的法定节假日安排（重复任务「每个法定工作日」用），失败静默走内置兜底
   void ensureLegalCalendar(new Date().getFullYear())
   void ensureLegalCalendar(new Date().getFullYear() + 1)
-  // 中心公告：登录后拉取未读公告，逐条弹窗（失败静默，不阻塞进入主界面）
-  void checkAnnouncements()
 }
 
 /** ---- 中心公告：登录后逐条弹窗 ---- */
@@ -292,16 +291,8 @@ function showAnnouncements(items: AnnouncementItem[]) {
   annVisible.value = true
 }
 
-async function checkAnnouncements() {
-  try {
-    const { items } = await api.getUnreadAnnouncements()
-    showAnnouncements(items)
-  } catch {
-    /* 公告拉取失败静默：不阻塞用户进入主界面 */
-  }
-}
-
-/** 同步轮询发现新公告时派发的事件（useSyncPoll 每 2 秒查询一次） */
+/** 同步轮询发现新公告时派发的事件（useSyncPoll 每 2 秒查询一次，
+ *  未读公告已合并进 /api/sync/state 响应） */
 function onAnnouncementsEvent(e: Event) {
   const detail = (e as CustomEvent<AnnouncementItem[]>).detail
   if (Array.isArray(detail)) showAnnouncements(detail)

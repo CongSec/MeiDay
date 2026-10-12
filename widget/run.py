@@ -31,6 +31,7 @@ MeiDay 桌面小组件启动器（Windows 专用）
     python run.py
 """
 import ctypes
+import hashlib
 import json
 import os
 import sys
@@ -125,6 +126,20 @@ def _deep_merge(dst, patch):
 
 def _default_config():
     return json.loads(json.dumps(DEFAULT_CONFIG))
+
+
+def widget_ua():
+    try:
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography")
+        try:
+            guid = winreg.QueryValueEx(key, "MachineGuid")[0]
+        finally:
+            winreg.CloseKey(key)
+        if isinstance(guid, str) and guid:
+            return "MeiDay/Widget/" + hashlib.sha256(guid.encode("utf-8")).hexdigest()[:16]
+    except Exception as e:
+        _log(f"[widget_ua] 读取 MachineGuid 失败，回退 unknown：{e!r}")
+    return "MeiDay/Widget/unknown"
 
 
 def read_config():
@@ -773,7 +788,7 @@ def main():
         print("[widget] 桌面小组件已启动（托盘左键=设置，右键=菜单）")
 
     try:
-        webview.start(private_mode=False, func=on_started)
+        webview.start(private_mode=False, func=on_started, user_agent=widget_ua())
     finally:
         stop_event.set()
         native.stop()

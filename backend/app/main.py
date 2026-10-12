@@ -20,6 +20,7 @@ from .routes import captcha as captcha_routes
 from .routes import credentials as cred_routes
 from .routes import logs as logs_routes
 from .routes import notify as notify_routes
+from .routes import quick_durations as quick_durations_routes
 from .routes import sync as sync_routes
 from .services.log_cleanup_worker import log_cleanup_worker
 from .services.reminder_worker import reminder_worker
@@ -67,6 +68,11 @@ _SKIP_PATHS = {
     # 同步协调中心（2 秒轮询）：每次请求都写审计日志会刷爆 LogsView，直接跳过
     "/api/sync/report",
     "/api/sync/state",
+    # 中心公告未读查询：同样随同步轮询每 2 秒请求一次，跳过避免刷屏
+    "/api/announcements/unread",
+    # 消息通知回调：请求级日志改由 /api/callback 路由自行写入并归属到对应账号
+    # （含标题/正文），中间件跳过，避免再产生一条无用户的匿名重复记录
+    "/api/callback",
 }
 
 # 安全敏感写操作：这些请求的审计日志自动附上"安全"标签（is_security=True），
@@ -155,6 +161,7 @@ app.include_router(captcha_routes.router)
 app.include_router(cred_routes.router)
 app.include_router(logs_routes.router)
 app.include_router(notify_routes.router)
+app.include_router(quick_durations_routes.router)
 app.include_router(sync_routes.router)
 app.include_router(callback_routes.router)
 

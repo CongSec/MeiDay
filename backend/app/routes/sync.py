@@ -1,8 +1,13 @@
 from fastapi import APIRouter, Depends, Query
 
 from ..auth import get_username
-from ..db import add_sync_changes, get_conn, get_sync_version
-from ..schemas import SyncReportRequest, SyncStateItem, SyncStateResponse
+from ..db import add_sync_changes, get_conn, get_sync_version, get_unread_announcements
+from ..schemas import (
+    AnnouncementItem,
+    SyncReportRequest,
+    SyncStateItem,
+    SyncStateResponse,
+)
 
 router = APIRouter(prefix="/api/sync", tags=["sync"])
 
@@ -28,12 +33,14 @@ def state(
     since: int = Query(0, ge=0),
     username: str = Depends(get_username),
 ):
-    """轮询接口：返回该用户的总版本号与 since 之后新增的变更事件。
+    """轮询接口：返回该用户的总版本号与 since 之后新增的变更事件，并附带未读公告。
 
     - 客户端以版本号判断是否有变化（version > 本地已同步版本 → 拉数据）；
     - changes 列出需要拉取的资源（res_type + project_id），客户端按需只拉变化部分；
     - full_sync=true 表示本地版本号落后过多（超出服务端事件保留窗口），
-      应放弃增量、做一次全量同步，避免漏掉保留窗口之前的变化。
+      应放弃增量、做一次全量同步，避免漏掉保留窗口之前的变化；
+    - announcements 返回该用户当前未读公告（合并进同一响应：客户端每轮轮询
+      只需发一个请求，不再单独请求 /api/announcements/unread）。
     """
     with get_conn() as conn:
         version = get_sync_version(conn, username)
@@ -51,6 +58,7 @@ def state(
                 "WHERE username=? AND id>? ORDER BY id ASC LIMIT ?",
                 (username, since, _STATE_LIMIT),
             ).fetchall()
+        unread = get_unread_announcements(conn, username)
     # 服务端保留窗口内的最早事件 id。客户端 since 若指向已不存在的事件（早于 oldest，
     # 或事件已被全部清理、oldest 回到 0），说明中间有事件被删过，只给增量会漏数据，
     # 必须让客户端全量同步。全新设备（since=0）由登录/bootstrap 加载权威数据，无需强制全量。
@@ -59,4 +67,9 @@ def state(
         SyncStateItem(id=r["id"], res_type=r["res_type"], project_id=r["project_id"], ts=r["ts"])
         for r in rows
     ]
-    return SyncStateResponse(version=version, full_sync=full_sync, changes=changes)
+    return SyncStateResponse(
+        version=version,
+        full_sync=full_sync,
+        changes=changes,
+        announcements=[AnnouncementItem(**a) for a in unread],
+    )

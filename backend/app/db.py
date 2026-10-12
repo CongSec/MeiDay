@@ -381,3 +381,27 @@ def delete_sync_changes_older_than(hours: int) -> int:
     with get_conn() as conn:
         cur = conn.execute("DELETE FROM sync_changes WHERE ts < ?", (cutoff,))
         return cur.rowcount
+
+
+def get_unread_announcements(conn: sqlite3.Connection, username: str) -> list:
+    """返回某用户的未读公告（id 升序，旧→新，供逐条弹窗）。
+
+    未读 = 公告 id 大于用户已读游标（last_seen_announcement_id）。
+    新注册用户游标初始化为注册时的最新公告 id，因此不会收到历史公告。
+    传入已打开的连接，便于与同步状态在同一连接内一并查询（合并进轮询响应）。
+    """
+    row = conn.execute(
+        "SELECT last_seen_announcement_id FROM users WHERE username=?", (username,)
+    ).fetchone()
+    if row is None:
+        return []
+    last_seen = row["last_seen_announcement_id"] or 0
+    rows = conn.execute(
+        "SELECT id, title, content, created_at FROM announcements "
+        "WHERE id > ? ORDER BY id ASC",
+        (last_seen,),
+    ).fetchall()
+    return [
+        {"id": r["id"], "title": r["title"], "content": r["content"], "created_at": r["created_at"]}
+        for r in rows
+    ]

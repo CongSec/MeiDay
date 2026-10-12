@@ -385,6 +385,47 @@ class NotifyPrefsRequest(BaseModel):
     diary_unlock_failed: Optional[bool] = None
 
 
+# ---------- 提醒时间快捷时长（按账号存于 settings 表，多端同步） ----------
+
+# 快捷时长单位为「分钟」：取值范围 1-1440（24 小时内），最多 10 条
+QUICK_DURATION_MIN = 1
+QUICK_DURATION_MAX = 1440
+QUICK_DURATION_LIMIT = 10
+# 服务器未设置时的内置默认清单（与前端 QuickDurationChips.vue 的 DEFAULT_DURATIONS 一致）
+DEFAULT_QUICK_DURATIONS = [10, 30, 60]
+
+
+class QuickDurations(BaseModel):
+    """提醒时间快捷时长列表（分钟，升序去重）。"""
+    durations: List[int] = DEFAULT_QUICK_DURATIONS
+
+
+class QuickDurationsRequest(BaseModel):
+    """保存提醒时间快捷时长：整数分钟，1-1440，去重升序，最多 10 条；允许清空（空数组）。"""
+    durations: List[int]
+
+    @field_validator("durations", mode="before")
+    @classmethod
+    def _durations(cls, v):
+        if not isinstance(v, list):
+            raise ValueError("快捷时长必须是列表")
+        seen = set()
+        out = []
+        for item in v:
+            # 只接受真正的整数（拒绝浮点/字符串/布尔被静默截断，与路由读取端一致）
+            if isinstance(item, bool) or not isinstance(item, int):
+                raise ValueError("快捷时长必须是整数分钟")
+            if not (QUICK_DURATION_MIN <= item <= QUICK_DURATION_MAX):
+                raise ValueError(f"快捷时长需在 {QUICK_DURATION_MIN}-{QUICK_DURATION_MAX} 分钟之间")
+            if item in seen:
+                continue
+            seen.add(item)
+            out.append(item)
+        if len(out) > QUICK_DURATION_LIMIT:
+            raise ValueError(f"快捷时长最多 {QUICK_DURATION_LIMIT} 条")
+        return sorted(out)
+
+
 # ---------- 同步协调中心 ----------
 
 # 客户端可上报的资源类型（与前端 store 一一对应）
@@ -426,7 +467,18 @@ class SyncStateItem(BaseModel):
     ts: str
 
 
+class AnnouncementItem(BaseModel):
+    """中心公告条目（纯文本标题+内容，无 Markdown 渲染）。"""
+    id: int
+    title: str
+    content: str
+    created_at: str
+
+
 class SyncStateResponse(BaseModel):
     version: int
     full_sync: bool
     changes: List[SyncStateItem]
+    # 合并进同步轮询响应：客户端每 2 秒只发一个请求即可同时拿到
+    # 同步协调状态与未读公告（公告无变化时为空列表）
+    announcements: List[AnnouncementItem] = []

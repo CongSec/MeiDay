@@ -51,6 +51,19 @@ def _smtp_dns_hint(exc: Exception) -> str:
     return ""
 
 
+def _clip(text: str, limit: int) -> str:
+    """压缩为单行并按长度截断（detail 字段整体还有 2000 字符上限）。"""
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _callback_params(title: str, content: str) -> str:
+    """回调请求携带的原始参数摘要，用于「外部回调触发」请求级日志（原样呈现，空值标 '(空)'）。"""
+    t = _clip(title, 200)
+    c = _clip(content, 600)
+    return f"参数标题：{t or '(空)'}；参数正文：{c or '(空)'}"
+
+
 def _gen_callback_id(conn) -> str:
     """生成全账号唯一的 10 位纯数字随机 ID（与既有任意账号冲突则重抽）。"""
     while True:
@@ -119,12 +132,14 @@ async def _echo_error(
         )
         log_action(
             "email_send", username=username, method=method, path=path, status=200,
-            ip=ip, user_agent=ua, detail=f"回调报错回显 收件 {cred['notify_email']}：{reason[:120]}",
+            ip=ip, user_agent=ua,
+            detail=f"回调报错回显 收件 {cred['notify_email']}：{reason[:120]}；邮件标题：{_clip(title,200)}；正文预览：{_clip(content,300)}",
         )
     except Exception as exc:
         log_action(
             "email_fail", username=username, method=method, path=path, status=500,
-            ip=ip, user_agent=ua, detail=f"回调报错回显发送失败：{exc}",
+            ip=ip, user_agent=ua,
+            detail=f"回调报错回显发送失败：{_clip(str(exc),300)}；邮件标题：{_clip(title,200)}；正文预览：{_clip(content,300)}",
         )
 
 
@@ -139,16 +154,61 @@ async def _handle_callback(
 ) -> JSONResponse:
     ip = client_ip(request)
     ua = request.headers.get("user-agent", "")
+    try:
+        return await _handle_callback_impl(
+            request, method, path, id, title, content, dst, ip, ua
+        )
+    except Exception:
+        # /api/callback 已加入中间件 _SKIP_PATHS，这里兜底补一条 500 请求日志，
+        # 避免未预期异常在网页日志/服务器日志里完全不可见
+        log_action(
+            "外部回调触发", username=None, method=method, path=path, status=500,
+            ip=ip, user_agent=ua, detail="服务端异常",
+        )
+        raise
 
+
+async def _handle_callback_impl(
+    request: Request,
+    method: str,
+    path: str,
+    id: str,
+    title: str,
+    content: str,
+    dst: str,
+    ip: str,
+    ua: str,
+) -> JSONResponse:
     with get_conn() as conn:
         cred = conn.execute(
             "SELECT username, smtp_user, smtp_pass, notify_email FROM smtp_creds WHERE callback_id=?",
             (id,),
         ).fetchone()
     if cred is None:
+        # 无效 ID：无法归属到任何账号，保留一条匿名请求日志（仅服务器/数据库可见），
+        # 与旧行为一致，网页操作日志页不展示（username 为空）
+        log_action(
+            "外部回调触发", username=None, method=method, path=path, status=403,
+            ip=ip, user_agent=ua, detail="无效的回调 ID",
+        )
         return JSONResponse(status_code=403, content={"ok": False, "detail": "无效的回调 ID"})
     username = cred["username"]
+
+    # 实际发信时的邮件主题/正文（含空值兜底），与收件人收到的邮件一致；
+    # raw 则是请求携带的原始参数，便于对照"调用方传了什么"与"邮件发出了什么"
+    subject = (title or "").strip() or "【MeiDay 通知】"
+    body = (content or "").strip() or "（无内容）"
+    raw = _callback_params(title, content)
+
+    def _log_trigger(status: int, detail: str) -> None:
+        """请求级日志：归属到该回调 ID 所属账号，网页操作日志可见。"""
+        log_action(
+            "外部回调触发", username=username, method=method, path=path, status=status,
+            ip=ip, user_agent=ua, detail=detail,
+        )
+
     if not (cred["smtp_user"] and cred["smtp_pass"] and cred["notify_email"]):
+        _log_trigger(400, f"该账号未配置邮件发送（未发信）；{raw}")
         return JSONResponse(
             status_code=400,
             content={"ok": False, "detail": "该账号未配置邮件发送（请先在设置页配置发件邮箱/授权码/收件邮箱）"},
@@ -157,6 +217,7 @@ async def _handle_callback(
     target = (dst or "").strip()
     if target and not _is_valid_email(target):
         # dst 非法：不发送正文邮件，向账号收件邮箱回显报错
+        _log_trigger(400, f"dst 收件邮箱格式不正确，未发送；{raw}")
         await _echo_error(
             cred, title=title, content=content, target=target,
             reason="dst 邮箱格式不正确", ip=ip, ua=ua, username=username,
@@ -170,8 +231,10 @@ async def _handle_callback(
     except Exception as exc:
         log_action(
             "email_fail", username=username, method=method, path=path, status=500,
-            ip=ip, user_agent=ua, detail=f"回调发送失败 收件 {to}：{exc}",
+            ip=ip, user_agent=ua,
+            detail=f"回调发送失败 收件 {to}；邮件标题：{_clip(subject,200)}；邮件正文：{_clip(body,600)}；错误：{_clip(str(exc),300)}",
         )
+        _log_trigger(500, f"回调发送失败 收件 {to}；{raw}")
         reason = f"邮件发送失败：{exc}{_smtp_dns_hint(exc)}"
         await _echo_error(
             cred, title=title, content=content, target=to,
@@ -180,9 +243,11 @@ async def _handle_callback(
         )
         return JSONResponse(status_code=500, content={"ok": False, "detail": "邮件发送失败"})
 
+    _log_trigger(200, f"回调通知 收件 {to}；{raw}")
     log_action(
         "email_send", username=username, method=method, path=path, status=200,
-        ip=ip, user_agent=ua, detail=f"回调通知 收件 {to}",
+        ip=ip, user_agent=ua,
+        detail=f"回调通知 收件 {to}；邮件标题：{_clip(subject,200)}；邮件正文：{_clip(body,600)}",
     )
     return JSONResponse(content={"ok": True, "sent_to": to})
 

@@ -2,6 +2,7 @@ import { Capacitor, CapacitorHttp } from '@capacitor/core'
 import { AwsClient, AwsV4Signer } from 'aws4fetch'
 import type { CredFields } from '@/types'
 import { bytesToB64 } from './crypto'
+import { getOssUserAgent } from '@/capacitor/deviceId'
 
 /**
  * 对象存储客户端：阿里云 OSS / 腾讯云 COS / 华为云 OBS / 七牛 Kodo / MinIO / R2
@@ -231,6 +232,10 @@ async function nativeS3Fetch(aws: AwsClient, url: string, init: S3Init): Promise
   headers.forEach((v, k) => {
     headerObj[k] = v
   })
+
+  if (!headerObj['user-agent']) {
+    headerObj['user-agent'] = await getOssUserAgent()
+  }
 
   // 解析待发送的 body：文本原样传字符串；二进制 base64 + dataType:'file'
   let data: string | undefined

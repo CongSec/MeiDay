@@ -9,6 +9,7 @@ import { deleteAttachments, downloadAttachment, formatSize, isPreviewable, ossFi
 import { base64ToFile, imageFileName, imageFingerprint, MAX_SHOWN_IMAGES, readRecentImages, type RecentImageData } from '@/utils/recentImages'
 import { cancelSessionUploads, cancelUploadByMetaId, commitUploads, enqueueUploads, getActiveUploadCount, getSessionInflight, subscribeUploads, type BackgroundUploadState, type InFlightUpload } from '@/utils/backgroundUpload'
 import AttachmentPreviewModal from './AttachmentPreviewModal.vue'
+import QuickDurationChips from './QuickDurationChips.vue'
 import { logAttachmentDeletion } from '@/utils/audit'
 import { ensureLegalCalendar } from '@/utils/legalWorkday'
 import { currentOrNextOccurrence, firstOccurrenceDate, isNewStyleRepeat, isRepeatDay, repeatShapeEquals } from '@/utils/repeat'
@@ -875,6 +876,8 @@ onUnmounted(() => {
           <div>
             <label class="text-xs text-slate-500 block mb-0.5">提醒时间</label>
             <input v-model="reminder" :type="isNewStyleRepeatTask ? 'time' : 'datetime-local'" class="w-full min-w-0 border rounded-lg px-2 py-1.5 text-sm" />
+            <!-- 快捷时长：点一下按「当前时刻 + 时长」自动填提醒时间（重复任务只填时分） -->
+            <QuickDurationChips :mode="isNewStyleRepeatTask ? 'time' : 'datetime'" @apply="reminder = $event" />
           </div>
           <div v-if="!subtaskMode">
             <label class="text-xs text-slate-500 block mb-0.5">所属项目</label>
@@ -1053,6 +1056,8 @@ onUnmounted(() => {
             <div>
               <label class="text-[11px] text-slate-400 block mb-0.5">提醒时间</label>
               <input v-model="capsuleSubForm.reminderTime" type="datetime-local" class="w-full border rounded-lg px-2 py-1.5 text-sm" />
+              <!-- 快捷时长：与主任务同一套清单，点一下自动填「当前时刻 + 时长」 -->
+              <QuickDurationChips mode="datetime" @apply="capsuleSubForm.reminderTime = $event" />
             </div>
             <div class="flex justify-end gap-2 pt-1">
               <button type="button" class="px-3 py-1.5 rounded-lg text-xs text-slate-600 hover:bg-slate-100" @click="cancelCapsuleSubEdit">取消</button>

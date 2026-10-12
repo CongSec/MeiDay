@@ -225,6 +225,11 @@ export interface NotifyPrefs {
   diary_unlock_failed: boolean
 }
 
+/** 提醒时间快捷时长列表（分钟，升序去重；未设置时服务器返回内置默认 [10, 30, 60]） */
+export interface QuickDurations {
+  durations: number[]
+}
+
 export interface CaptchaResult {
   /** 验证码 id：注册时随点击答案一起回传 */
   id: string
@@ -359,6 +364,14 @@ export const api = {
   }) {
     return request<NotifyPrefs>('PUT', '/api/notify-prefs', body)
   },
+  /** 提醒时间快捷时长：当前账号的常用提醒间隔（分钟，升序）；未设置时服务器返回内置默认 [10, 30, 60] */
+  getQuickDurations() {
+    return request<QuickDurations>('GET', '/api/quick-durations')
+  },
+  /** 保存提醒时间快捷时长（整体覆盖；允许清空，清空后不再回退默认清单） */
+  setQuickDurations(durations: number[]) {
+    return request<QuickDurations>('PUT', '/api/quick-durations', { durations })
+  },
   getLogRetention() {
     return request<{ days: number; defaultDays: number; minDays: number; maxDays: number }>(
       'GET',
@@ -384,7 +397,9 @@ export const api = {
   refreshCallbackId() {
     return request<CallbackInfo>('POST', '/api/callback/refresh')
   },
-  /** 中心公告：拉取当前登录用户的未读公告列表（id 升序，旧→新，供逐条弹窗） */
+  /** 中心公告：一次性拉取未读公告列表（id 升序，旧→新）。
+   *  注意：同步轮询已把未读公告合并进 /api/sync/state 的 announcements 字段，
+   *  常规在线场景无需调用本方法，仅保留给一次性查询场景。 */
   getUnreadAnnouncements() {
     return request<{ items: AnnouncementItem[] }>('GET', '/api/announcements/unread')
   },
@@ -424,4 +439,6 @@ export interface SyncState {
   /** true 表示本地版本落后过多（服务端事件已被清理），应全量同步 */
   full_sync: boolean
   changes: SyncStateItem[]
+  /** 合并进轮询响应的未读公告（id 升序；无未读时为空数组） */
+  announcements: AnnouncementItem[]
 }
