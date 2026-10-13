@@ -44,15 +44,7 @@ async def _smtp_send(msg: EmailMessage, *, smtp_user: str, smtp_pass: str) -> No
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-CN">
 <body style="font-family: Arial, sans-serif; max-width: 560px; margin: 0 auto; padding: 24px;">
-  <h2 style="color:#dc2626;">🔔 任务提醒</h2>
-  <table style="border-collapse: collapse; width: 100%;">
-    <tr><td style="padding:6px 0;color:#666;width:100px;">任务名称</td><td style="padding:6px 0;font-weight:600;">{name}</td></tr>
-    <tr><td style="padding:6px 0;color:#666;">描述</td><td style="padding:6px 0;white-space:pre-wrap;">{description}</td></tr>
-    <tr><td style="padding:6px 0;color:#666;">开始时间</td><td style="padding:6px 0;">{start_time}</td></tr>
-    <tr><td style="padding:6px 0;color:#666;">截止时间</td><td style="padding:6px 0;">{end_time}</td></tr>
-    <tr><td style="padding:6px 0;color:#666;">提醒时间</td><td style="padding:6px 0;color:#dc2626;font-weight:600;">{reminder_time}</td></tr>
-  </table>
-  <p style="color:#999;font-size:12px;margin-top:24px;">本邮件由 MeiDay 自动发送，请勿回复。</p>
+  <div style="font-size:15px;color:#1f2937;line-height:1.7;white-space:pre-wrap;">{description}</div>
 </body>
 </html>"""
 
@@ -71,13 +63,7 @@ def _subject(task: dict) -> str:
 
 
 def _html(task: dict) -> str:
-    return HTML_TEMPLATE.format(
-        name=_esc(_task_name(task)),
-        description=_esc(task.get("description") or ""),
-        start_time=_esc(task.get("start_time") or "-"),
-        end_time=_esc(task.get("end_time") or "-"),
-        reminder_time=_esc(task["reminder_time"]),
-    )
+    return HTML_TEMPLATE.format(description=_esc(task.get("description") or ""))
 
 
 async def send_reminder_email(smtp_user: str, smtp_pass: str, to: str, task: dict) -> None:
@@ -85,11 +71,7 @@ async def send_reminder_email(smtp_user: str, smtp_pass: str, to: str, task: dic
     msg["From"] = smtp_user
     msg["To"] = to
     msg["Subject"] = _subject(task)
-    msg.set_content(
-        f"任务：{_task_name(task)}\n描述：{task.get('description') or ''}\n"
-        f"起止：{task.get('start_time') or '-'} ~ {task.get('end_time') or '-'}\n"
-        f"提醒时间：{task['reminder_time']}"
-    )
+    msg.set_content(task.get("description") or "")
     msg.add_alternative(_html(task), subtype="html")
     await _smtp_send(msg, smtp_user=smtp_user, smtp_pass=smtp_pass)
 

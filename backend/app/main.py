@@ -65,6 +65,8 @@ _SKIP_PATHS = {
     "/api/logs/all",
     "/api/logs/actions",
     "/api/settings/log-retention",
+    # 提醒时间快捷时长：前端每次打开任务弹窗都会拉取，属高频低价值请求，跳过审计避免刷屏
+    "/api/quick-durations",
     # 同步协调中心（2 秒轮询）：每次请求都写审计日志会刷爆 LogsView，直接跳过
     "/api/sync/report",
     "/api/sync/state",
