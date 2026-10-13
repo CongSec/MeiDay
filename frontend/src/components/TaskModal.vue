@@ -888,12 +888,16 @@ onUnmounted(() => {
           <div v-else></div>
         </div>
 
-        <!-- 重复任务（仅主任务）：完成后按周期自动生成下一任务，所有属性保持一致，仅日期顺延 -->
+        <!-- 重复任务（仅主任务）：完成后按周期自动生成下一任务，所有属性保持一致，仅日期顺延。
+             点击目标收敛到勾选框本身：整行/文字/图标不再触发切换，避免误勾选 -->
         <div v-if="!subtaskMode" class="rounded-lg border border-slate-100 p-2.5">
-          <label class="flex items-center gap-2 text-xs text-slate-600 cursor-pointer select-none">
-            <input v-model="repeatEnabled" type="checkbox" class="accent-brand" />
-            <AppIcon name="repeat" :size="14" class="text-brand shrink-0" /> 重复任务（到期当天自动显示；提醒邮件由服务器按时发送）
-          </label>
+          <div class="flex items-center gap-2 text-xs text-slate-600 select-none">
+            <label class="inline-flex items-center cursor-pointer" title="勾选启用重复任务">
+              <input v-model="repeatEnabled" type="checkbox" class="accent-brand" />
+            </label>
+            <AppIcon name="repeat" :size="14" class="text-brand shrink-0" />
+            <span>重复任务（到期当天自动显示；提醒邮件由服务器按时发送）</span>
+          </div>
           <div v-if="repeatEnabled" class="grid grid-cols-2 gap-2 pt-2">
             <div>
               <label class="text-[11px] text-slate-500 block mb-0.5">周期类型</label>
@@ -1163,22 +1167,23 @@ onUnmounted(() => {
 
         <div v-if="err" class="text-sm text-red-500">{{ err }}</div>
         <div class="flex justify-between items-center gap-2 pt-1">
-          <button
-            v-if="!subtaskMode && task && !capsuleEdit && calendarComplete"
-            type="button"
-            class="px-3 py-1.5 rounded-lg text-xs text-emerald-600 border border-emerald-300 hover:bg-emerald-50"
-            @click="completeCalendarTask"
-          >
-            完成该任务
-          </button>
-          <button
-            v-else-if="!subtaskMode && task && !capsuleEdit"
-            type="button"
-            class="px-3 py-1.5 rounded-lg text-xs text-red-500 border border-red-200 hover:bg-red-50"
-            @click="askDelete"
-          >
-            存入时间胶囊
-          </button>
+          <div v-if="!subtaskMode && task && !capsuleEdit" class="flex items-center gap-2">
+            <button
+              v-if="calendarComplete"
+              type="button"
+              class="px-3 py-1.5 rounded-lg text-xs text-emerald-600 border border-emerald-300 hover:bg-emerald-50"
+              @click="completeCalendarTask"
+            >
+              完成该任务
+            </button>
+            <button
+              type="button"
+              class="px-3 py-1.5 rounded-lg text-xs text-red-500 border border-red-200 hover:bg-red-50"
+              @click="askDelete"
+            >
+              存入时间胶囊
+            </button>
+          </div>
           <div class="flex justify-end gap-2 ml-auto">
             <button type="button" class="px-4 py-1.5 rounded-lg text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-50" :disabled="saving" @click="cancel">
               取消

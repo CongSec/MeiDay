@@ -202,7 +202,8 @@ async function confirmDelete() {
   const t = deleteTarget.value
   // 确认按钮前端立即生效：关弹窗；保存结果由回显后的 toast 提示
   deleteTarget.value = null
-  const ok = await tasks.softDeleteConfirmed(t.id)
+  // 统一走「存入时间胶囊」入口：重复任务只删对应那一天（今天），非重复/已完成任务行为不变
+  const ok = await tasks.deleteFutureTaskConfirmed(t.id)
   if (ok) ui.toast('已存入时间胶囊')
 }
 </script>

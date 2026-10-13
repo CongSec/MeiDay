@@ -1028,6 +1028,30 @@ async function onCalendarComplete(task: Task) {
   const ok = await tasks.completeFutureOccurrence(task.id, day)
   if (ok) ui.toast('任务已完成')
 }
+
+/** 日历图「提前存入时间胶囊」确认目标：仅把对应那一天按天删除入舱（重复任务只删该天，任务保留） */
+const capsuleTarget = ref<{ id: string; day: string } | null>(null)
+
+/** 日历图待办小块「存入时间胶囊」：先关弹窗，记录归属日，弹确认框 */
+function askCalendarDelete(id: string) {
+  const day = editCalendarDay.value
+  editOpen.value = false
+  editTask.value = null
+  editTemplateMasterId.value = null
+  editCalendarDay.value = null
+  editCalendarComplete.value = false
+  if (!day) return
+  capsuleTarget.value = { id, day }
+}
+
+/** 确认后按天存入时间胶囊（仅删除对应那一天的重复出现） */
+async function confirmCalendarDelete() {
+  const t = capsuleTarget.value
+  capsuleTarget.value = null
+  if (!t) return
+  const ok = await tasks.deleteFutureTaskConfirmed(t.id, t.day)
+  if (ok) ui.toast('已存入时间胶囊')
+}
 </script>
 
 <template>
@@ -1300,6 +1324,14 @@ async function onCalendarComplete(task: Task) {
       @cancel="deleteTarget = null"
     />
     <ConfirmDialog
+      :open="!!capsuleTarget"
+      title="存入时间胶囊"
+      message="确定将该任务存入时间胶囊吗？将仅删除对应那一天的重复出现，可在时间胶囊恢复。"
+      confirm-text="存入时间胶囊"
+      @confirm="confirmCalendarDelete"
+      @cancel="capsuleTarget = null"
+    />
+    <ConfirmDialog
       :open="clearOpen"
       title="清空时间胶囊"
       message="将永久删除时间胶囊中的全部任务，且无法恢复，确定清空吗？建议先导出备份。"
@@ -1345,6 +1377,7 @@ async function onCalendarComplete(task: Task) {
       :calendar-complete="editCalendarComplete"
       @saved="onSaved"
       @complete="onCalendarComplete"
+      @delete="askCalendarDelete"
     />
   </div>
 </template>

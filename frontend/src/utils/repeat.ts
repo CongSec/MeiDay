@@ -212,6 +212,23 @@ export function skipProcessedRepeatDays(
   }
   return processed[d] ? null : d
 }
+
+/** 判断 after 之后是否还存在「未处理的重复日」（严格晚于 after、未在 processed 中、未超 endAfter）。
+ *  用于按天入舱/完成后判断重复链是否自然结束：无剩余未处理重复日则无需再保留待办任务/模板。 */
+export function hasNextUnprocessedRepeatDay(
+  rule: RepeatRule,
+  after: string,
+  processed?: Record<string, string>,
+  endAfter?: string,
+): boolean {
+  const candidate = nextRepeatDate(rule, after)
+  if (!candidate) return false
+  const next = skipProcessedRepeatDays(rule, candidate, processed)
+  if (!next) return false
+  if (endAfter && next > endAfter) return false
+  return true
+}
+
 export function buildReminderPayload(task: Task): RepeatRule | undefined {
   const rule = task.repeat
   if (!rule) return undefined

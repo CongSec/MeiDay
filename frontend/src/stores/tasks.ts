@@ -12,7 +12,7 @@ import { debounce, type Debounced } from '@/utils/debounce'
 import { queueSyncChange } from '@/utils/syncReport'
 import { addDaysKey, dateKeyOf, diffDaysKey, nowIso, todayKey } from '@/utils/time'
 import { isRepeatTaskActiveOn, isTaskVisibleToday } from '@/utils/todayFilter'
-import { buildOccurrenceTemplate, buildReminderPayload, buildRepeatOccurrence, nextRepeatDate, repeatShapeEquals, rootIdOf, shiftTaskTimes, skipProcessedRepeatDays } from '@/utils/repeat'
+import { buildOccurrenceTemplate, buildReminderPayload, buildRepeatOccurrence, hasNextUnprocessedRepeatDay, nextRepeatDate, repeatShapeEquals, rootIdOf, shiftTaskTimes, skipProcessedRepeatDays } from '@/utils/repeat'
 import { api } from '@/api/client'
 import { logAudit, logAttachmentDeletion, safeDetail } from '@/utils/audit'
 import { UNCATEGORIZED, type AttachmentMeta, type RepeatMaster, type Subtask, type Task } from '@/types'
@@ -2932,7 +2932,11 @@ export const useTasksStore = defineStore('tasks', {
      * - 若 id 是重复模板（repeats 中 master.template.id），只把「对应那一天」的重复出现存入时间胶囊：
      *   生成 status=deleted 的单日回收站记录，并在根任务与模板上标记 repeatProcessed[day]='deleted'；
      *   其它未来出现、已完成的历史重复日与源任务都不受影响；date 缺省用该模板的到期日；
-     * - 普通未来/今日任务走软删（入回收站）。
+     * - 活跃待办重复任务：统一「按天入舱」——显式 date（未来任务卡/日历图）用该天，缺省默认「今天」
+     *   （当天显示=当天出现）；只删对应那一天，任务本身保留待办，其它重复日不受影响；
+     *   若该天之后已无任何未处理重复日（dates 仅剩该天 / endAfter 已到），链自然结束，
+     *   写按天记录后把任务移出活跃列表，避免留下不可见的悬空待办；
+     * - 普通未来/今日任务（非重复、已完成）走软删（入回收站）。
      */
     async deleteFutureTaskConfirmed(taskId: string, date?: string): Promise<boolean> {
       let masterPid: string | undefined
@@ -2959,12 +2963,34 @@ export const useTasksStore = defineStore('tasks', {
           trashPid,
         )
       }
-      // 活跃待办重复任务的「未来重复日」单日删除：只在对应那一天生成 deleted 记录并标记已处理，
-      // 绝不动今天、其它未来日与已完成历史日；date 缺省且无法确定目标日时退化为整任务软删。
+      // 活跃待办重复任务：统一「按天入舱」（见方法注释），只删对应那一天，任务保留待办
       const active = this.all.find((x) => x.id === taskId)
-      if (active?.repeat && active.status === 'pending' && date) {
-        const rootId = rootIdOf(active)
-        return await this._deleteOccurrence(taskId, date, rootId, active, active, undefined, active.projectId)
+      if (active?.repeat && active.status === 'pending') {
+        const day = date ?? todayKey()
+        const hasFuture = hasNextUnprocessedRepeatDay(active.repeat, day, active.repeatProcessed, active.repeat.endAfter)
+        const ok = await this._deleteOccurrence(
+          taskId,
+          day,
+          rootIdOf(active),
+          active,
+          active,
+          undefined,
+          active.projectId,
+        )
+        if (!ok) return false
+        // 链已自然结束：按天记录已写入，把任务移出活跃列表，避免留下不可见的悬空待办
+        if (!hasFuture) {
+          const auth = useAuthStore()
+          const list = this.tasks[active.projectId] ?? []
+          this.tasks[active.projectId] = list.filter((x) => x.id !== taskId)
+          const saved = await this.saveProjectNow(active.projectId)
+          if (!saved) {
+            this.tasks[active.projectId] = list
+            await idbPut('tasks', taskCacheKey(auth.username, active.projectId), list)
+            return false
+          }
+        }
+        return true
       }
       return this.softDeleteConfirmed(taskId)
     },
