@@ -98,8 +98,10 @@ function cancelAdd() {
 
 async function confirmAdd() {
   if (saving.value) return
+  // v-model 在 type=number 输入框上会把值自动转成 number，这里兼容 string/number 两种形态，
+  // 不能用 value.trim()（数字没有 trim 方法，会抛 TypeError 导致点击无反应）
   const raw = Number(addValue.value)
-  if (!addValue.value.trim() || !Number.isInteger(raw) || raw <= 0) {
+  if (!addValue.value || !Number.isFinite(raw) || !Number.isInteger(raw) || raw <= 0) {
     addErr.value = '请输入大于 0 的整数'
     return
   }
