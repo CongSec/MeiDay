@@ -2362,7 +2362,7 @@ export const useTasksStore = defineStore('tasks', {
         toggleSaving.delete(id)
       }
     },
-    softDelete(id: string) {
+    softDelete(id: string, opts?: { keepRepeatMaster?: boolean }) {
       const task = this.all.find((t) => t.id === id)
       if (!task) return
       // 已完成任务删除进回收站：保留完成时间（updatedAt=完成时间），恢复后不误计为当天完成
@@ -2374,8 +2374,9 @@ export const useTasksStore = defineStore('tasks', {
       this.trash[task.projectId] = mergeUnique(this.trash[task.projectId] ?? [], [task])
       this._persist(task.projectId)
       this._persistTrash(task.projectId)
-      // 删除重复模板：周期提醒随任务删除一并停止（服务器同 task_id 行下次同步即移除）
-      this._deleteMasterForTask(task.id)
+      // 删除重复模板：周期提醒随任务删除一并停止（服务器同 task_id 行下次同步即移除）。
+      // keepRepeatMaster=true（已完成重复任务入舱）时保留模板：只归档该完成记录，后续未完成出现不受影响
+      if (!opts?.keepRepeatMaster) this._deleteMasterForTask(task.id)
       logAudit('删除任务', safeDetail(`任务ID：${task.id}，项目ID：${task.projectId}`))
     },
     restore(id: string, toProjectId?: string) {
@@ -2476,8 +2477,9 @@ export const useTasksStore = defineStore('tasks', {
         this.tasks[pid] = sortActiveList(this.tasks[pid] ?? [])
         this._persist(pid)
       }
-      // 恢复重复任务：删除其重复模板，由恢复后的任务自己承担后续周期，避免与模板重复生成/重复提醒
-      this._deleteMasterForTask(task.id)
+      // 恢复重复任务：待办恢复后由任务自己承担后续周期，删除其重复模板避免与模板重复生成/重复提醒；
+      // 已完成恢复（历史完成记录）保留重复模板，后续未完成出现继续保留（入舱/恢复都不打断重复链）
+      if (!completing) this._deleteMasterForTask(task.id)
       logAudit('恢复任务', safeDetail(`任务ID：${task.id}，项目ID：${task.projectId}`))
     },
     /** 批量新增任务（Markdown 导入用）：整批合并落盘，避免逐条防抖写 OSS */
@@ -2865,14 +2867,14 @@ export const useTasksStore = defineStore('tasks', {
       return this.saveRepeatsNow(projectId)
     },
     /** 确认式移入回收站：立即写盘任务+回收站，成功才返回 true；失败回滚并返回 false */
-    async softDeleteConfirmed(id: string): Promise<boolean> {
+    async softDeleteConfirmed(id: string, opts?: { keepRepeatMaster?: boolean }): Promise<boolean> {
       const auth = useAuthStore()
       const task = this.all.find((t) => t.id === id)
       if (!task) return false
       const pid = task.projectId
       const tasksSnap = (this.tasks[pid] ?? []).slice()
       const trashSnap = (this.trash[pid] ?? []).slice()
-      this.softDelete(id)
+      this.softDelete(id, opts)
       const [okTasks, okTrash] = await Promise.all([this.saveProjectNow(pid), this.saveTrashNow(pid)])
       if (okTasks && okTrash) return true
       this.tasks[pid] = tasksSnap
@@ -2936,7 +2938,9 @@ export const useTasksStore = defineStore('tasks', {
      *   （当天显示=当天出现）；只删对应那一天，任务本身保留待办，其它重复日不受影响；
      *   若该天之后已无任何未处理重复日（dates 仅剩该天 / endAfter 已到），链自然结束，
      *   写按天记录后把任务移出活跃列表，避免留下不可见的悬空待办；
-     * - 普通未来/今日任务（非重复、已完成）走软删（入回收站）。
+     * - 已完成重复任务：归档该完成记录（保持已完成、留在完成当天），但保留重复模板，
+     *   后续未完成出现继续保留——入舱同样不打断重复链；
+     * - 普通未来/今日任务（非重复）走软删（入回收站）。
      */
     async deleteFutureTaskConfirmed(taskId: string, date?: string): Promise<boolean> {
       let masterPid: string | undefined
@@ -2991,6 +2995,11 @@ export const useTasksStore = defineStore('tasks', {
           }
         }
         return true
+      }
+      // 已完成重复任务入舱：归档该完成记录（保持已完成、留在完成当天），但保留重复模板，
+      // 后续未完成出现继续保留，与待办重复任务「只删对应那天」统一（入舱不打断重复链）
+      if (active?.repeat && active.status === 'completed') {
+        return this.softDeleteConfirmed(taskId, { keepRepeatMaster: true })
       }
       return this.softDeleteConfirmed(taskId)
     },
