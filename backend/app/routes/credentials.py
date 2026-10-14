@@ -1,5 +1,8 @@
+import hashlib
 import json
+import os
 import re
+import sys
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
@@ -12,6 +15,41 @@ from ..services.notifier import notify_cred_change_email
 from ..services.repeat_calendar import add_days, compute_next_reminder, diff_days_key
 
 router = APIRouter(prefix="/api", tags=["credentials"])
+
+_backend_ua_cache: str | None = None
+
+
+def _read_machine_id() -> str:
+    if sys.platform == "win32":
+        try:
+            import winreg
+
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography")
+            try:
+                value = winreg.QueryValueEx(key, "MachineGuid")[0]
+            finally:
+                winreg.CloseKey(key)
+            return value if isinstance(value, str) else ""
+        except Exception:
+            return ""
+    for path in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+        try:
+            with open(path, encoding="utf-8") as f:
+                value = f.read().strip()
+            if value:
+                return value
+        except Exception:
+            continue
+    return ""
+
+
+def backend_ua() -> str:
+    global _backend_ua_cache
+    if _backend_ua_cache is None:
+        raw = os.environ.get("MEIDAY_BACKEND_ID", "").strip() or _read_machine_id()
+        fp = hashlib.sha256((raw or "unknown").encode("utf-8")).hexdigest()[:16]
+        _backend_ua_cache = f"MeiDay/Backend/{fp}"
+    return _backend_ua_cache
 
 
 def _parse_reminder_time(value: str):
@@ -395,6 +433,7 @@ def oss_check(body: OssCheckRequest, username: str = Depends(get_username)):
 
     region = _oss_guess_region(endpoint)
     headers = _s3_sigv4("GET", url, body.oss_ak, body.oss_sk, region)
+    headers["User-Agent"] = backend_ua()
 
     try:
         # timeout=10：限制单次出站连接/请求时长，避免连到不可达地址时长时间挂起
