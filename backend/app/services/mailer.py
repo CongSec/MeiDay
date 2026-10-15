@@ -219,7 +219,6 @@ async def send_security_email(
     to: str,
     kind: str,
     ip: str,
-    ua: str = "",
 ) -> None:
     """发送安全通知邮件（登录成功 / 登录失败 / 查看密钥 / 密钥配置变更）。
 
@@ -235,7 +234,6 @@ async def send_security_email(
     msg["Subject"] = subject
     text = (
         f"{body}\n\n时间：{now}\nIP：{ip or '未知IP'}"
-        + (f"\nUser-Agent：{ua[:200]}" if ua else "")
         + "\n\n如非本人操作，请及时修改密码保护账号。"
     )
     msg.set_content(text)

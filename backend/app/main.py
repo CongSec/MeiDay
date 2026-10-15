@@ -136,14 +136,13 @@ async def audit_middleware(request: Request, call_next):
     if auth_header and auth_header.startswith("Bearer "):
         username = username_from_token(auth_header[len("Bearer "):].strip()) or ""
     ip = client_ip(request)
-    ua = request.headers.get("user-agent", "")
     is_security = (method, path) in _SECURITY_PATHS
     try:
         response = await call_next(request)
     except Exception:
         log_action(
             action_label(method, path), username=username or None, method=method, path=path,
-            status=500, ip=ip, user_agent=ua, detail="服务端异常",
+            status=500, ip=ip, detail="服务端异常",
             duration_ms=int((time.perf_counter() - start) * 1000),
             is_security=is_security,
         )
@@ -151,7 +150,7 @@ async def audit_middleware(request: Request, call_next):
     duration_ms = int((time.perf_counter() - start) * 1000)
     log_action(
         action_label(method, path), username=username or None, method=method, path=path,
-        status=response.status_code, ip=ip, user_agent=ua, duration_ms=duration_ms,
+        status=response.status_code, ip=ip, duration_ms=duration_ms,
         is_security=is_security,
     )
     return response

@@ -38,10 +38,6 @@ from ..schemas import (
 router = APIRouter(prefix="/api", tags=["auth"])
 
 
-def _ua(request: Request) -> str:
-    return request.headers.get("user-agent", "") if request else ""
-
-
 def _ip(request: Request) -> str:
     return client_ip(request) if request else ""
 
@@ -53,9 +49,9 @@ def _ip(request: Request) -> str:
 _notify_tasks: set["asyncio.Task"] = set()
 
 
-def _spawn_security_notification(username: str, kind: str, ip: str, ua: str) -> None:
+def _spawn_security_notification(username: str, kind: str, ip: str) -> None:
     """在事件循环中异步调度安全通知邮件（fire-and-forget，不影响业务响应）。"""
-    task = asyncio.create_task(notify_security_event(username, kind, ip, ua))
+    task = asyncio.create_task(notify_security_event(username, kind, ip))
     _notify_tasks.add(task)
     task.add_done_callback(_notify_tasks.discard)
 
@@ -108,7 +104,7 @@ def register(body: RegisterRequest, request: Request = None):
     # 注册动作保留在服务器日志中，归属新用户自己（其他用户看不到）
     log_action(
         "注册", username=username, method="POST", path="/api/register",
-        status=201, ip=_ip(request), user_agent=_ua(request),
+        status=201, ip=_ip(request),
         detail="新用户注册",
     )
     return {"ok": True}
@@ -124,7 +120,7 @@ def _build_login_response(
     """
     log_action(
         "login", username=username, method="POST", path="/api/login",
-        status=200, ip=_ip(request), user_agent=_ua(request),
+        status=200, ip=_ip(request),
         is_security=True,
     )
     return LoginResponse(
@@ -141,14 +137,13 @@ async def login(
 ):
     username = body.username.strip()
     ip = _ip(request)
-    ua = _ua(request)
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
     if not row:
         # 不存在的用户名不触发锁定，仅记录登录失败（爆破提醒）；无账号无法邮件通知
         log_action(
             "login_failed", username=username, method="POST", path="/api/login",
-            status=401, ip=ip, user_agent=ua,
+            status=401, ip=ip,
             detail=f"⚠️ 密码登录失败（重点关注）：用户名或密码错误，来自 {ip or '未知IP'}",
             is_security=True,
         )
@@ -157,25 +152,25 @@ async def login(
     if is_account_locked(row):
         log_action(
             "login_locked", username=username, method="POST", path="/api/login",
-            status=423, ip=ip, user_agent=ua,
+            status=423, ip=ip,
             detail=f"🔒 账号因连续密码错误已被临时锁定，剩余 {remaining_lock_seconds(row)} 秒",
             is_security=True,
         )
-        _spawn_security_notification(username, "login_failed", ip, ua)
+        _spawn_security_notification(username, "login_failed", ip)
         mins = max(1, int(remaining_lock_seconds(row) / 60) + (1 if remaining_lock_seconds(row) % 60 else 0))
         raise HTTPException(status_code=423, detail=f"密码错误次数过多，账号已锁定，请约 {mins} 分钟后再试")
     if not verify_verifier(body.passwordHash, row["argon2_hash"]):
         locked_now = register_failed_attempt(username)
         log_action(
             "login_failed", username=username, method="POST", path="/api/login",
-            status=401, ip=ip, user_agent=ua,
+            status=401, ip=ip,
             detail=(
                 f"⚠️ 密码登录失败（重点关注）：用户名或密码错误，来自 {ip or '未知IP'}"
                 + ("，已触发账号临时锁定" if locked_now else "")
             ),
             is_security=True,
         )
-        _spawn_security_notification(username, "login_failed", ip, ua)
+        _spawn_security_notification(username, "login_failed", ip)
         if locked_now:
             raise HTTPException(status_code=423, detail="密码错误次数过多，账号已锁定 30 分钟")
         raise HTTPException(status_code=401, detail="用户名或密码错误")
@@ -197,7 +192,7 @@ async def login(
     # 后的后台自动解锁/重登等内部调用），判定为本人操作，不发邮件，避免正常使用频繁骚扰。
     # 攻击者暴力破解时不持有有效会话 token，无法伪造跳过该通知。
     if not is_background_relogin:
-        _spawn_security_notification(username, "login_success", ip, ua)
+        _spawn_security_notification(username, "login_success", ip)
     return _build_login_response(username, row, token, request)
 
 
@@ -215,7 +210,6 @@ def change_password(
     - 修改成功后记录"修改密码"安全日志（不含任何密码/密钥明文）。
     """
     ip = _ip(request)
-    ua = _ua(request)
     # 提取当前会话 token，用于改密后吊销其它多端会话
     auth_hdr = request.headers.get("authorization", "") if request else ""
     current_token = auth_hdr[len("Bearer "):].strip() if auth_hdr.startswith("Bearer ") else ""
@@ -227,7 +221,7 @@ def change_password(
     if is_account_locked(row):
         log_action(
             "修改密码失败", username=username, method="POST", path="/api/change-password",
-            status=423, ip=ip, user_agent=ua,
+            status=423, ip=ip,
             detail=f"🔒 账号因连续密码错误已被临时锁定，剩余 {remaining_lock_seconds(row)} 秒",
             is_security=True,
         )
@@ -240,7 +234,7 @@ def change_password(
         locked_now = register_failed_attempt(username)
         log_action(
             "修改密码失败", username=username, method="POST", path="/api/change-password",
-            status=400, ip=ip, user_agent=ua,
+            status=400, ip=ip,
             detail=f"⚠️ 原密码校验失败（重点关注），来自 {ip or '未知IP'}"
             + ("，已触发账号临时锁定" if locked_now else ""),
             is_security=True,
@@ -272,7 +266,7 @@ def change_password(
             )
     log_action(
         "修改密码", username=username, method="POST", path="/api/change-password",
-        status=200, ip=ip, user_agent=ua,
+        status=200, ip=ip,
         detail="密码修改成功（原密码校验通过）",
         is_security=True,
     )
@@ -289,7 +283,7 @@ def logout(username: str = Depends(get_username), authorization: str = Header(..
     destroy_session(token)
     log_action(
         "logout", username=username, method="POST", path="/api/logout",
-        status=200, ip=_ip(request), user_agent=_ua(request),
+        status=200, ip=_ip(request),
     )
     return {"ok": True}
 

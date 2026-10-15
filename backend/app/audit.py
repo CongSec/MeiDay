@@ -138,6 +138,7 @@ def log_action(
     is_high_risk=True 表示更高危的操作（如"显示密钥"），日志使用
     AUDIT-HIGHRISK 前缀与更醒目的标志重点记录，便于安全审计排查。
     """
+    user_agent = ""
     try:
         with get_conn() as conn:
             conn.execute(
@@ -272,7 +273,10 @@ def query_logs(
             f"SELECT * FROM audit_logs {clause} ORDER BY id DESC LIMIT ? OFFSET ?",
             [*params, limit, offset],
         ).fetchall()
-    return [dict(r) for r in rows], total
+    items = [dict(r) for r in rows]
+    for item in items:
+        item.pop("user_agent", None)
+    return items, total
 
 
 def get_all_usernames() -> list[str]:

@@ -85,7 +85,6 @@ def update_credentials(
     但不阻断保存，并记录审计日志。
     """
     ip = client_ip(request) if request else ""
-    ua = request.headers.get("user-agent", "") if request else ""
     now = datetime.now(timezone(timedelta(hours=8))).isoformat(timespec="seconds")
     with get_conn() as conn:
         old = conn.execute(
@@ -119,7 +118,7 @@ def update_credentials(
                 conn.execute("DELETE FROM smtp_creds WHERE username=?", (username,))
     if old_smtp and old_smtp.get("notify_email"):
         # 用修改前的旧 SMTP 配置发“临终”邮件（响应后异步发送，不影响保存响应速度）
-        background_tasks.add_task(notify_cred_change_email, username, old_smtp, ip, ua)
+        background_tasks.add_task(notify_cred_change_email, username, old_smtp, ip)
     else:
         # 首次配置：没有旧发件邮箱可用来发通知，不阻断保存，仅记录审计日志
         log_action(

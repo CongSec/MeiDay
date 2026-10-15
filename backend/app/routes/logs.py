@@ -135,7 +135,6 @@ def log_client_action(
         path="/api/logs/client",
         status=200,
         ip=client_ip(request),
-        user_agent=request.headers.get("user-agent", ""),
         detail=body.detail,
         is_security=is_security,
         is_high_risk=is_high_risk,
@@ -144,7 +143,7 @@ def log_client_action(
         # 查看密钥改为邮件提醒（响应后异步发送），不再弹窗
         background_tasks.add_task(
             notify_security_event, username, "key_view",
-            client_ip(request), request.headers.get("user-agent", ""),
+            client_ip(request),
         )
     kind = DIARY_EMAIL_KINDS.get(body.action) or CAPSULE_EMAIL_KINDS.get(body.action)
     if kind:
@@ -152,7 +151,7 @@ def log_client_action(
         # 日记改密/导出/导入/删除与时间胶囊导出/导入/清空均不可关闭（恒开）。
         background_tasks.add_task(
             notify_security_event, username, kind,
-            client_ip(request), request.headers.get("user-agent", ""),
+            client_ip(request),
         )
     return {"ok": True}
 
@@ -197,7 +196,6 @@ def update_log_retention(
         path="/api/settings/log-retention",
         status=200,
         ip=client_ip(request) if request else "",
-        user_agent=request.headers.get("user-agent", "") if request else "",
         detail=f"日志保留天数调整为 {days} 天",
     )
     return {"ok": True, "days": days}

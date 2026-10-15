@@ -49,7 +49,7 @@ def _get_smtp(username: str) -> dict | None:
     return dict(row) if row else None
 
 
-async def notify_security_event(username: str, kind: str, ip: str = "", ua: str = "") -> None:
+async def notify_security_event(username: str, kind: str, ip: str = "") -> None:
     """按用户设置发送一条安全邮件（登录成功/失败、查看密钥、隐私日记相关）。
 
     全程 try/except：发送失败绝不影响登录/查看密钥/日记等业务请求。
@@ -78,7 +78,7 @@ async def notify_security_event(username: str, kind: str, ip: str = "", ua: str 
         _last_sent[key] = now
         await send_security_email(
             cred["smtp_user"], cred["smtp_pass"], cred["notify_email"],
-            kind, ip or "未知IP", ua,
+            kind, ip or "未知IP",
         )
         log_action("email_send", username=username, detail=f"安全通知[{kind}] 收件 {cred['notify_email']}；来源IP {ip or '-'}")
     except Exception as exc:  # 邮件发送失败不影响业务
@@ -89,7 +89,7 @@ async def notify_security_event(username: str, kind: str, ip: str = "", ua: str 
         logger.warning("发送安全通知邮件失败 username=%s kind=%s: %s", username, kind, exc)
 
 
-async def notify_cred_change_email(username: str, old_smtp: dict, ip: str = "", ua: str = "") -> None:
+async def notify_cred_change_email(username: str, old_smtp: dict, ip: str = "") -> None:
     """加密保存时的“临终”安全邮件：用【修改前】的 SMTP 配置发送。
 
     - old_smtp 为路由在写入新配置前同步读出的旧 smtp_creds；
@@ -103,7 +103,7 @@ async def notify_cred_change_email(username: str, old_smtp: dict, ip: str = "", 
             return
         await send_security_email(
             old_smtp["smtp_user"], old_smtp["smtp_pass"], old_smtp["notify_email"],
-            "cred_change", ip or "未知IP", ua,
+            "cred_change", ip or "未知IP",
         )
         log_action("email_send", username=username, detail=f"安全通知[cred_change] 收件 {old_smtp['notify_email']}；来源IP {ip or '-'}")
     except Exception as exc:
