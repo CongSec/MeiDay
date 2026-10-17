@@ -34,6 +34,44 @@ def _parse(t: str) -> datetime:
     return dt
 
 
+def _prune_processed(rule: dict, cur_date: str) -> dict:
+    """推进后剪枝：早于/等于当前提醒日的已处理日期不再需要（推进只会向前，不会回退）。"""
+    kept = sorted({str(x) for x in (rule.get("processedDates") or []) if x and x > cur_date})
+    out = dict(rule)
+    if kept:
+        out["processedDates"] = kept
+    else:
+        out.pop("processedDates", None)
+    return out
+
+
+def _advance_or_delete(conn, row: dict, rule: dict | None) -> None:
+    """按周期规则把提醒行推进到下一个「未处理」重复日（跳过 processedDates 中已单日完成/删除的日期）；
+    规则结束 / 无法推进 / 规则损坏时删除该行（周期提醒停止）。推进时剪掉已过的已处理日期。"""
+    if not rule:
+        conn.execute(
+            "DELETE FROM reminders WHERE username=? AND task_id=? AND subtask_id=? AND reminder_time=?",
+            (row["username"], row["task_id"], row["subtask_id"], row["reminder_time"]),
+        )
+        return
+    nxt, offset = compute_next_reminder(rule, row["reminder_time"])
+    if nxt:
+        shifted_start = add_days(row["start_time"], offset) if row["start_time"] else row["start_time"]
+        shifted_end = add_days(row["end_time"], offset) if row["end_time"] else row["end_time"]
+        rule = _prune_processed(rule, row["reminder_time"][:10])
+        conn.execute(
+            "UPDATE reminders SET reminder_time=?, start_time=?, end_time=?, is_reminded=0, repeat_rule=? "
+            "WHERE username=? AND task_id=? AND subtask_id=? AND reminder_time=?",
+            (nxt, shifted_start, shifted_end, json.dumps(rule, ensure_ascii=False),
+             row["username"], row["task_id"], row["subtask_id"], row["reminder_time"]),
+        )
+    else:
+        conn.execute(
+            "DELETE FROM reminders WHERE username=? AND task_id=? AND subtask_id=? AND reminder_time=?",
+            (row["username"], row["task_id"], row["subtask_id"], row["reminder_time"]),
+        )
+
+
 async def _run_cycle() -> None:
     _trim_state()
     now = datetime.now(TZ)
@@ -61,6 +99,21 @@ async def _run_cycle() -> None:
         cred = creds.get(row["username"])
         if not cred:
             continue
+        # 路径一修复：该提醒日已被「单日完成/删除」（repeatProcessed，客户端随 repeat_rule
+        # 以 processedDates 上报）——不发信，直接把行推进到下一个未处理重复日。
+        # 这里也覆盖了「行已停在已处理日、客户端新规则尚未覆盖到」的竞态窗口：
+        # 即便推进逻辑已跳过 processedDates，若行恰好落在已处理日上，也绝不能发信。
+        if row["repeat_rule"]:
+            try:
+                rule = json.loads(row["repeat_rule"])
+            except Exception:
+                rule = None
+            if rule:
+                processed = {str(x) for x in (rule.get("processedDates") or [])}
+                if row["reminder_time"][:10] in processed:
+                    with get_conn() as conn:
+                        _advance_or_delete(conn, row, rule)
+                    continue
         # 原子占位：仅当该提醒仍为“未发送”且提醒时间未被改动时才标记为发送中。
         # rowcount=0 表示本周期内已被处理或行已变化，直接跳过，避免重复发送。
         with get_conn() as conn:
@@ -120,32 +173,17 @@ async def _run_cycle() -> None:
                  datetime.now(TZ).isoformat(timespec="seconds")),
             )
 
-        # 重复提醒：发完本封邮件后按周期规则把 reminder_time 推进到下一次。
+        # 重复提醒：发完本封邮件后按周期规则把 reminder_time 推进到下一次（跳过已处理日）。
         # 服务器每行只存一条规则（JSON），不预注册未来 N 条提醒；
         # 用户一周不打开 App，worker 每天仍会按时推进并发信。
         # 删除任务 / 去掉重复 / 清除提醒后，同步会删除该行，全部提醒即停止。
         if row["repeat_rule"]:
             try:
                 rule = json.loads(row["repeat_rule"])
-                nxt, offset = compute_next_reminder(rule, row["reminder_time"])
             except Exception:
-                nxt, offset = None, 0
+                rule = None
             with get_conn() as conn:
-                if nxt:
-                    shifted_start = add_days(row["start_time"], offset) if row["start_time"] else row["start_time"]
-                    shifted_end = add_days(row["end_time"], offset) if row["end_time"] else row["end_time"]
-                    conn.execute(
-                        "UPDATE reminders SET reminder_time=?, start_time=?, end_time=?, is_reminded=0 "
-                        "WHERE username=? AND task_id=? AND subtask_id=? AND reminder_time=?",
-                        (nxt, shifted_start, shifted_end,
-                         row["username"], row["task_id"], row["subtask_id"], row["reminder_time"]),
-                    )
-                else:
-                    # 规则结束（endAfter 已过）或无法推进：删除该提醒行，周期提醒停止
-                    conn.execute(
-                        "DELETE FROM reminders WHERE username=? AND task_id=? AND subtask_id=? AND reminder_time=?",
-                        (row["username"], row["task_id"], row["subtask_id"], row["reminder_time"]),
-                    )
+                _advance_or_delete(conn, row, rule)
 
 
 async def reminder_worker(interval: float = 60.0) -> None:

@@ -207,7 +207,9 @@ def sync_reminders(body: RemindersSyncRequest, username: str = Depends(get_usern
                         and task.reminderTime[:10] not in {str(d) for d in (task.repeatRule.get("dates") or [])}
                     ):
                         dates = sorted({str(d) for d in (task.repeatRule.get("dates") or [])})
-                        nxt_date = next((d for d in dates if d > task.reminderTime[:10]), None)
+                        # 路径一修复：已单日完成/删除的日期同样跳过，不与已处理日重复发信
+                        processed = {str(x) for x in (task.repeatRule.get("processedDates") or [])}
+                        nxt_date = next((d for d in dates if d > task.reminderTime[:10] and d not in processed), None)
                         if nxt_date is None:
                             # 日期列表已无可推进项：不注册该提醒行
                             continue

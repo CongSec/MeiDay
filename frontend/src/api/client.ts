@@ -300,7 +300,7 @@ export const api = {
   changePassword(body: { oldPasswordHash: string; newPasswordHash: string; newEncryptedCreds?: string | null }) {
     return request<{ ok: true }>('POST', '/api/change-password', body)
   },
-  syncReminders(tasks: { id: string; name: string; description: string; startTime: string | null; endTime: string | null; reminderTime: string | null; projectId: string; status: string; isReminded: boolean; subtaskId?: string; /** 重复提醒规则：服务器只存这一条规则，发完邮件后自行按周期推进 */ repeatRule?: { type: string; interval: number; weekdays?: number[]; monthDay?: number; endAfter?: string } }[], projectIds: string[]) {
+  syncReminders(tasks: { id: string; name: string; description: string; startTime: string | null; endTime: string | null; reminderTime: string | null; projectId: string; status: string; isReminded: boolean; subtaskId?: string; /** 重复提醒规则：服务器只存这一条规则，发完邮件后自行按周期推进 */ repeatRule?: { type: string; interval: number; weekdays?: number[]; monthDay?: number; yearMonth?: number; endAfter?: string; /** 已被单日完成/删除的重复日（YYYY-MM-DD），服务端推进时跳过，不再对已处理日发信 */ processedDates?: string[] } }[], projectIds: string[]) {
     return request<{ ok: true; count: number }>('PUT', '/api/reminders/sync', { tasks, projectIds })
   },
   /** 后端直连 OSS 诊断（绕过浏览器 CORS），返回真实错误码（如 NoSuchBucket）。

@@ -26,19 +26,21 @@ export interface Subtask {
 }
 
 // 列表含 'workday' 仅为兼容 OSS 旧数据；新数据不再使用（与「每个法定工作日」合并，选项已移除）
-export type RepeatType = 'daily' | 'weekly' | 'workday' | 'monthly' | 'legalWorkday' | 'dates'
+export type RepeatType = 'daily' | 'weekly' | 'workday' | 'monthly' | 'legalWorkday' | 'yearly' | 'dates'
 
-export const REPEAT_TYPES: RepeatType[] = ['daily', 'weekly', 'monthly', 'legalWorkday', 'dates']
+export const REPEAT_TYPES: RepeatType[] = ['daily', 'weekly', 'monthly', 'yearly', 'legalWorkday', 'dates']
 
 /** 任务重复规则：重复生成的下一次任务，所有属性（名称/描述/时间/子任务/附件）保持一致，仅日期按周期顺延 */
 export interface RepeatRule {
   type: RepeatType
-  /** 每 N 个周期重复一次（天/周/月），默认 1 */
+  /** 每 N 个周期重复一次（天/周/月/年），默认 1 */
   interval: number
   /** 按周重复时指定星期几（0=周日…6=周六）；为空则按开始日期所在星期 */
   weekdays?: number[]
-  /** 按月重复时的日期（1-31），默认按原日期 */
+  /** 按月/按年重复时的日期（1-31，按年重复时 2 月 29 日跳过非闰年），默认按原日期 */
   monthDay?: number
+  /** 按年重复时的月份（1-12），默认按开始日期所在月份 */
+  yearMonth?: number
   /** 可选：重复到此日期（含）为止，之后不再生成 */
   endAfter?: string
   /** 指定日期重复：在这些特定日期（YYYY-MM-DD，升序去重）各出现一次，不循环 */

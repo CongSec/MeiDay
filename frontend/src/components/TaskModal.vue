@@ -92,6 +92,8 @@ const repeatType = ref<RepeatType>('daily')
 const repeatInterval = ref(1)
 const repeatWeekdays = ref<number[]>([])
 const repeatMonthDay = ref(1)
+/** 每年重复：目标月份（1-12），默认取开始日期所在月 */
+const repeatYearMonth = ref(1)
 const repeatEndAfter = ref('')
 /** 指定日期重复：勾选的多个特定日期（YYYY-MM-DD，升序去重，每个日期各出现一次） */
 const repeatDates = ref<string[]>([])
@@ -109,6 +111,7 @@ watch(
   },
 )
 const monthDayTouched = ref(false)
+const yearMonthTouched = ref(false)
 const WEEKDAY_SHORT = ['日', '一', '二', '三', '四', '五', '六']
 
 /** 是否为「新模型」重复任务：编辑时看任务规则是否带 start（老重复数据走旧逻辑）；
@@ -215,6 +218,8 @@ watch(
     repeatWeekdays.value = r?.weekdays ? [...r.weekdays] : []
     repeatMonthDay.value = r?.monthDay ?? (start.value ? new Date(start.value).getDate() : 1)
     monthDayTouched.value = !!r?.monthDay
+    repeatYearMonth.value = r?.yearMonth ?? (start.value ? new Date(start.value).getMonth() + 1 : new Date().getMonth() + 1)
+    yearMonthTouched.value = !!r?.yearMonth
     repeatEndAfter.value = r?.endAfter ?? ''
     repeatDates.value = r?.dates ? [...r.dates].sort() : []
     repeatDateSelection.value = new Set()
@@ -249,7 +254,18 @@ watch(repeatType, (t) => {
   } else if (t === 'monthly' && !monthDayTouched.value) {
     const d = start.value ? new Date(start.value).getDate() : new Date().getDate()
     repeatMonthDay.value = d
+  } else if (t === 'yearly' && !yearMonthTouched.value) {
+    // 切到“每年”：月份默认按开始日期所在月，日期默认按开始日期所在日
+    const dt = start.value ? new Date(start.value) : new Date()
+    repeatYearMonth.value = dt.getMonth() + 1
+    repeatMonthDay.value = dt.getDate()
   }
+})
+
+/** 切“每年”的月份时，日期联动钳制到该月天数上限（如 2 月 31 → 29） */
+watch(repeatYearMonth, (m) => {
+  const max = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1] ?? 31
+  if (repeatMonthDay.value > max) repeatMonthDay.value = max
 })
 
 /** 纯关闭弹窗（不清理附件；保存提交后立即调用） */
@@ -536,6 +552,7 @@ const REPEAT_TYPE_LABELS: Record<Exclude<RepeatType, 'workday'>, string> = {
   daily: '每天',
   weekly: '每周',
   monthly: '每月',
+  yearly: '每年',
   legalWorkday: '每个法定工作日',
   dates: '指定日期',
 }
@@ -546,7 +563,13 @@ function repeatTypeLabel(t: RepeatType) {
 const intervalLabel = computed(() => {
   if (repeatType.value === 'weekly') return '间隔（周）'
   if (repeatType.value === 'monthly') return '间隔（个月）'
+  if (repeatType.value === 'yearly') return '间隔（年）'
   return '间隔（天）'
+})
+/** 每年重复：所选月份的天数上限（2 月按闰年允许到 29；30/31 为无效组合） */
+const repeatYearMaxDay = computed(() => {
+  const maxByMonth = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+  return maxByMonth[repeatYearMonth.value - 1] ?? 31
 })
 function toggleWeekday(wd: number) {
   const i = repeatWeekdays.value.indexOf(wd)
@@ -706,6 +729,10 @@ async function submit() {
     }
     if (repeatType.value === 'monthly') {
       repeat.monthDay = Math.min(31, Math.max(1, Math.floor(repeatMonthDay.value || 1)))
+    }
+    if (repeatType.value === 'yearly') {
+      repeat.yearMonth = Math.min(12, Math.max(1, Math.floor(repeatYearMonth.value || 1)))
+      repeat.monthDay = Math.min(repeatYearMaxDay.value, Math.max(1, Math.floor(repeatMonthDay.value || 1)))
     }
     if (repeatType.value === 'dates') {
       const ds = [...new Set(repeatDates.value)].sort()
@@ -905,7 +932,7 @@ onUnmounted(() => {
                 <option v-for="r in REPEAT_TYPES" :key="r" :value="r">{{ repeatTypeLabel(r) }}</option>
               </select>
             </div>
-            <div v-if="repeatType === 'daily' || repeatType === 'weekly' || repeatType === 'monthly'">
+            <div v-if="repeatType === 'daily' || repeatType === 'weekly' || repeatType === 'monthly' || repeatType === 'yearly'">
               <label class="text-[11px] text-slate-500 block mb-0.5">{{ intervalLabel }}</label>
               <input v-model.number="repeatInterval" type="number" min="1" max="365" class="w-full border rounded-lg px-2 py-1.5 text-sm" />
             </div>
@@ -919,6 +946,26 @@ onUnmounted(() => {
                 class="w-full border rounded-lg px-2 py-1.5 text-sm"
                 @input="monthDayTouched = true"
               />
+            </div>
+            <div v-if="repeatType === 'yearly'">
+              <label class="text-[11px] text-slate-500 block mb-0.5">每年几月</label>
+              <select
+                v-model.number="repeatYearMonth"
+                class="w-full border rounded-lg px-2 py-1.5 text-sm bg-white"
+                @change="yearMonthTouched = true"
+              >
+                <option v-for="m in 12" :key="m" :value="m">{{ m }} 月</option>
+              </select>
+            </div>
+            <div v-if="repeatType === 'yearly'">
+              <label class="text-[11px] text-slate-500 block mb-0.5">几号（2/29 只在闰年）</label>
+              <select
+                v-model.number="repeatMonthDay"
+                class="w-full border rounded-lg px-2 py-1.5 text-sm bg-white"
+                @change="monthDayTouched = true"
+              >
+                <option v-for="d in repeatYearMaxDay" :key="d" :value="d">{{ d }} 日</option>
+              </select>
             </div>
             <div v-if="repeatType !== 'dates'">
               <label class="text-[11px] text-slate-500 block mb-0.5">结束日期</label>

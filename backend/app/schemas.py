@@ -214,10 +214,13 @@ class CredentialsRequest(BaseModel):
 # ---------- 重复任务提醒规则（V-001）----------
 
 # 合法重复类型（与前端 repeat.ts / TaskModal.vue 保持一致）
-REPEAT_TYPES = ("daily", "weekly", "workday", "monthly", "legalWorkday", "dates")
+REPEAT_TYPES = ("daily", "weekly", "workday", "monthly", "legalWorkday", "yearly", "dates")
 # interval 上限：与前端输入框 max=365 对齐；超大 interval 会让
 # repeat_calendar.next_repeat_date 的 weekly 分支循环约 7n 次（CPU 放大 / DoS）。
 REPEAT_INTERVAL_MAX = 365
+# processedDates 上限：单日完成/删除的重复日集合（路径一修复随 repeat_rule 上报）。
+# 只取最近 2000 个（服务端推进只关心“行所在日期之后”的已处理日，更早的已不再需要）。
+REPEAT_PROCESSED_MAX = 2000
 # 可选星期几：0=周日 … 6=周六（与前端 JS getDay 一致）
 REPEAT_WEEKDAY_SET = frozenset(range(7))
 
@@ -289,6 +292,14 @@ class ReminderTask(BaseModel):
                 raise ValueError("每月日期必须是整数")
             if not (1 <= month_day <= 31):
                 raise ValueError("每月日期需在 1-31 之间")
+        year_month = v.get("yearMonth")
+        if year_month is not None:
+            try:
+                year_month = int(year_month)
+            except (TypeError, ValueError):
+                raise ValueError("每年月份必须是整数")
+            if not (1 <= year_month <= 12):
+                raise ValueError("每年月份需在 1-12 之间")
         dates = v.get("dates")
         if dates is not None:
             if not isinstance(dates, list) or not dates:
@@ -306,6 +317,25 @@ class ReminderTask(BaseModel):
                 seen.add(d)
             if len(seen) != len(dates):
                 raise ValueError("指定日期不能重复")
+        # processedDates：已被「单日完成/删除」的重复日（路径一修复）。
+        # 只做格式/上限校验并排序去重，服务端推进时跳过这些日期，不再对已处理的重复日发信。
+        processed_dates = v.get("processedDates")
+        if processed_dates is not None:
+            if not isinstance(processed_dates, list):
+                raise ValueError("已处理日期必须是列表")
+            if len(processed_dates) > REPEAT_PROCESSED_MAX:
+                raise ValueError(f"已处理日期不能超过 {REPEAT_PROCESSED_MAX} 个")
+            p_seen = set()
+            for d in processed_dates:
+                if not isinstance(d, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", d):
+                    raise ValueError("已处理日期格式须为 YYYY-MM-DD")
+                try:
+                    datetime.strptime(d, "%Y-%m-%d")
+                except ValueError:
+                    raise ValueError("已处理日期无效")
+                p_seen.add(d)
+            if len(p_seen) != len(processed_dates):
+                raise ValueError("已处理日期不能重复")
         end_after = v.get("endAfter")
         if end_after is not None:
             if not isinstance(end_after, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", end_after):
@@ -323,6 +353,8 @@ class ReminderTask(BaseModel):
             out["monthDay"] = month_day
         if dates is not None:
             out["dates"] = sorted(seen)
+        if processed_dates:
+            out["processedDates"] = sorted(p_seen)
         return out
 
 

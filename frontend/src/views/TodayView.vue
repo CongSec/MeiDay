@@ -11,7 +11,7 @@ import TaskCard from '@/components/TaskCard.vue'
 import TaskModal from '@/components/TaskModal.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import AppIcon from '@/components/AppIcon.vue'
-import { dateKeyOf, nowIso, toLocalInput } from '@/utils/time'
+import { dateKeyOf, nowIso, toLocalInput, addMonthsKey } from '@/utils/time'
 import { collectFutureVisibleTasks, isTaskVisibleToday } from '@/utils/todayFilter'
 import type { Subtask, Task } from '@/types'
 import { useSync } from '@/composables/useSync'
@@ -43,6 +43,7 @@ const mobileActions = inject<
 
 const MOBILE_TITLE = '今日任务'
 onMounted(async () => {
+  document.addEventListener('pointerdown', onDocPointerdown)
   if (mobileActions) {
     mobileActions.newTask = () => openNew()
     mobileActions.title = MOBILE_TITLE
@@ -62,6 +63,7 @@ onMounted(async () => {
   await tasks.loadAllProgressive(toLoad)
 })
 onUnmounted(() => {
+  document.removeEventListener('pointerdown', onDocPointerdown)
   setDragging(false)
   if (mobileActions) {
     mobileActions.newTask = null
@@ -106,11 +108,42 @@ const todayPct = computed(() =>
 /** 未来任务分组是否展开（默认收起） */
 const futureOpen = ref(false)
 
-/** 未来任务：未来 30 天内「会被今日视图显示」、且今天尚未在今日任务视图显示的任务
- *  （完整套用今日视图判定规则：开始命中 / 开始~截止覆盖那天 / 提醒命中那天 /
- *  重复规则命中那天 / 子任务同规则）；今日已显示的（如正在进行的跨天任务、每天重复的
- *  任务）不再重复进入未来区；30 天外才开始/提醒的任务不再展示。 */
-const futureTasks = computed(() => collectFutureVisibleTasks(tasks.all, tasks.repeats, today.value))
+/** 未来任务时间窗口档位（自然月）：1 / 3 / 6 个月，默认 1 个月；每次进入页面固定从 1 个月开始，不持久化 */
+const FUTURE_WINDOW_MONTHS = [1, 3, 6] as const
+const FUTURE_WINDOW_LABEL: Record<number, string> = { 1: '1 个月', 3: '3 个月', 6: '6 个月' }
+/** 当前选中的未来任务窗口（月） */
+const futureWindowMonths = ref<number>(1)
+/** 时间筛选下拉是否展开 */
+const futureMenuOpen = ref(false)
+const futureMenuEl = ref<HTMLElement | null>(null)
+
+/** 未来任务（最宽窗口 6 个月扫描）：驱动分组显隐——只要 6 个月内存在未来任务就显示分组，
+ *  保证时间筛选按钮始终可点（不会因当前窗口为空而整组消失、陷入死胡同）。 */
+const futureTasksWide = computed(() => collectFutureVisibleTasks(tasks.all, tasks.repeats, today.value, 6))
+
+/** 未来任务分组是否显示：由最宽窗口决定（收起状态与筛选档位无关） */
+const showFutureGroup = computed(() => futureTasksWide.value.length > 0)
+
+/** 未来任务（当前选中窗口）：宽列表按「窗口终点」过滤，等价于直接按当前窗口扫描，
+ *  避免对同一批任务做多轮逐日遍历；沿用原有排序与去重。 */
+const futureTasks = computed(() => {
+  const last = addMonthsKey(today.value, futureWindowMonths.value)
+  return futureTasksWide.value.filter((x) => x.date <= last)
+})
+
+/** 点击筛选下拉外部时收起 */
+function onDocPointerdown(e: PointerEvent): void {
+  const el = futureMenuEl.value
+  if (futureMenuOpen.value && el && !el.contains(e.target as Node)) {
+    futureMenuOpen.value = false
+  }
+}
+
+/** 切换未来任务时间窗口 */
+function selectFutureWindow(months: number): void {
+  futureWindowMonths.value = months
+  futureMenuOpen.value = false
+}
 
 /** 拖拽用可变列表：注册过 todayOrder 的按手动顺序排，其余按 sort/截止时间兜底；手动拖拽后保留顺序，仅在任务增删时重排 */
 const dragList = ref<Task[]>([])
@@ -373,8 +406,9 @@ async function confirmDelete() {
           </div>
         </div>
   
-        <!-- 未来任务：可折叠分组（默认收起），放在已完成下方；只显示未来 30 天内会被今日视图显示的、且今天未在今日任务视图显示的任务 -->
-        <div v-if="futureTasks.length" class="mt-5 border-t border-amber-100 pt-3">
+        <!-- 未来任务：可折叠分组（默认收起），放在已完成下方；分组显隐由最宽窗口（6 个月）决定，
+             展开后可筛选 1 / 3 / 6 个月时间窗口（默认 1 个月） -->
+        <div v-if="showFutureGroup" class="mt-5 border-t border-amber-100 pt-3">
           <button
             class="w-full flex items-center justify-between py-1.5 text-sm font-medium text-amber-700 hover:text-amber-800 btn-press"
             @click="futureOpen = !futureOpen"
@@ -389,18 +423,49 @@ async function confirmDelete() {
               <AppIcon :name="futureOpen ? 'chevron-up' : 'chevron-down'" :size="13" />
             </span>
           </button>
-          <div v-if="futureOpen" class="mt-1.5 space-y-2">
-            <TaskCard
-              v-for="ft in futureTasks"
-              :key="ft.task.id"
-              :task="ft.task"
-              :project="projectOf(ft.task.projectId)"
-              :future-date="ft.date"
-              future
-              warm
-              @edit="openFutureEdit"
-              @toggle="onFutureToggle"
-            />
+          <div v-if="futureOpen" class="mt-1.5">
+            <!-- 时间筛选：展开后显示，点击弹出 1/3/6 个月选项，选中即时刷新列表 -->
+            <div ref="futureMenuEl" class="relative mb-2 flex items-center justify-end">
+              <button
+                class="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 hover:bg-amber-100 btn-press"
+                title="选择未来任务时间范围"
+                @click="futureMenuOpen = !futureMenuOpen"
+              >
+                未来 {{ FUTURE_WINDOW_LABEL[futureWindowMonths] }}
+                <AppIcon :name="futureMenuOpen ? 'chevron-up' : 'chevron-down'" :size="11" />
+              </button>
+              <div
+                v-if="futureMenuOpen"
+                class="absolute right-0 top-full mt-1 w-36 rounded-xl bg-white shadow-xl ring-1 ring-black/10 py-1 z-50 overflow-hidden"
+              >
+                <button
+                  v-for="m in FUTURE_WINDOW_MONTHS"
+                  :key="m"
+                  class="w-full flex items-center justify-between gap-2 px-3 py-2 text-left text-sm hover:bg-slate-100 whitespace-nowrap"
+                  :class="m === futureWindowMonths ? 'text-amber-700 font-medium' : 'text-slate-700'"
+                  @click="selectFutureWindow(m)"
+                >
+                  {{ FUTURE_WINDOW_LABEL[m] }}
+                  <AppIcon v-if="m === futureWindowMonths" name="check" :size="14" class="text-amber-600 shrink-0" />
+                </button>
+              </div>
+            </div>
+            <div v-if="futureTasks.length" class="space-y-2">
+              <TaskCard
+                v-for="ft in futureTasks"
+                :key="ft.task.id"
+                :task="ft.task"
+                :project="projectOf(ft.task.projectId)"
+                :future-date="ft.date"
+                future
+                warm
+                @edit="openFutureEdit"
+                @toggle="onFutureToggle"
+              />
+            </div>
+            <div v-else class="py-6 text-center text-xs text-slate-400">
+              未来 {{ FUTURE_WINDOW_LABEL[futureWindowMonths] }} 内没有未来任务
+            </div>
           </div>
         </div>
       </template>

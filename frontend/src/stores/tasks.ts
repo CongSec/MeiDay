@@ -2385,7 +2385,16 @@ export const useTasksStore = defineStore('tasks', {
           // 墓碑（R4）：规则已删除，绝不继续从旧模板推送提醒
           if (m.deletedAt) continue
           const t = m.template
-          const carrier = { ...t, id: m.id }
+          // 路径一修复：单日完成/删除的已处理日期可能只写在根任务上（权威），模板上可能滞后；
+          // 合并根任务的 repeatProcessed，确保上报给服务端的 processedDates 完整，
+          // 服务端推进时才会跳过这些已处理的重复日、不再对它们发提醒。
+          const rootId = m.rootTaskId ?? t.repeatRootId ?? m.id
+          const root = this.all.find((x) => x.id === rootId) ?? this.allTrash.find((x) => x.id === rootId)
+          const carrier = {
+            ...t,
+            id: m.id,
+            repeatProcessed: root?.repeatProcessed ?? t.repeatProcessed,
+          }
           if (t.reminderTime) {
             pushReminder(carrier, '', t.name, t.description, t.startTime || null, t.endTime || null, t.reminderTime, m.projectId)
           }

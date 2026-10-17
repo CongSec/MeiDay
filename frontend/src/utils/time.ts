@@ -73,6 +73,19 @@ export function addDaysKey(dateKey: string, days: number): string {
   return `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`
 }
 
+/** 日期键（YYYY-MM-DD）加 N 个月（自然月）：月份进位/退位，日自动收尾到当月最后一天
+ *  （如 2026-01-31 +1 月 → 2026-02-28，2026-01-31 +3 月 → 2026-04-30）。 */
+export function addMonthsKey(dateKey: string, months: number): string {
+  const [y, m, d] = dateKey.split('-').map(Number)
+  const total = m - 1 + months
+  const ny = y + Math.floor(total / 12)
+  const nm = ((total % 12) + 12) % 12 + 1
+  const lastDay = new Date(Date.UTC(ny, nm, 0)).getUTCDate()
+  const nd = Math.min(d, lastDay)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${ny}-${pad(nm)}-${pad(nd)}`
+}
+
 /** 两个日期键之间的天数差（toKey - fromKey） */
 export function diffDaysKey(fromKey: string, toKey: string): number {
   const a = new Date(`${fromKey}T00:00:00+08:00`).getTime()

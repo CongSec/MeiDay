@@ -24,6 +24,12 @@ export function formatRepeat(rule?: RepeatRule | null): string {
       const base = n > 1 ? `每 ${n} 个月` : '每月'
       return `${base} · ${day} 日`
     }
+    case 'yearly': {
+      const month = rule.yearMonth ?? 1
+      const day = rule.monthDay ?? 1
+      const base = n > 1 ? `每 ${n} 年` : '每年'
+      return `${base} · ${month}月${day}日`
+    }
     case 'legalWorkday':
       return '每个法定工作日'
     case 'dates': {
@@ -91,6 +97,34 @@ export function nextRepeatDate(rule: RepeatRule, anchor: string): string | null 
       if (d <= anchor) d = addMonthsKey(anchor, n * 2, day)
       return d
     }
+    case 'yearly': {
+      // 相位与每月一致：以锚点所在年为相位起点，年份差为 interval 整数倍
+      const month = rule.yearMonth ?? Number(anchor.slice(5, 7))
+      const day = rule.monthDay ?? Number(anchor.slice(8, 10))
+      const anchorYear = Number(anchor.slice(0, 4))
+      // 严格相位：候选年 = 锚点年 + k*n；候选年该月无此日（2/29 非闰年、非法组合如 4/31）则跳过
+      for (let i = 0; i < 20000; i++) {
+        const y = anchorYear + (i + 1) * n
+        const daysInMonth = new Date(Date.UTC(y, month, 0)).getUTCDate()
+        if (day > daysInMonth) continue
+        const pad = (x: number) => String(x).padStart(2, '0')
+        const key = `${String(y).padStart(4, '0')}-${pad(month)}-${pad(day)}`
+        if (key > anchor) return key
+      }
+      // 兜底（仅 2/29 可能出现）：严格相位序列里不存在合法日（如锚点年 ≡1 mod 4 且 interval 是 4 的倍数），
+      // 退化为逐年后移到下一个真实存在的重复日；首现后 rule.start 相位锚定，后续计算不会再触发兜底。
+      if (month === 2 && day === 29) {
+        for (let i = 1; i <= 20000; i++) {
+          const y = anchorYear + i
+          const daysInMonth = new Date(Date.UTC(y, month, 0)).getUTCDate()
+          if (29 > daysInMonth) continue
+          const pad = (x: number) => String(x).padStart(2, '0')
+          const key = `${String(y).padStart(4, '0')}-${pad(month)}-${pad(day)}`
+          if (key > anchor) return key
+        }
+      }
+      return null
+    }
     case 'legalWorkday':
       return nextLegalWorkday(anchor)
     case 'dates': {
@@ -138,6 +172,16 @@ export function isRepeatDay(rule: RepeatRule, start: string, today: string): boo
       // 月末收敛：如每月 31 日，2 月落在最后一天（28/29）
       return Number(today.slice(8, 10)) === Math.min(day, daysInMonth)
     }
+    case 'yearly': {
+      const month = rule.yearMonth ?? Number(start.slice(5, 7))
+      const day = rule.monthDay ?? Number(start.slice(8, 10))
+      // 相位：与锚点年的年份差为 interval 的整数倍
+      const startYear = Number(start.slice(0, 4))
+      const todayYear = Number(today.slice(0, 4))
+      if ((todayYear - startYear) % n !== 0) return false
+      // 2/29 只在闰年存在：非闰年没有 2/29，天然不匹配
+      return Number(today.slice(5, 7)) === month && Number(today.slice(8, 10)) === day
+    }
     case 'legalWorkday':
       return isLegalWorkday(today)
     case 'dates':
@@ -162,6 +206,37 @@ export function currentOrNextOccurrence(rule: RepeatRule, anchor: string, today:
   if (rule.type === 'dates') {
     const ds = (rule.dates ?? []).filter((d) => d >= today).sort()
     return ds.length ? ds[0] : today
+  }
+  if (rule.type === 'yearly') {
+    // 直接按年推进：相位固定于 anchor（候选年 = 锚点年 + k*interval），
+    // 20000 天扫描预算对「每 N 年」（N 最大 365）不足，须按年计算。
+    const n = Math.max(1, rule.interval || 1)
+    const month = rule.yearMonth ?? Number(anchor.slice(5, 7))
+    const day = rule.monthDay ?? Number(anchor.slice(8, 10))
+    const anchorYear = Number(anchor.slice(0, 4))
+    const todayYear = Number(today.slice(0, 4))
+    const pad = (x: number) => String(x).padStart(2, '0')
+    // 严格相位：从覆盖 today 年份的第一个候选年开始向后找（候选年该月无此日则跳过）
+    let k = Math.max(0, Math.ceil((todayYear - anchorYear) / n))
+    for (let i = 0; i < 4000; i++) {
+      const y = anchorYear + (k + i) * n
+      const daysInMonth = new Date(Date.UTC(y, month, 0)).getUTCDate()
+      if (day > daysInMonth) continue
+      const key = `${String(y).padStart(4, '0')}-${pad(month)}-${pad(day)}`
+      if (key >= today) return key
+    }
+    // 兜底（仅 2/29 可能出现）：严格相位序列里不存在合法日（如锚点年 ≡1 mod 4 且 interval 是 4 的倍数）
+    // 时，退化为逐年后移到下一个真实存在的重复日；首现后 rule.start 相位锚定，后续计算不会再触发兜底。
+    if (month === 2 && day === 29) {
+      for (let i = 0; i < 4000; i++) {
+        const y = todayYear + i
+        const daysInMonth = new Date(Date.UTC(y, month, 0)).getUTCDate()
+        if (29 > daysInMonth) continue
+        const key = `${String(y).padStart(4, '0')}-${pad(month)}-${pad(day)}`
+        if (key >= today) return key
+      }
+    }
+    return today
   }
   if (isRepeatDay(rule, anchor, today)) return today
   let d = today
@@ -188,6 +263,7 @@ export function repeatShapeEquals(a: RepeatRule, b: RepeatRule): boolean {
     a.interval === b.interval &&
     JSON.stringify(a.weekdays ?? []) === JSON.stringify(b.weekdays ?? []) &&
     (a.monthDay ?? 0) === (b.monthDay ?? 0) &&
+    (a.yearMonth ?? 0) === (b.yearMonth ?? 0) &&
     JSON.stringify(a.dates ?? []) === JSON.stringify(b.dates ?? [])
   )
 }
@@ -218,6 +294,7 @@ export function buildReminderPayload(task: Task): RepeatRule | undefined {
   const payload: RepeatRule = { type: rule.type, interval: Math.max(1, rule.interval || 1) }
   if (rule.weekdays?.length) payload.weekdays = [...rule.weekdays]
   if (rule.monthDay) payload.monthDay = rule.monthDay
+  if (rule.yearMonth) payload.yearMonth = rule.yearMonth
   if (rule.dates?.length) payload.dates = [...rule.dates]
   if (rule.endAfter) payload.endAfter = rule.endAfter
   return payload

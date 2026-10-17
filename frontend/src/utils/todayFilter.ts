@@ -1,5 +1,5 @@
 import type { RepeatMaster, RepeatRule, Subtask, Task } from '@/types'
-import { addDaysKey, dateKeyOf } from './time'
+import { addDaysKey, addMonthsKey, dateKeyOf, diffDaysKey } from './time'
 import { isNewStyleRepeat, isRepeatDay } from './repeat'
 import { taskEffectiveSortTime } from './task'
 
@@ -91,12 +91,14 @@ export function nextVisibleDateInWindow(t: Task, today: string, windowDays = 30)
   return null
 }
 
-/** 未来 30 天窗口内「会被今日视图显示」的任务（按任务去重，取最早出现日），
+/** 未来 N 个月窗口内「会被今日视图显示」的任务（按任务去重，取最早出现日），
  *  供今日视图「未来任务」区使用。
  *  - 今日任务视图已经显示的任务不再进入未来区（例如开始/截止区间覆盖今天又延续到
  *    未来的进行中任务、每天重复的任务），避免同一任务两处重复展示；
  *  - 其余任务逐日套用 isTaskVisibleOn（开始、开始~截止覆盖、提醒命中、
- *    重复规则命中、子任务同规则），30 天窗口外才开始/提醒的任务不收集；
+ *    重复规则命中、子任务同规则），窗口外才开始/提醒的任务不收集；
+ *  - 窗口终点按自然月计算：today + windowMonths 个月（收尾到当月最后一天），
+ *    窗口覆盖 [today+1, 终点]；
  *  - 重复模板（完成重复任务后生成）：dueDate 落在窗口内，且按今日视图规则当天会显示
  *    才收集（物化后即成为当天可见的待办任务）。 */
 /** 未来任务排序参考时间：主任务 + 未完成子任务取最早（地位同等）；无任何时间退回「下次任务生成日」按当天 00:00 参与跨天比较 */
@@ -121,8 +123,11 @@ export function collectFutureVisibleTasks(
   allTasks: Task[],
   repeats: Record<string, RepeatMaster[]>,
   today: string,
-  windowDays = 30,
+  windowMonths = 1,
 ): { task: Task; date: string }[] {
+  // 窗口终点按自然月计算（今天 + N 个月，收尾到当月最后一天）；逐日判定逻辑不变
+  const last = addMonthsKey(today, windowMonths)
+  const windowDays = diffDaysKey(today, last)
   const out: { task: Task; date: string }[] = []
   for (const t of allTasks) {
     // 今日任务视图已经显示的任务不再进入未来任务区（避免同一任务两处重复展示），
@@ -131,7 +136,6 @@ export function collectFutureVisibleTasks(
     const date = nextVisibleDateInWindow(t, today, windowDays)
     if (date) out.push({ task: t, date })
   }
-  const last = addDaysKey(today, windowDays)
   const rootById = new Map(allTasks.map((t) => [t.id, t]))
   for (const pid of Object.keys(repeats)) {
     for (const m of repeats[pid] ?? []) {

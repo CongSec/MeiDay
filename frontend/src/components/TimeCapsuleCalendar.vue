@@ -452,23 +452,27 @@ const rows = computed<WeekRow[]>(() => {
   return out
 })
 
+function taskDisplayName(t: Task): string {
+  return t.name || '未命名任务'
+}
+
 function chipTitle(c: Chip): string {
   const pid = props.projectName(c.task.projectId)
   if (c.kind === 'pending') {
     const time = timeOfDay(c.task.reminderTime || c.task.startTime)
     const rep = c.task.repeat ? formatRepeat(c.task.repeat) : ''
-    const parts = [pid, c.task.name]
+    const parts = [pid, taskDisplayName(c.task)]
     const detail = [c.day.slice(5)]
     if (time) detail.push(time)
     if (rep) detail.push(rep)
     return `${parts.join(' · ')}（${detail.join(' ')}）`
   }
-  return `${pid} · ${c.task.name}（${c.day.slice(5)} ${timeOfDay(c.task.updatedAt)} 完成）`
+  return `${pid} · ${taskDisplayName(c.task)}（${c.day.slice(5)} ${timeOfDay(c.task.updatedAt)} 完成）`
 }
 
 function barTitle(b: CrossBar): string {
   const kind = b.kind === 'done' ? '完成' : '截止'
-  return `${props.projectName(b.task.projectId)} · ${b.task.name}（${b.startKey.slice(5)} → ${b.endKey.slice(5)}，${kind}）`
+  return `${props.projectName(b.task.projectId)} · ${taskDisplayName(b.task)}（${b.startKey.slice(5)} → ${b.endKey.slice(5)}，${kind}）`
 }
 
 /** 是否还能上月/下月（按年份过滤时在所选年 1 月/12 月禁用边界按钮） */
@@ -550,7 +554,7 @@ function changeMonth(delta: number) {
                 :title="chipTitle(chip)"
                 @click="emit('open-task', chip.task, chip.day)"
               >
-                {{ chip.task.name }}
+                {{ taskDisplayName(chip.task) }}
               </button>
             </div>
     <!-- 跨天横条：整根固定同一行（无台阶），从开始日延伸到完成/截止日，与对应小块同排 -->

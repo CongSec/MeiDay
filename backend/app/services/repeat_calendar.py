@@ -82,6 +82,11 @@ def weekday_of(date_key: str) -> int:
     return (datetime.strptime(date_key, "%Y-%m-%d").weekday() + 1) % 7
 
 
+def is_leap_year(y: int) -> bool:
+    """公历闰年判断（与前端 repeat.ts isLeapYear 一致）。"""
+    return (y % 4 == 0 and y % 100 != 0) or y % 400 == 0
+
+
 def add_months_key(date_key: str, months: int, day: int | None = None) -> str:
     """月份加 N 个月（YYYY-MM-DD），day 用于指定日期并自动收敛到月末。"""
     y, m, d = (int(x) for x in date_key.split("-"))
@@ -114,8 +119,8 @@ def next_legal_workday(date_key: str) -> str:
     return cur
 
 
-def next_repeat_date(rule: dict, anchor: str) -> str | None:
-    """计算严格晚于 anchor（YYYY-MM-DD）的下一个重复日期；无后续日期返回 None。"""
+def _next_repeat_date_raw(rule: dict, anchor: str) -> str | None:
+    """按规则计算严格晚于 anchor（YYYY-MM-DD）的下一个重复日期（不跳过已处理日）；无后续日期返回 None。"""
     n = max(1, int(rule.get("interval") or 1))
     if n > _REPEAT_INTERVAL_MAX:
         # V-001：超大 interval 会放大 weekly 循环次数/引发日期溢出，按“无法推进”处理
@@ -151,6 +156,33 @@ def next_repeat_date(rule: dict, anchor: str) -> str | None:
         if d <= anchor:
             d = add_months_key(anchor, n * 2, day)
         return d
+    if rtype == "yearly":
+        month = int(rule.get("yearMonth") or anchor[5:7])
+        day = int(rule.get("monthDay") or anchor[8:10])
+        anchor_year = int(anchor[:4])
+        # 相位与每月一致：候选年 = 锚点年 + k*n（年份差为 interval 整数倍）；
+        # 候选年该月无此日（2/29 非闰年、非法月日组合如 4/31）则跳过该候选年。
+        # 400 年覆盖一个完整公历闰年周期，预算内找不到合法年再走 2/29 兜底；
+        # 同时限制年份在 strptime 可解析范围内（防止日期溢出）。
+        for k in range(1, 401):
+            y = anchor_year + k * n
+            if y > 9999:
+                break
+            if day > calendar.monthrange(y, month)[1]:
+                continue
+            return f"{y:04d}-{month:02d}-{day:02d}"
+        # 兜底（仅 2/29 可能出现）：严格相位序列里不存在合法日（如锚点年 ≡1 mod 4
+        # 且 interval 是 4 的倍数）时，退化为逐年后移到下一个真实存在的重复日；
+        # 与前端 currentOrNextOccurrence 的兜底语义一致（首现后 start 相位锚定不再触发）。
+        if month == 2 and day == 29:
+            for i in range(1, 401):
+                y = anchor_year + i
+                if y > 9999:
+                    break
+                if 29 > calendar.monthrange(y, 2)[1]:
+                    continue
+                return f"{y:04d}-02-29"
+        return None
     if rtype == "legalWorkday":
         return next_legal_workday(anchor)
     if rtype == "dates":
@@ -159,6 +191,28 @@ def next_repeat_date(rule: dict, anchor: str) -> str | None:
         nxt = next((d for d in ds if d > anchor), None)
         return nxt
     return None
+
+
+def next_repeat_date(rule: dict, anchor: str) -> str | None:
+    """计算严格晚于 anchor（YYYY-MM-DD）的下一个重复日期；无后续日期返回 None。
+
+    会跳过 processedDates 中「已被单日完成/删除」的重复日（与前端 skipProcessedRepeatDays
+    语义一致）：路径一修复——客户端把 repeatProcessed 随 repeat_rule 上报，服务端推进时
+    不再落入已处理的重复日，避免对已点完成/已入舱的那一天继续发提醒邮件。
+    """
+    processed = {str(x) for x in (rule.get("processedDates") or [])}
+    if not processed:
+        return _next_repeat_date_raw(rule, anchor)
+    d = _next_repeat_date_raw(rule, anchor)
+    guard = 0
+    while d is not None and d in processed and guard < _REPEAT_MAX_ITER:
+        nd = _next_repeat_date_raw(rule, d)
+        if nd is None or nd <= d:
+            return None
+        d = nd
+        guard += 1
+    # 预算耗尽仍未跳出已处理日（理论上需连续数十年单日处理才可能）：按“无法推进”处理
+    return None if d in processed else d
 
 
 def compute_next_reminder(rule: dict, current_iso: str):
