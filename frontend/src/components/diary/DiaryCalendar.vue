@@ -34,7 +34,11 @@
           v-else
           class="relative h-9 rounded-lg text-sm transition flex items-center justify-center"
           :class="[
-            cell === selectedDay ? 'bg-brand text-white font-semibold' : 'text-slate-600 hover:bg-slate-200',
+            cell === selectedDay
+              ? 'bg-brand text-white font-semibold'
+              : keyOf(cell) === today
+                ? 'bg-brand-50 text-brand-600 font-semibold hover:bg-brand-100'
+                : 'text-slate-600 hover:bg-slate-200',
             isFuture(cell) ? 'opacity-40' : '',
           ]"
           @click="onPick(cell)"

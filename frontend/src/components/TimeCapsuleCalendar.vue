@@ -12,7 +12,7 @@
 import { computed } from 'vue'
 import type { RepeatMaster, Task } from '@/types'
 import { dateKeyOf, todayKey } from '@/utils/time'
-import { formatRepeat, isRepeatDay } from '@/utils/repeat'
+import { formatRepeat, isRepeatDay, rootIdOf } from '@/utils/repeat'
 import AppIcon from '@/components/AppIcon.vue'
 import { useHorizontalDrag } from '@/composables/useHorizontalDrag'
 
@@ -44,6 +44,9 @@ const emit = defineEmits<{
 const { scrollEl, onPointerDown, onPointerMove, onPointerEnd, onClickCapture } = useHorizontalDrag()
 
 const WEEK_LABELS = ['一', '二', '三', '四', '五', '六', '日']
+
+/** 今天（固定常量：页面打开当天；与未来日判断一致） */
+const today = todayKey()
 
 const year = computed(() => Number(props.month.slice(0, 4)))
 const monthIdx = computed(() => Number(props.month.slice(5, 7)) - 1)
@@ -116,6 +119,9 @@ const doneBars = computed<CrossBar[]>(() => {
   const out: CrossBar[] = []
   for (const t of props.tasks) {
     if (t.status !== 'completed') continue
+    // 重复任务：每次出现是独立单日，开始时间锚点可能残留在上一次物化 / 创建日（如跳过某天后才完成），
+    // 画跨天横条会把两个独立的重复日"连在一起"，故不画横条（小块仍按完成日显示）。
+    if (t.repeat) continue
     const startKey = taskStart(t) ? dateKeyOf(taskStart(t)) : ''
     const endKey = taskEnd(t) ? dateKeyOf(taskEnd(t)) : ''
     if (!startKey || !endKey || startKey >= endKey) continue
@@ -123,6 +129,26 @@ const doneBars = computed<CrossBar[]>(() => {
     out.push({ task: t, kind: 'done', startKey, endKey, anchorDay: endKey, lane: 0 })
   }
   return out
+})
+
+/** 同链已完成日集合：按重复链根 id 汇总「已完成记录」的归属日（单日完成记录用 repeatOccurrence.date，
+ *  正常完成记录用完成时间所在日）。用于剔除「已完成当天又被 pending 任务枚举成待办小块」的幻影：
+ *  正常完成路径补写 repeatProcessed 标记是修复后的行为，这里对修复前 / 历史数据做显示层兜底。 */
+const completedDaysByRoot = computed(() => {
+  const map = new Map<string, Set<string>>()
+  for (const t of props.tasks) {
+    if (t.status !== 'completed') continue
+    const rootId = t.repeatOccurrence?.rootId ?? rootIdOf(t)
+    const day = t.repeatOccurrence?.date ?? (taskEnd(t) ? dateKeyOf(taskEnd(t)) : '')
+    if (!day) continue
+    let s = map.get(rootId)
+    if (!s) {
+      s = new Set()
+      map.set(rootId, s)
+    }
+    s.add(day)
+  }
+  return map
 })
 
 /** 胶囊外未完成任务：非重复任务按提醒(优先)/开始时间归属当天；重复任务枚举本月所有发生日 */
@@ -135,6 +161,8 @@ const pendingChips = computed<Chip[]>(() => {
     const start = taskStart(t)
     if (!start && !rule) continue // 无开始/提醒/重复，不纳入
     if (rule) {
+      // 该待办所属重复链上「已完成」的日期集合（显示层兜底：正常完成未写标记的历史数据）
+      const doneByRoot = completedDaysByRoot.value.get(rootIdOf(t))
       // 重复任务：相位锚点优先用新模型的 rule.start，否则用提醒/截止/开始时间所在日（老数据）
       const anchor = rule.start || dateKeyOf(t.reminderTime || t.endTime || t.startTime) || monthFirst.value
       const time = timeOfDay(t.reminderTime || t.startTime || t.endTime)
@@ -144,6 +172,8 @@ const pendingChips = computed<Chip[]>(() => {
         if (!isRepeatDay(rule, anchor, key)) continue
         // 已处理（完成/删除）的某次重复出现：不再显示成待办小块
         if (t.repeatProcessed?.[key]) continue
+        // 该日已有同链完成记录：不再显示成待办小块（避免与已完成小块同天重复）
+        if (doneByRoot?.has(key)) continue
         out.push({
           task: t,
           kind: 'pending',
@@ -539,10 +569,19 @@ function changeMonth(delta: number) {
               v-for="cell in row.cells"
               :key="cell.key"
               class="relative flex-1 border-r border-slate-300 p-1.5 last:border-r-0"
-              :class="cell.inMonth ? 'bg-white' : 'bg-slate-50/70'"
+              :class="cell.inMonth ? (cell.key === today ? 'bg-brand-50' : 'bg-white') : 'bg-slate-50/70'"
             >
               <div class="flex items-center justify-between">
-                <span class="text-[11px] leading-4" :class="cell.inMonth ? 'text-slate-600' : 'text-slate-300'">{{ cell.day }}</span>
+                <span
+                  class="text-[11px] leading-4"
+                  :class="
+                    cell.inMonth
+                      ? cell.key === today
+                        ? 'text-brand-600 font-semibold'
+                        : 'text-slate-600'
+                      : 'text-slate-300'
+                  "
+                >{{ cell.day }}</span>
                 <span v-if="cell.chips.length" class="rounded bg-slate-100 px-1 text-[10px] leading-4 text-slate-500">{{ cell.chips.length }}</span>
               </div>
               <button

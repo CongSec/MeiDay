@@ -61,7 +61,7 @@ export interface Task {
   isReminded: boolean
   createdAt: string
   updatedAt: string
-  /** 排序位置（拖拽排序后写入；旧数据缺失时按截止时间排序） */
+  /** 排序位置（拖拽排序后写入；旧数据缺失时按统一时间链 提醒 > 开始 > 创建时间 排序） */
   sort?: number
   /** 子任务列表（旧数据可能缺失，读取时统一补空数组） */
   subtasks: Subtask[]

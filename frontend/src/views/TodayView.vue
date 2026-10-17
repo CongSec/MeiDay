@@ -13,6 +13,7 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import AppIcon from '@/components/AppIcon.vue'
 import { dateKeyOf, nowIso, toLocalInput, addMonthsKey } from '@/utils/time'
 import { collectFutureVisibleTasks, isTaskVisibleToday } from '@/utils/todayFilter'
+import { compareTasksByTime } from '@/utils/task'
 import type { Subtask, Task } from '@/types'
 import { useSync } from '@/composables/useSync'
 import { useNow } from '@/composables/useNow'
@@ -82,15 +83,11 @@ const sorted = computed(() => {
   const orderMap = new Map<string, number>()
   tasks.todayOrder.forEach((id, idx) => orderMap.set(id, idx))
   const byOrder = (a: Task, b: Task) => (orderMap.get(a.id) ?? 0) - (orderMap.get(b.id) ?? 0)
-  const fallback = (a: Task, b: Task) => {
-    const sa = a.sort ?? Number.MAX_SAFE_INTEGER
-    const sb = b.sort ?? Number.MAX_SAFE_INTEGER
-    if (sa !== sb) return sa - sb
-    return (a.endTime || '').localeCompare(b.endTime || '')
-  }
   const group = (list: Task[]) => {
+    // 手动拖拽顺序最高优先：注册过 todayOrder 的按顺序表排；
+    // 未注册的跳过手动键，按统一链（提醒 > 开始 > 创建时间）排，endTime 不再参与
     const registered = list.filter((t) => orderMap.has(t.id)).sort(byOrder)
-    const unregistered = list.filter((t) => !orderMap.has(t.id)).sort(fallback)
+    const unregistered = list.filter((t) => !orderMap.has(t.id)).sort(compareTasksByTime)
     return [...registered, ...unregistered]
   }
   return [
@@ -145,7 +142,7 @@ function selectFutureWindow(months: number): void {
   futureMenuOpen.value = false
 }
 
-/** 拖拽用可变列表：注册过 todayOrder 的按手动顺序排，其余按 sort/截止时间兜底；手动拖拽后保留顺序，仅在任务增删时重排 */
+/** 拖拽用可变列表：注册过 todayOrder 的按手动顺序排，未注册的按统一链（提醒 > 开始 > 创建时间）排；手动拖拽后保留顺序，仅在任务增删时重排 */
 const dragList = ref<Task[]>([])
 
 /** 统一拖拽参数（触屏 fallback 拖拽更丝滑） */
@@ -168,7 +165,7 @@ const visibleKey = computed(() => {
 watch(
   [visibleKey, () => tasks.todayOrder],
   () => {
-    // 手动拖拽顺序最高优先：注册过 todayOrder 的按顺序表排，未注册的按 sort/截止时间兜底，
+    // 手动拖拽顺序最高优先：注册过 todayOrder 的按顺序表排，未注册的按统一链（提醒 > 开始 > 创建时间）排，
     // 过期任务不再自动置顶（避免覆盖手动顺序）。
     dragList.value = sorted.value
   },
@@ -181,33 +178,8 @@ function onDragStart() {
 
 function onDragEnd() {
   setDragging(false)
-  const byProject = new Map<string, Task[]>()
-  for (const t of dragList.value) {
-    if (t.status !== 'pending') continue
-    const arr = byProject.get(t.projectId) ?? []
-    arr.push(t)
-    byProject.set(t.projectId, arr)
-  }
-  for (const [pid, arr] of byProject) {
-    const full = tasks.tasks[pid] ?? []
-    // 今日视图只包含“今日可见”的任务；拖拽后把拖拽任务的“新顺序”填回其原本
-    // 占据的槽位，其余任务（含今日不可见的 pending）保持原有位置与相对顺序，
-    // 避免被打乱或整体挪到末尾。
-    const draggedIds = new Set(arr.map((t) => t.id))
-    const notDragged = full.filter((t) => !draggedIds.has(t.id))
-    const ordered: Task[] = []
-    let ni = 0
-    let ai = 0
-    for (const t of full) {
-      if (draggedIds.has(t.id)) {
-        if (ai < arr.length) ordered.push(arr[ai++])
-      } else {
-        ordered.push(notDragged[ni++])
-      }
-    }
-    while (ai < arr.length) ordered.push(arr[ai++])
-    tasks.setOrder(pid, ordered)
-  }
+  // 今日拖拽与项目排序彻底解耦：只写全局 todayOrder（今日页自己的手动顺序），
+  // 不再回写各项目的 sort，项目页顺序不受今日拖拽影响。
   const visibleIds = dragList.value.map((t) => t.id)
   if (visibleIds.join('|') !== tasks.todayOrder.join('|')) tasks.setTodayOrder(visibleIds)
 }

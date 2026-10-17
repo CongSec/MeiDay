@@ -89,8 +89,8 @@ function onAddSubtask() {
   emit('addSubtask', props.task)
 }
 
-/** 子任务本地排序副本：进入/新增/同步合并时按「提醒 > 开始 > 更新时间」自动排序；
- *  拖拽过即写入 sort 手动顺序优先，新子任务无 sort 自动补末尾（与主任务拖拽语义一致） */
+/** 子任务本地排序副本：进入/新增/同步合并时按统一链「手动 sort > 提醒 > 开始 > 创建时间」排序；
+ *  拖拽过即写入 sort 手动顺序优先，新子任务无 sort 落在已排序之后按时间链排（与主任务拖拽语义一致） */
 const subDragList = ref<Subtask[]>([])
 watch(
   () => [props.task.subtasks, props.task.updatedAt],

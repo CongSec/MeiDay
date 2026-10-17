@@ -1,5 +1,4 @@
-import { dateKeyOf, nowIso } from './time'
-import { isNewStyleRepeat, isRepeatDay } from './repeat'
+import { nowIso } from './time'
 import type { Subtask, Task } from '@/types'
 
 /** 新建一个空的子任务（时间字段空字符串表示未设置，与任务保持一致） */
@@ -43,68 +42,55 @@ export function pendingSubtaskReminders(t: Task): Subtask[] {
   return t.subtasks.filter((s) => s.reminderTime && !s.completed)
 }
 
-/** 单个候选（主任务或子任务）的排序参考时间：提醒时间 > 开始时间（都没有返回 null，无时间任务排最后） */
-function subtaskSortTime(reminderTime: string | null | undefined, startTime: string): { iso: string; day: string; rank: 1 | 2 } | null {
-  if (reminderTime) return { iso: reminderTime, day: dateKeyOf(reminderTime), rank: 1 }
-  if (startTime) return { iso: startTime, day: dateKeyOf(startTime), rank: 2 }
-  return null
+/** 排序键缺失判定：null / undefined / 空串 都视为未设置（缺失排在设置有值之后） */
+function keyOrNull(v: string | null | undefined): string | null {
+  if (v === null || v === undefined || v === '') return null
+  return v
 }
 
-/** 排序参考时间比较：同一天按「提醒 > 开始」类型优先级；不同一天所有时间同一级别，按实际时间先后（无时间排最后） */
-export function compareSortTime(
-  a: { iso: string; day: string; rank: 1 | 2 } | null,
-  b: { iso: string; day: string; rank: 1 | 2 } | null,
+/** 单个键比较：有值在前（升序），缺失（null/空串）排后 */
+function cmpKey(a: string | null | undefined, b: string | null | undefined): number {
+  const ka = keyOrNull(a)
+  const kb = keyOrNull(b)
+  if (ka === kb) return 0
+  if (ka === null) return 1
+  if (kb === null) return -1
+  return ka.localeCompare(kb)
+}
+
+/** 统一排序链（无手动键）：提醒时间 > 开始时间 > 创建时间。
+ *  只取主任务/子任务自身字段（不含 endTime、不含子任务聚合）；升序；缺失键排后。 */
+export function compareTasksByTime(
+  a: { reminderTime?: string | null; startTime?: string; createdAt: string },
+  b: { reminderTime?: string | null; startTime?: string; createdAt: string },
 ): number {
-  if (!a && !b) return 0
-  if (!a) return 1
-  if (!b) return -1
-  if (a.day === b.day) {
-    if (a.rank !== b.rank) return a.rank - b.rank
-    return a.iso.localeCompare(b.iso)
-  }
-  return a.iso.localeCompare(b.iso)
+  const c1 = cmpKey(a.reminderTime, b.reminderTime)
+  if (c1 !== 0) return c1
+  const c2 = cmpKey(a.startTime, b.startTime)
+  if (c2 !== 0) return c2
+  return (a.createdAt || '').localeCompare(b.createdAt || '')
 }
 
-/** 主任务「组有效时间」：主任务自身 + 各未完成子任务按规则最靠前的一个（地位同等，取最早）；
- *  全无时间返回 null（无时间任务排最后）。 */
-export function taskEffectiveSortTime(t: Task): { iso: string; day: string; rank: 1 | 2 } | null {
-  let best = subtaskSortTime(t.reminderTime, t.startTime)
-  for (const s of t.subtasks ?? []) {
-    if (s.completed) continue
-    const st = subtaskSortTime(s.reminderTime, s.startTime)
-    if (st && (!best || compareSortTime(st, best) < 0)) best = st
-  }
-  return best
+/** 统一排序链（带手动键）：手动排序 > 提醒时间 > 开始时间 > 创建时间。
+ *  manualA / manualB 为手动顺序值（今日视图为 todayOrder 下标、项目/子任务为 sort），
+ *  缺失时该键跳过（直接落到下一键比较）。 */
+export function compareTaskChain(
+  a: Task | Subtask,
+  b: Task | Subtask,
+  manualA?: number,
+  manualB?: number,
+): number {
+  const ma = manualA ?? Number.MAX_SAFE_INTEGER
+  const mb = manualB ?? Number.MAX_SAFE_INTEGER
+  if (ma !== mb) return ma - mb
+  return compareTasksByTime(a, b)
 }
 
-/** 主任务「组截止时间」：主任务自身 + 各未完成子任务最早的 endTime（全无返回 ''，
- *  供从未拖拽项目按截止时间兜底排序与 sort 平局比较）。 */
-export function taskEffectiveEndTime(t: Task): string {
-  let best = t.endTime || ''
-  for (const s of t.subtasks ?? []) {
-    if (s.completed || !s.endTime) continue
-    if (!best || s.endTime < best) best = s.endTime
-  }
-  return best
-}
-
-/** 子任务列表排序：一旦被手动拖拽过（存在 sort 值）就按 sort 升序（未分配 sort 的新子任务补末尾），
- *  手动顺序在加载/同步合并后保持；从未拖拽过则按「提醒 > 开始 > 更新时间」自动排序（最早在前）。 */
+/** 子任务列表排序：统一链「手动 sort > 提醒 > 开始 > 创建时间」。
+ *  拖拽过的子任务按 sort 升序（手动顺序在加载/同步合并后保持），
+ *  未拖过的按时间链自动排序（最早在前）。 */
 export function sortSubtasks(list: Subtask[]): Subtask[] {
-  const hasSort = list.some((s) => s.sort !== undefined)
-  if (hasSort) {
-    return [...list].sort((a, b) => {
-      const sa = a.sort ?? Number.MAX_SAFE_INTEGER
-      const sb = b.sort ?? Number.MAX_SAFE_INTEGER
-      if (sa !== sb) return sa - sb
-      return (a.endTime || '').localeCompare(b.endTime || '') || a.updatedAt.localeCompare(b.updatedAt)
-    })
-  }
-  return [...list].sort((a, b) => {
-    const c = compareSortTime(subtaskSortTime(a.reminderTime, a.startTime), subtaskSortTime(b.reminderTime, b.startTime))
-    if (c !== 0) return c
-    return a.updatedAt.localeCompare(b.updatedAt)
-  })
+  return [...list].sort((a, b) => compareTaskChain(a, b, a.sort, b.sort))
 }
 
 /** 规范化 JSON 序列化：递归对对象键排序、数组保持原顺序。

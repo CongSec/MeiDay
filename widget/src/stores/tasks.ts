@@ -5,7 +5,7 @@ import { applyDeletedTombstones, lastModifiedOf, lmKeyOf, mergeDeletedTombstones
 import { idbGet, idbPut, idbDel } from '@/utils/idb'
 import { nowIso, todayKey } from '@/utils/time'
 import { isTaskVisibleToday } from '@/utils/todayFilter'
-import { normalizeTasks, taskEffectiveEndTime } from '@/utils/task'
+import { compareTaskChain, normalizeTasks } from '@/utils/task'
 import { addDaysKey, dateKeyOf } from '@/utils/time'
 import { UNCATEGORIZED, type RepeatMaster, type Task } from '@/types'
 
@@ -149,14 +149,8 @@ function isServerEmptyError(e: unknown): boolean {
 }
 
 function sortActiveList(list: Task[]): Task[] {
-  const hasSort = list.some((t) => t.sort !== undefined)
-  const cmp = hasSort
-    ? (a: Task, b: Task) => {
-        const sa = a.sort ?? Number.MAX_SAFE_INTEGER
-        const sb = b.sort ?? Number.MAX_SAFE_INTEGER
-        return sa !== sb ? sa - sb : taskEffectiveEndTime(a).localeCompare(taskEffectiveEndTime(b))
-      }
-    : (a: Task, b: Task) => taskEffectiveEndTime(a).localeCompare(taskEffectiveEndTime(b))
+  // 统一排序链：手动 sort > 提醒 > 开始 > 创建时间（升序；缺失键排后，endTime 不参与）
+  const cmp = (a: Task, b: Task) => compareTaskChain(a, b, a.sort, b.sort)
   const pending = list.filter((t) => t.status === 'pending').sort(cmp)
   const rest = list.filter((t) => t.status !== 'pending').sort(cmp)
   return [...pending, ...rest]

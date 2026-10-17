@@ -16,7 +16,7 @@ import { buildOccurrenceTemplate, buildReminderPayload, buildRepeatOccurrence, h
 import { api } from '@/api/client'
 import { logAudit, logAttachmentDeletion, safeDetail } from '@/utils/audit'
 import { UNCATEGORIZED, type AttachmentMeta, type RepeatMaster, type Subtask, type Task } from '@/types'
-import { canonicalJson, compareSortTime, newSubtask, normalizeTask, normalizeTasks, pendingSubtaskReminders, taskEffectiveEndTime, taskEffectiveSortTime } from '@/utils/task'
+import { canonicalJson, compareTaskChain, compareTasksByTime, newSubtask, normalizeTask, normalizeTasks, pendingSubtaskReminders } from '@/utils/task'
 import { deleteAttachments, ossFileName } from '@/utils/attachments'
 const saveDebouncers = new Map<string, Debounced<[]>>()
 const trashDebouncers = new Map<string, Debounced<[]>>()
@@ -116,23 +116,15 @@ function isServerEmptyError(e: unknown): boolean {
 }
 /**
  * 排序活跃任务：pending 在前、其余置后。
- * 项目一旦被拖拽排序（存在 sort 值）就按 sort 升序排列（未分配 sort 的新任务补到末尾），
- * 让手动拖拽顺序在加载/同步合并后保持；从未拖拽过的项目退化为按截止时间升序（旧行为，
- * 截止时间取主任务 + 未完成子任务最早 endTime）。
+ * 统一排序链：手动 sort > 提醒时间 > 开始时间 > 创建时间（升序；缺失键排后，endTime 不参与）。
+ * 拖拽过（有 sort）的任务按 sort 升序、未拖过的按时间链自动排序，让手动顺序在加载/同步合并后保持。
  */
-/** 新建任务插入比较：主任务 + 未完成子任务取最早（地位同等）；同一天按「提醒 > 开始」类型优先级；不同一天按实际时间先后（无时间排最后） */
+/** 新建任务插入比较：统一时间链（提醒 > 开始 > 创建时间），无视已有 sort（新任务按时间就位） */
 function compareTaskSort(a: Task, b: Task): number {
-  return compareSortTime(taskEffectiveSortTime(a), taskEffectiveSortTime(b))
+  return compareTasksByTime(a, b)
 }
 function sortActiveList(list: Task[]): Task[] {
-  const hasSort = list.some((t) => t.sort !== undefined)
-  const cmp = hasSort
-    ? (a: Task, b: Task) => {
-        const sa = a.sort ?? Number.MAX_SAFE_INTEGER
-        const sb = b.sort ?? Number.MAX_SAFE_INTEGER
-        return sa !== sb ? sa - sb : taskEffectiveEndTime(a).localeCompare(taskEffectiveEndTime(b))
-      }
-    : (a: Task, b: Task) => taskEffectiveEndTime(a).localeCompare(taskEffectiveEndTime(b))
+  const cmp = (a: Task, b: Task) => compareTaskChain(a, b, a.sort, b.sort)
   const pending = list.filter((t) => t.status === 'pending').sort(cmp)
   const rest = list.filter((t) => t.status !== 'pending').sort(cmp)
   return [...pending, ...rest]
@@ -2034,11 +2026,8 @@ export const useTasksStore = defineStore('tasks', {
             for (const task of toAdd) {
               if (next.some((t) => t.id === task.id)) continue
               next.push(task)
-              // 物化出的重复任务也登记到今日顺序表末尾，避免刷新后按截止时间重排打乱已拖拽顺序
-              if (isTaskVisibleToday(task, todayKey()) && !this.todayOrder.includes(task.id)) {
-                this.todayOrder = [...this.todayOrder, task.id]
-                void this.saveTodayOrderNow()
-              }
+              // 物化出的重复任务不注册 todayOrder：进今日页时走「未注册组」按统一链
+              // （提醒 > 开始 > 创建时间）时间就位，用户拖过后才登记手动顺序。
               logAudit('生成重复任务', safeDetail(`任务ID：${task.id}，项目ID：${pid}，周期：${task.repeat?.type ?? ''}`))
             }
             // 自愈去重兜底：即便极端情况下出现 id 不同的同链同日重复（旧随机 id 数据/竞态），
@@ -2441,12 +2430,8 @@ export const useTasksStore = defineStore('tasks', {
           t.sort = i
         })
       }
-      // 新任务若是今日可见，登记到今日顺序表末尾（独立小文件后台落盘，失败不影响主保存），
-      // 保证今日视图里新任务的位置跨设备一致，而不是每次按截止时间重排
-      if (isNew && isTaskVisibleToday(task, todayKey())) {
-        this.todayOrder = [...this.todayOrder.filter((id) => id !== task.id), task.id]
-        void this.saveTodayOrderNow()
-      }
+      // 新建/移入任务不自动登记 todayOrder：进今日页时走「未注册组」按统一链
+      // （提醒 > 开始 > 创建时间）时间就位（与物化任务一致），用户拖过后才登记手动顺序。
       this.tasks[target] = list
       this._persist(target)
       // 编辑源任务后同步重复模板（与时间胶囊 / 未来任务编辑同一套统一逻辑）：
@@ -2565,6 +2550,10 @@ export const useTasksStore = defineStore('tasks', {
       if (!task) return false
       const completing = task.status !== 'completed'
       if (completing && task.repeat) {
+        // 标记完成日：与单日完成路径（_completeOccurrence 写 repeatProcessed[day]='completed'）保持一致。
+        // 否则日历图会把已完成当天继续枚举成"未完成"小块（同一天重复显示）；该标记会随模板/后续
+        // 物化任务继承，使已完成的过去日不再作为待办出现（模板 / 物化对这一天自动跳过）。
+        task.repeatProcessed = { ...(task.repeatProcessed ?? {}), [todayKey()]: 'completed' }
         // 重复任务完成：不立即生成下一次，而是把下一次出现存成模板（等重复当天再显示）。
         // 提醒邮件由服务器按周期规则继续按时发送，即使不打开 App 也会每天提醒；
         // 模板 id 沿用源任务 id，保证服务器提醒行不被打断。
@@ -2597,6 +2586,14 @@ export const useTasksStore = defineStore('tasks', {
       } else if (!completing && task.repeat) {
         // 取消完成：删除该任务的重复模板，恢复由任务自己承担提醒；
         // 服务器端同一 task_id 行的推进时间由“服务端时间较新则保留”逻辑兜底，不重复发信。
+        // 同时移除完成日标记（此刻 task.updatedAt 仍是完成时间）：否则今日页 / 日历会一直把
+        // 这一天当作“已处理”过滤掉，任务恢复待办后反而不显示。
+        const doneDay = dateKeyOf(task.updatedAt)
+        if (task.repeatProcessed?.[doneDay]) {
+          task.repeatProcessed = { ...task.repeatProcessed }
+          delete task.repeatProcessed[doneDay]
+          if (!Object.keys(task.repeatProcessed).length) task.repeatProcessed = undefined
+        }
         this._deleteMasterForTask(task.id)
       }
       task.status = completing ? 'completed' : 'pending'
@@ -2797,13 +2794,8 @@ export const useTasksStore = defineStore('tasks', {
         this.tasks[pid] = sortActiveList(this.tasks[pid])
         this._persist(pid)
       }
-      // 批量导入的新任务同样登记到今日顺序表末尾（仅今日可见的），跨设备顺序一致
-      const today = todayKey()
-      const newIds = list.filter((t) => isTaskVisibleToday(t, today)).map((t) => t.id)
-      if (newIds.length) {
-        this.todayOrder = [...this.todayOrder, ...newIds.filter((id) => !this.todayOrder.includes(id))]
-        void this.saveTodayOrderNow()
-      }
+      // 批量导入的新任务不自动登记 todayOrder：与手动新建/物化任务一致，
+      // 进今日页走「未注册组」按统一链时间就位，用户拖过后才登记手动顺序。
       logAudit('批量导入任务', safeDetail(`共导入 ${list.length} 个任务（涉及 ${touched.size} 个项目）`))
     },
     /** 切换子任务完成状态 */

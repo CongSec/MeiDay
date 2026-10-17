@@ -4,6 +4,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useTasksStore } from '@/stores/tasks'
 import { todayKey } from '@/utils/time'
 import { isTaskVisibleToday } from '@/utils/todayFilter'
+import { compareTasksByTime } from '@/utils/task'
 import { debounce } from '@/utils/debounce'
 import {
   consumeLaunchToday,
@@ -16,7 +17,7 @@ import type { Task } from '@/types'
 /**
  * 计算「今日任务页」里展示的未完成任务名称（与 TodayView 完全一致）：
  * 1) 今日可见（isTaskVisibleToday，含逾期/提醒已过/区间覆盖/重复命中/子任务拉回）+ 仅 pending；
- * 2) 排序：手动拖拽顺序 todayOrder → 兜底 sort/截止时间（过期任务不再自动置顶）。
+ * 2) 排序：手动拖拽顺序 todayOrder 优先；未注册的跳过手动键，按统一链（提醒 > 开始 > 创建时间）。
  */
 function computeTodayPendingNames(): string[] {
   const tasks = useTasksStore()
@@ -25,15 +26,9 @@ function computeTodayPendingNames(): string[] {
   const orderMap = new Map<string, number>()
   tasks.todayOrder.forEach((id, idx) => orderMap.set(id, idx))
   const byOrder = (a: Task, b: Task) => (orderMap.get(a.id) ?? 0) - (orderMap.get(b.id) ?? 0)
-  const fallback = (a: Task, b: Task) => {
-    const sa = a.sort ?? Number.MAX_SAFE_INTEGER
-    const sb = b.sort ?? Number.MAX_SAFE_INTEGER
-    if (sa !== sb) return sa - sb
-    return (a.endTime || '').localeCompare(b.endTime || '')
-  }
   const group = (arr: Task[]) => {
     const registered = arr.filter((t) => orderMap.has(t.id)).sort(byOrder)
-    const unregistered = arr.filter((t) => !orderMap.has(t.id)).sort(fallback)
+    const unregistered = arr.filter((t) => !orderMap.has(t.id)).sort(compareTasksByTime)
     return [...registered, ...unregistered]
   }
   const pending = group(list.filter((t) => t.status === 'pending'))
