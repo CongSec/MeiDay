@@ -187,6 +187,8 @@ const futureRepeatChips = computed<Chip[]>(() => {
   const out: Chip[] = []
   const pendingIds = new Set(pendingChips.value.map((c) => c.task.id))
   for (const master of props.repeats) {
+    // 墓碑（R4）：已删除规则不参与日历图
+    if (master.deletedAt) continue
     const t = master.template
     const rule = t.repeat
     if (!rule) continue

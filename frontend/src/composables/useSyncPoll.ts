@@ -73,6 +73,7 @@ async function pullChanges(changes: SyncStateItem[]): Promise<boolean> {
   const tasks = useTasksStore()
   const stats = useStatsStore()
   const seen = new Set<string>()
+  const pulledPids = new Set<string>()
   let allOk = true
   for (const c of changes) {
     const key = `${c.res_type}:${c.project_id ?? ''}`
@@ -84,7 +85,10 @@ async function pullChanges(changes: SyncStateItem[]): Promise<boolean> {
           await projects.load()
           break
         case 'tasks': {
-          if (c.project_id) await tasks.syncProject(c.project_id)
+          if (c.project_id) {
+            pulledPids.add(c.project_id)
+            await tasks.syncProject(c.project_id)
+          }
           break
         }
         case 'trash': {
@@ -92,7 +96,13 @@ async function pullChanges(changes: SyncStateItem[]): Promise<boolean> {
           break
         }
         case 'repeats': {
-          if (c.project_id) await tasks.loadRepeats(c.project_id)
+          if (c.project_id) {
+            pulledPids.add(c.project_id)
+            // force=true：会话内可能已加载过该项目的重复模板，必须强制重拉，
+            // 否则别的端删除的规则会一直留在内存里，下一次 saveRepeats 就把
+            // 已删除规则并集写回（R4 复活路径）
+            await tasks.loadRepeats(c.project_id, true)
+          }
           break
         }
         case 'stats':
@@ -111,6 +121,22 @@ async function pullChanges(changes: SyncStateItem[]): Promise<boolean> {
       // 其它错误：记录但继续拉剩余资源；游标不推进，下一轮会重试该资源
       allOk = false
       console.error('同步拉取失败', c.res_type, c.project_id, e)
+    }
+  }
+  // 拉取到 tasks/repeats 变更后立即执行到期物化：避免「repeats 已拉新、但物化要等到
+  // 全量同步/跨天定时器才执行」的时序窗口——窗口内若有陈旧缓存/其它端数据，
+  // 可能把同一重复日物化出第二条（重复任务 Bug）。物化内部有串行锁 + 幂等去重，安全可重复调用。
+  if (pulledPids.size) {
+    for (const pid of pulledPids) {
+      try {
+        // forceRefresh=true：物化前强制对账远端 repeats，绝不在已删除规则（墓碑）的
+        // 陈旧内存上物化任务 / 把规则写回（R4）
+        await tasks.materializeRepeats(pid, true)
+      } catch (e) {
+        // 单个项目物化失败不阻断后续资源；游标不推进，下一轮重试
+        allOk = false
+        console.error('拉取后物化失败', pid, e)
+      }
     }
   }
   return allOk

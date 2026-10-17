@@ -135,6 +135,8 @@ export function collectFutureVisibleTasks(
   const rootById = new Map(allTasks.map((t) => [t.id, t]))
   for (const pid of Object.keys(repeats)) {
     for (const m of repeats[pid] ?? []) {
+      // 墓碑（R4）：规则已删除，绝不作为未来任务展示
+      if (m.deletedAt) continue
       if (m.dueDate > today && m.dueDate <= last && isTaskVisibleOn(m.template, m.dueDate)) {
         // 该重复日已被单日完成/入舱处理，不再出现在未来任务区
         const rootId = m.rootTaskId ?? m.template.repeatRootId ?? m.id

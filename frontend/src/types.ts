@@ -193,4 +193,10 @@ export interface RepeatMaster {
   template: Task
   createdAt: string
   updatedAt: string
+  /**
+   * 删除墓碑（R4 修复）：规则被删除/自然结束时不再直接从列表移除，
+   * 而是标记 deletedAt 保留在列表内传播删除，防止离线端把旧规则通过
+   * 「并集合并」写回复活；所有端都合并过一次后由 mergeRepeatMasters 的双端墓碑 GC 掉。
+   */
+  deletedAt?: string
 }

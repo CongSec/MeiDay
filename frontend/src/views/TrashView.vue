@@ -334,6 +334,8 @@ const pendingActiveTasks = computed(() => {
 const repeatMastersForCalendar = computed(() =>
   Object.values(tasks.repeats)
     .flat()
+    // 墓碑（R4）：已删除规则不参与日历图
+    .filter((m) => !m.deletedAt)
     .map((m) => {
       // 根任务已处理日期（完成/删除）可能只写在根任务上：合并到模板，供日历图跳过已处理的未来重复日
       const rootId = m.rootTaskId ?? m.template.repeatRootId ?? m.id
@@ -985,10 +987,10 @@ const editCalendarDay = ref<string | null>(null)
 /** 日历图点开的待办小块：把「存入时间胶囊」换成「完成该任务」 */
 const editCalendarComplete = ref(false)
 
-/** 查找某 id 对应的重复模板 master（repeats 中 template.id 匹配）；非模板返回 undefined */
+/** 查找某 id 对应的重复模板 master（repeats 中 template.id 匹配，墓碑除外）；非模板返回 undefined */
 function findMasterByTemplateId(taskId: string) {
   for (const pid of Object.keys(tasks.repeats)) {
-    const m = (tasks.repeats[pid] ?? []).find((x) => x.template.id === taskId)
+    const m = (tasks.repeats[pid] ?? []).find((x) => !x.deletedAt && x.template.id === taskId)
     if (m) return m
   }
   return undefined

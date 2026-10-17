@@ -195,10 +195,10 @@ async function openNew() {
   }
 }
 
-/** 查找某 id 对应的重复模板 master（repeats 中 template.id 匹配）；非模板返回 undefined */
+/** 查找某 id 对应的重复模板 master（repeats 中 template.id 匹配，墓碑除外）；非模板返回 undefined */
 function findMasterByTemplateId(taskId: string) {
   for (const pid of Object.keys(tasks.repeats)) {
-    const m = (tasks.repeats[pid] ?? []).find((x) => x.template.id === taskId)
+    const m = (tasks.repeats[pid] ?? []).find((x) => !x.deletedAt && x.template.id === taskId)
     if (m) return m
   }
   return undefined

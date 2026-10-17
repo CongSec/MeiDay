@@ -208,7 +208,7 @@ export const useResourcesStore = defineStore('resources', {
         for (const arr of Object.values(tasks.trash)) for (const t of arr) pushTask(t, true)
         for (const arr of Object.values(tasks.tasks)) for (const t of arr) pushTask(t, false)
         for (const arr of Object.values(tasks.repeats)) {
-          for (const m of arr) if (m?.template) pushTask(m.template, false)
+          for (const m of arr) if (m?.template && !m.deletedAt) pushTask(m.template, false)
         }
 
         // 2) 分页枚举 OSS attachments/ 前缀，分类构建条目

@@ -12,7 +12,7 @@ import { debounce, type Debounced } from '@/utils/debounce'
 import { queueSyncChange } from '@/utils/syncReport'
 import { addDaysKey, dateKeyOf, diffDaysKey, nowIso, todayKey } from '@/utils/time'
 import { isRepeatTaskActiveOn, isTaskVisibleToday } from '@/utils/todayFilter'
-import { buildOccurrenceTemplate, buildReminderPayload, buildRepeatOccurrence, hasNextUnprocessedRepeatDay, nextRepeatDate, repeatShapeEquals, rootIdOf, shiftTaskTimes, skipProcessedRepeatDays } from '@/utils/repeat'
+import { buildOccurrenceTemplate, buildReminderPayload, buildRepeatOccurrence, hasNextUnprocessedRepeatDay, nextRepeatDate, repeatRuleFingerprint, repeatShapeEquals, rootIdOf, shiftTaskTimes, skipProcessedRepeatDays } from '@/utils/repeat'
 import { api } from '@/api/client'
 import { logAudit, logAttachmentDeletion, safeDetail } from '@/utils/audit'
 import { UNCATEGORIZED, type AttachmentMeta, type RepeatMaster, type Subtask, type Task } from '@/types'
@@ -406,6 +406,136 @@ function mergeUnique(base: Task[], incoming: Task[]): Task[] {
   const seen = new Set(base.map((t) => t.id))
   return [...base, ...incoming.filter((t) => !seen.has(t.id))]
 }
+/**
+ * 重复模板合并（R4 修复：墓碑感知 + last-writer-wins，替代按 id 简单并集）：
+ * - 同一 id 两端都存在：
+ *   · 任一为墓碑（deletedAt）→ 墓碑优先，除非另一侧是「删除后明确复活」
+ *     （存活副本 updatedAt 严格新于墓碑 deletedAt）；
+ *   · 均存活 → updatedAt 更新者胜（平局本地胜，与 mergeTasks 同语义）；
+ * - 仅一端存在 → 保留该端：新建或墓碑。墓碑继续随文件传播删除，
+ *   直到所有端都合并过一次后，双端墓碑相遇时被 GC 掉（不会无限增长）。
+ * 解决：一端删除重复规则（写墓碑）后，离线端缓存的旧 master 不再被并集合并写回复活。
+ */
+function mergeRepeatMasters(local: RepeatMaster[], remote: RepeatMaster[]): RepeatMaster[] {
+  const byId = new Map<string, { l?: RepeatMaster; r?: RepeatMaster }>()
+  for (const m of local) {
+    const e = byId.get(m.id) ?? {}
+    e.l = m
+    byId.set(m.id, e)
+  }
+  for (const m of remote) {
+    const e = byId.get(m.id) ?? {}
+    e.r = m
+    byId.set(m.id, e)
+  }
+  const out: RepeatMaster[] = []
+  for (const { l, r } of byId.values()) {
+    if (!l) {
+      if (r) out.push(r)
+      continue
+    }
+    if (!r) {
+      out.push(l)
+      continue
+    }
+    const lDead = !!l.deletedAt
+    const rDead = !!r.deletedAt
+    if (lDead && rDead) continue // 双端墓碑：删除已传播到所有合并过的端，GC 掉
+    if (lDead) {
+      // 本地墓碑 vs 远端存活：远端若在删除之后编辑过（复活）则保留远端，否则墓碑胜
+      out.push(r.updatedAt > (l.deletedAt ?? '') ? r : l)
+      continue
+    }
+    if (rDead) {
+      // 远端墓碑 vs 本地存活（R4 复活场景）：本地若在删除之后编辑过（复活）则保留本地，否则墓碑胜
+      out.push(l.updatedAt > (r.deletedAt ?? '') ? l : r)
+      continue
+    }
+    out.push(l.updatedAt >= r.updatedAt ? l : r)
+  }
+  return out
+}
+/** 重复任务某条出现所在日（YYYY-MM-DD）：以提醒/截止/开始时间中最先出现的日期为准；
+ *  全部为空时返回 ''（无法判定出现日，不参与同日去重）。 */
+function occurrenceDayOf(t: Task): string {
+  return dateKeyOf(t.reminderTime || t.endTime || t.startTime || '')
+}
+/** 把一条「异常多出的 pending 重复任务」转回重复模板（RepeatMaster）：
+ *  它本质是某次未来出现被物化/恢复了两次，转回模板后由模板在下一次到期时再物化。
+ *  master.id 用该出现自己的 id（保证与链上其它 master 不冲突）；sourceTaskId/rootTaskId
+ *  指向链根，删除根任务时能一并清理。 */
+function masterFromActiveTask(t: Task, day: string): RepeatMaster {
+  const now = nowIso()
+  return {
+    id: t.id,
+    projectId: t.projectId,
+    sourceTaskId: rootIdOf(t),
+    rootTaskId: rootIdOf(t),
+    dueDate: day,
+    template: { ...t, status: 'pending', isReminded: false, repeatOccurrence: undefined },
+    createdAt: now,
+    updatedAt: now,
+  }
+}
+/** 重复任务自愈去重（重复任务 Bug 兜底）：同一重复链内出现多条「重复日」活动任务时收敛为一条。
+ *  - 规则 A（同日重复）：同根 + 同规则 + 同出现日的多条活动任务 → 保留 updatedAt 最新，
+ *    其余作为 deleted 墓碑返回（由调用方写入回收站，配合 applyDeletedTombstones 防复活）；
+ *  - 规则 B（同链多 pending）：同根 + 同规则 的多条 pending 活动任务是异常态
+ *    （正常流程同链至多一条 pending）→ 保留出现日最早的一条（当前出现），把较晚出现
+ *    转回 RepeatMaster 模板（返回 masters，由调用方写回 repeats.json），不再作为活动任务。
+ *  返回 { list, tombstoned, masters }。 */
+function dedupRepeatOccurrences(list: Task[]): { list: Task[]; tombstoned: Task[]; masters: RepeatMaster[] } {
+  const tombstoned: Task[] = []
+  const masters: RepeatMaster[] = []
+  const active = list.filter((t) => t.status !== 'deleted' && t.repeat)
+  if (active.length < 2) return { list, tombstoned, masters }
+  // 按 (链根, 规则指纹) 分组
+  const byChain = new Map<string, Task[]>()
+  for (const t of active) {
+    const key = `${rootIdOf(t)}\u0000${repeatRuleFingerprint(t.repeat!)}`
+    if (!byChain.has(key)) byChain.set(key, [])
+    byChain.get(key)!.push(t)
+  }
+  const toDrop = new Set<string>()
+  for (const chain of byChain.values()) {
+    if (chain.length < 2) continue
+    // 规则 A：同日多条 → 保 updatedAt 最新，其余入回收站墓碑
+    const byDay = new Map<string, Task[]>()
+    for (const t of chain) {
+      const day = occurrenceDayOf(t)
+      if (!day) continue
+      if (!byDay.has(day)) byDay.set(day, [])
+      byDay.get(day)!.push(t)
+    }
+    for (const same of byDay.values()) {
+      if (same.length < 2) continue
+      const keeper = same.reduce((a, b) =>
+        (b.updatedAt || '').localeCompare(a.updatedAt || '') > 0 ? b : a,
+      )
+      for (const t of same) {
+        if (t !== keeper && !toDrop.has(t.id)) {
+          toDrop.add(t.id)
+          tombstoned.push(t)
+        }
+      }
+    }
+    // 规则 B：同链多条 pending（异常态）→ 保留出现日最早的一条，较晚出现转回模板（不入回收站）
+    const pending = chain.filter((t) => t.status === 'pending')
+    if (pending.length > 1) {
+      pending.sort((a, b) => (occurrenceDayOf(a) || '').localeCompare(occurrenceDayOf(b) || ''))
+      const keeper = pending[0]
+      for (const t of pending.slice(1)) {
+        if (toDrop.has(t.id)) continue
+        const day = occurrenceDayOf(t)
+        if (!day) continue
+        toDrop.add(t.id)
+        masters.push(masterFromActiveTask(t, day))
+      }
+    }
+  }
+  if (!toDrop.size) return { list, tombstoned, masters }
+  return { list: list.filter((t) => !toDrop.has(t.id)), tombstoned, masters }
+}
 function flushAllPendingSaves() {
   for (const fn of saveDebouncers.values()) fn.flush()
   for (const fn of trashDebouncers.values()) fn.flush()
@@ -482,7 +612,7 @@ export const useTasksStore = defineStore('tasks', {
         // 否则「项目里只有重复模板、没有其他今日可见任务」时该项目不会被加载，
         // 到期模板无法物化，今日/未来任务区也就不会出现对应任务（BUG）。
         const last = addDaysKey(today, 30)
-        if ((s.repeats[id] ?? []).some((m) => m.dueDate <= last)) set.add(id)
+        if ((s.repeats[id] ?? []).some((m) => !m.deletedAt && m.dueDate <= last)) set.add(id)
       }
       return [...set]
     },
@@ -519,8 +649,20 @@ export const useTasksStore = defineStore('tasks', {
           filterTasksForProject(active, projectId),
           auth.username,
         )
-        this.tasks[projectId] = cachedActive
-        await idbPut('tasks', taskCacheKey(auth.username, projectId), cachedActive)
+        // 自愈去重（仅内存 + IDB；OSS 由下方远端加载 / 后续同步收敛）：缓存里残留的
+        // 同链重复日 / 同链多 pending 重复任务先收敛，避免打开瞬间就显示两条重复任务
+        const { list: deduped, tombstoned, masters } = dedupRepeatOccurrences(cachedActive)
+        this.tasks[projectId] = deduped
+        await idbPut('tasks', taskCacheKey(auth.username, projectId), deduped)
+        if (tombstoned.length) {
+          this.trash[projectId] = mergeUnique(this.trash[projectId] ?? [], tombstoned)
+          await idbPut('trash', trashCacheKey(auth.username, projectId), this.trash[projectId])
+        }
+        if (masters.length) {
+          const existing = this.repeats[projectId] ?? []
+          this.repeats[projectId] = [...existing, ...masters.filter((m) => !existing.some((e) => e.id === m.id))]
+          await idbPut('repeats', repeatsCacheKey(auth.username, projectId), this.repeats[projectId])
+        }
         if (deleted.length) {
           this.trash[projectId] = mergeUnique(this.trash[projectId] ?? [], deleted)
           await idbPut('trash', trashCacheKey(auth.username, projectId), this.trash[projectId])
@@ -541,17 +683,23 @@ export const useTasksStore = defineStore('tasks', {
           lm ? { headers: { 'If-Modified-Since': lm } } : undefined,
         )
         if (res.res.status !== 304) {
-                  const remote = JSON.parse(res.content.toString()) as Task[]
+          const remote = JSON.parse(res.content.toString()) as Task[]
           normalizeTasks(remote)
           const { active, deleted } = splitDeleted(remote)
-          this.tasks[projectId] = sortActiveList(
-            await filterStaleAcrossProjectsAsync(
-              this.tasks,
-              projectId,
-              filterTasksForProject(active, projectId),
-              auth.username,
-            ),
+          let remoteActive = await filterStaleAcrossProjectsAsync(
+            this.tasks,
+            projectId,
+            filterTasksForProject(active, projectId),
+            auth.username,
           )
+          // 读路径应用回收站墓碑（内存 + 本次任务文件里的 deleted）：清除本地残留的
+          // 「已被他端完成/删除」的旧重复行，避免与物化出的新行并存为两条重复任务
+          // （重复任务 Bug）。远端分片墓碑由 syncProject/saveProject 的 CAS 合并路径兜底。
+          const tombstones = mergeDeletedTombstones(this.trash[projectId] ?? [], deleted)
+          remoteActive = applyDeletedTombstones(remoteActive, tombstones)
+          // 自愈去重：同链重复日 / 同链多 pending 收敛为一条（异常时写回收站 / repeats 落盘）
+          remoteActive = await this._selfHealRepeatDuplicates(projectId, remoteActive)
+          this.tasks[projectId] = sortActiveList(remoteActive)
           // 跨天归档：非当天完成的已完成任务稍后由 sweepCompleted 统一移入回收站
           await idbPut('tasks', taskCacheKey(auth.username, projectId), this.tasks[projectId])
           if (deleted.length) {
@@ -1293,9 +1441,12 @@ export const useTasksStore = defineStore('tasks', {
         remoteDeleted,
         remoteTrash,
       )
-      const merged = sortActiveList(
+      let merged = sortActiveList(
         applyDeletedTombstones(mergeTasks(local, remoteActive), tombstones),
       )
+      // 自愈去重：同链重复日 / 同链多 pending 收敛为一条（异常时写回收站 / repeats 落盘），
+      // 让「手机端陈旧缓存恢复/物化出的第二条重复任务」在同步合并时被清理并写回 OSS
+      merged = sortActiveList(await this._selfHealRepeatDuplicates(projectId, merged))
       this.tasks[projectId] = merged
       await idbPut('tasks', taskCacheKey(auth.username, projectId), merged)
       const oldTrash = this.trash[projectId] ?? []
@@ -1465,7 +1616,7 @@ export const useTasksStore = defineStore('tasks', {
       projectId: string,
       month: string | undefined,
       list: Task[],
-    ): Promise<{ ok: boolean; merged: Task[] }> {
+    ): Promise<{ ok: boolean; merged: Task[]; gone?: boolean }> {
       // 纵深防御：空用户名绝不写盘，否则会生成 users//projects/... 的空用户名键
       if (!username) return { ok: false, merged: list }
       const key = trashFilePath(username, projectId, month)
@@ -1480,6 +1631,23 @@ export const useTasksStore = defineStore('tasks', {
           await idbDel('kv', lmKeyOf(etagKey))
           await idbPut('trash', cacheKey, list)
           return { ok: true, merged: list }
+        }
+        if (result.reason === 'remote-gone') {
+          // R3 修复：本端同步过该分片（knownEtag 存在）而远端分片已被删除
+          // （如另一台设备清空时间胶囊）。本地缓存作废，绝不当作新建写回——
+          // 否则已清空的数据会被缓存复活。返回 gone 由 saveTrash 跳过后续处理。
+          if (month) {
+            const goneIds = new Set(list.map((t) => t.id))
+            this.trash[projectId] = (this.trash[projectId] ?? []).filter((t) => !goneIds.has(t.id))
+            this.trashLoadedMonths[projectId] = (this.trashLoadedMonths[projectId] ?? []).filter((m) => m !== month)
+            this.trashShardMonths[projectId] = (this.trashShardMonths[projectId] ?? []).filter((m) => m !== month)
+          } else {
+            this.trash[projectId] = []
+          }
+          await idbDel('trash', cacheKey)
+          await idbDel('kv', etagKey)
+          await idbDel('kv', lmKeyOf(etagKey))
+          return { ok: true, merged: [], gone: true }
         }
         if (result.remote) {
           const remoteList = [...(result.remote as Task[])]
@@ -1502,6 +1670,10 @@ export const useTasksStore = defineStore('tasks', {
       // 未分类回收站：单文件直写（不分片）
       if (projectId === UNCATEGORIZED) {
         const r = await this._saveTrashShard(client, auth.username, projectId, undefined, list)
+        if (r.gone) {
+          // 远端文件已被清空/重置：内存与 IDB 已在 _saveTrashShard 内作废，直接返回
+          return true
+        }
         if (!r.ok) {
           useUiStore().toast('保存时间胶囊失败：检测到其他设备持续修改，请稍后重试', 'error')
           return false
@@ -1541,6 +1713,8 @@ export const useTasksStore = defineStore('tasks', {
         const tasks = byMonth.get(m) ?? []
         if (tasks.length) {
           const r = await this._saveTrashShard(client, auth.username, projectId, m, tasks)
+          // 远端分片已被清空/重置：内存/IDB 已在 _saveTrashShard 内作废，跳过该月
+          if (r.gone) continue
           ok = ok && r.ok
           // 冲突合并带回远端数据：同步进内存，保证 IDB 合并缓存与 UI 一致
           if (r.ok && r.merged.length !== tasks.length) {
@@ -1641,10 +1815,13 @@ export const useTasksStore = defineStore('tasks', {
       }
     },
     /** 拉取重复模板（独立文件，按需加载，仅主任务完成后生成） */
-    async loadRepeats(projectId: string) {
+    async loadRepeats(projectId: string, force = false) {
       this.touchProject(projectId)
       const auth = useAuthStore()
-      if (this.repeatsLoaded.includes(projectId)) return
+      // 会话内只加载一次（force=true 时强制重拉）：收到其它端的 repeats 变更时必须
+      // 强制刷新，否则会话早期加载的陈旧模板（含被别端删除的规则）会一直留在内存里，
+      // 下一次 saveRepeats 就把已删除规则并集写回（R4 复活路径的入口）。
+      if (!force && this.repeatsLoaded.includes(projectId)) return
       const cached = await idbGet<RepeatMaster[]>('repeats', repeatsCacheKey(auth.username, projectId))
       if (cached) this.repeats[projectId] = cached
       if (!auth.creds || !auth.username) return
@@ -1681,7 +1858,7 @@ export const useTasksStore = defineStore('tasks', {
           throw new Error(await enrichOssError(e))
         }
       }
-      this.repeatsLoaded.push(projectId)
+      if (!this.repeatsLoaded.includes(projectId)) this.repeatsLoaded.push(projectId)
     },
     /** 保存重复模板到 OSS（CAS 冲突合并，避免多端互相覆盖） */
     async saveRepeats(projectId: string, snapshot?: RepeatMaster[]): Promise<boolean> {
@@ -1705,11 +1882,19 @@ export const useTasksStore = defineStore('tasks', {
             queueSyncChange(auth.username, 'repeats', projectId)
             return true
           }
-          // 冲突：按 id 去重合并（本地优先），不丢失任一端修改
+          // 冲突：墓碑感知 + last-writer-wins 合并（R4 修复，替代按 id 简单并集）——
+          // 避免一端已删除的重复规则被离线端缓存的旧 master 并集写回复活
+          if (result.reason === 'remote-gone') {
+            // 远端文件被清空/重置（R3 同族）：作废本地缓存，禁止把缓存当作新建写回
+            this.repeats[projectId] = []
+            await idbDel('repeats', repeatsCacheKey(auth.username, projectId))
+            await idbDel('kv', etagKey)
+            await idbDel('kv', lmKeyOf(etagKey))
+            return true
+          }
           if (result.remote) {
             const remote = result.remote as RepeatMaster[]
-            const seen = new Set(list.map((m) => m.id))
-            const merged = [...list, ...(remote ?? []).filter((m) => !seen.has(m.id))]
+            const merged = mergeRepeatMasters(list, remote)
             list = merged
             knownEtag = result.remoteEtag ?? undefined
             if (!snapshot) {
@@ -1745,115 +1930,179 @@ export const useTasksStore = defineStore('tasks', {
      * 物化后模板删除，由该物化任务自己承担后续周期（再次完成时重新生成模板）。
      * 在加载 / 同步 / 跨天检测时调用，不在普通编辑 _persist 里调用。
      */
-    async materializeRepeats(projectId?: string) {
+    async materializeRepeats(projectId?: string, forceRefresh = false) {
       // 串行调度：轮询同步 / 跨天定时器 / 打开项目可能并发触发物化，同一批到期模板被并发
       // 读取会重复生成两份任务。串行后第二个调用基于第一个已完成的状态执行（到期模板已被
       // 移除），不会重复物化；队列内单个调用失败只影响该调用，不阻断后续物化。
-      const run = materializeChain.then(() => this._materializeRepeats(projectId))
+      const run = materializeChain.then(() => this._materializeRepeats(projectId, forceRefresh))
       materializeChain = run.catch(() => undefined)
       return run
     },
     /** 实际的到期物化逻辑（由 materializeRepeats 串行调度后执行，避免并发重复生成） */
-    async _materializeRepeats(projectId?: string) {
+    async _materializeRepeats(projectId?: string, forceRefresh = false) {
       const auth = useAuthStore()
       const today = todayKey()
       const pids = projectId ? [projectId] : Object.keys(this.repeats)
       for (const pid of pids) {
-        if (!this.repeatsLoaded.includes(pid)) await this.loadRepeats(pid)
-        const masters = this.repeats[pid] ?? []
-        if (!masters.length) continue
-        const remaining: RepeatMaster[] = []
-        const toAdd: Task[] = []
-        let changed = false
-        for (const master of masters) {
-          const rule = master.template.repeat
-          if (!rule) {
-            changed = true
-            continue
-          }
-          const endAfter = rule.endAfter
-          let dueDate = master.dueDate
-          // 过期多日：跳过缺失周期，推进到 >= 今天的最近一次
-          let guard = 0
-          while (dueDate < today && guard < 400) {
-            const nd = nextRepeatDate(rule, dueDate)
-            if (!nd || nd <= dueDate) break
-            dueDate = nd
-            guard++
-          }
-          // 单日已处理（提前完成/入舱）的重复日：跳过该日并推进到下一次，
-          // 已经完成/入舱的那一天绝不重新物化生成或覆盖；未处理日不受影响
-          const rootId = master.rootTaskId ?? master.template.repeatRootId ?? master.id
-          const root = this.all.find((x) => x.id === rootId) ?? this.allTrash.find((x) => x.id === rootId)
-          const processed = root?.repeatProcessed ?? master.template.repeatProcessed
-          while (processed?.[dueDate] && guard < 400) {
-            const nd = nextRepeatDate(rule, dueDate)
-            if (!nd || nd <= dueDate) break
-            dueDate = nd
-            guard++
-          }
-          if (processed?.[dueDate]) continue
-          if (endAfter && dueDate > endAfter) {
-            // 结束日期已过：不再生成，删除模板（周期提醒随之停止）
-            changed = true
-            continue
-          }
-          if (dueDate > today) {
-            // 今天的周期还没到：仅按日期平移模板时间，等待到期
-            if (dueDate !== master.dueDate) {
-              remaining.push({
-                ...master,
-                dueDate,
-                template: shiftTaskTimes(master.template, diffDaysKey(master.dueDate, dueDate)),
-                updatedAt: nowIso(),
-              })
-              changed = true
-            } else {
+        try {
+          // forceRefresh：拉取到变更后立即物化时必须先对账远端，否则会话早期加载的
+          // 陈旧模板（含被别端删除的规则）会基于未对账缓存物化出任务 / 把规则写回
+          if (!this.repeatsLoaded.includes(pid) || forceRefresh) await this.loadRepeats(pid, forceRefresh)
+          const masters = this.repeats[pid] ?? []
+          if (!masters.length) continue
+          const remaining: RepeatMaster[] = []
+          const toAdd: Task[] = []
+          let changed = false
+          for (const master of masters) {
+            if (master.deletedAt) {
+              // 墓碑：规则已被删除，保留墓碑随文件传播删除，不参与物化
               remaining.push(master)
+              continue
             }
-            continue
+            const rule = master.template.repeat
+            if (!rule) {
+              changed = true
+              continue
+            }
+            const endAfter = rule.endAfter
+            let dueDate = master.dueDate
+            // 过期多日：跳过缺失周期，推进到 >= 今天的最近一次
+            let guard = 0
+            while (dueDate < today && guard < 400) {
+              const nd = nextRepeatDate(rule, dueDate)
+              if (!nd || nd <= dueDate) break
+              dueDate = nd
+              guard++
+            }
+            // 单日已处理（提前完成/入舱）的重复日：跳过该日并推进到下一次，
+            // 已经完成/入舱的那一天绝不重新物化生成或覆盖；未处理日不受影响
+            const rootId = master.rootTaskId ?? master.template.repeatRootId ?? master.id
+            const root = this.all.find((x) => x.id === rootId) ?? this.allTrash.find((x) => x.id === rootId)
+            const processed = root?.repeatProcessed ?? master.template.repeatProcessed
+            while (processed?.[dueDate] && guard < 400) {
+              const nd = nextRepeatDate(rule, dueDate)
+              if (!nd || nd <= dueDate) break
+              dueDate = nd
+              guard++
+            }
+            if (processed?.[dueDate]) continue
+            if (endAfter && dueDate > endAfter) {
+              // 结束日期已过：不再生成，删除模板（周期提醒随之停止）
+              changed = true
+              continue
+            }
+            if (dueDate > today) {
+              // 今天的周期还没到：仅按日期平移模板时间，等待到期
+              if (dueDate !== master.dueDate) {
+                remaining.push({
+                  ...master,
+                  dueDate,
+                  template: shiftTaskTimes(master.template, diffDaysKey(master.dueDate, dueDate)),
+                  updatedAt: nowIso(),
+                })
+                changed = true
+              } else {
+                remaining.push(master)
+              }
+              continue
+            }
+            // dueDate == today：物化为可见任务
+            // 沿用 master.template.id 作为任务 id：同一重复模板（同一到期日）在多端/多次触发时
+            // 生成的任务 id 一致（新数据为确定性派生 id），配合下方 list.some(id) 检查与
+            // 跨端 mergeTasks（按 id 合并），可避免把同一个重复任务重复生成两份。
+            const template = shiftTaskTimes(master.template, diffDaysKey(master.dueDate, dueDate))
+            toAdd.push({
+              ...template,
+              id: master.template.id,
+              status: 'pending',
+              isReminded: false,
+              createdAt: nowIso(),
+              // updatedAt 继承模板的最后修改时间（而非物化时刻）：让跨端 last-writer-wins
+              // 按“编辑时间”而非“物化时间”比较，避免一端用陈旧模板物化出的旧时间把
+              // 另一端已编辑的新时间覆盖掉（重复任务 Bug 的 lost-update 变体）
+              updatedAt: master.updatedAt || master.template.updatedAt || nowIso(),
+            })
+            changed = true
           }
-          // dueDate == today：物化为可见任务
-          // 沿用 master.template.id 作为任务 id：同一重复模板（同一到期日）在多端/多次触发时
-          // 生成的任务 id 一致，配合下方 list.some(id) 检查与跨端 mergeTasks（按 id 合并），
-          // 可避免把同一个重复任务重复生成两份。id 仍为 buildRepeatOccurrence 生成的 UUID。
-          const template = shiftTaskTimes(master.template, diffDaysKey(master.dueDate, dueDate))
-          toAdd.push({
-            ...template,
-            id: master.template.id,
-            status: 'pending',
-            isReminded: false,
-            createdAt: nowIso(),
-            updatedAt: nowIso(),
-          })
-          changed = true
-        }
-        if (changed) {
-          this.repeats[pid] = remaining
-          this._persistRepeats(pid)
-        }
-        for (const task of toAdd) {
-          const list = this.tasks[pid] ?? []
-          if (list.some((t) => t.id === task.id)) continue
-          this.tasks[pid] = sortActiveList([...list, task])
-          this._persist(pid)
-          // 物化出的重复任务也登记到今日顺序表末尾，避免刷新后按截止时间重排打乱已拖拽顺序
-          if (isTaskVisibleToday(task, todayKey()) && !this.todayOrder.includes(task.id)) {
-            this.todayOrder = [...this.todayOrder, task.id]
-            void this.saveTodayOrderNow()
+          if (changed) {
+            this.repeats[pid] = remaining
+            this._persistRepeats(pid)
           }
-          logAudit('生成重复任务', safeDetail(`任务ID：${task.id}，项目ID：${pid}，周期：${task.repeat?.type ?? ''}`))
+          if (toAdd.length) {
+            const list = this.tasks[pid] ?? []
+            const next = [...list]
+            for (const task of toAdd) {
+              if (next.some((t) => t.id === task.id)) continue
+              next.push(task)
+              // 物化出的重复任务也登记到今日顺序表末尾，避免刷新后按截止时间重排打乱已拖拽顺序
+              if (isTaskVisibleToday(task, todayKey()) && !this.todayOrder.includes(task.id)) {
+                this.todayOrder = [...this.todayOrder, task.id]
+                void this.saveTodayOrderNow()
+              }
+              logAudit('生成重复任务', safeDetail(`任务ID：${task.id}，项目ID：${pid}，周期：${task.repeat?.type ?? ''}`))
+            }
+            // 自愈去重兜底：即便极端情况下出现 id 不同的同链同日重复（旧随机 id 数据/竞态），
+            // 也收敛为一条，不再写回两条
+            const cleaned = await this._selfHealRepeatDuplicates(pid, next)
+            this.tasks[pid] = sortActiveList(cleaned)
+            this._persist(pid)
+          }
+        } catch (e) {
+          // 单个项目对账/物化失败（离线等）不影响其它项目：本轮跳过，等待下次同步成功后再触发。
+          // 绝不基于未对账的缓存数据物化，避免把同一条重复生成两份。
+          console.warn('重复任务物化失败（跳过，等待下次同步）', pid, e)
         }
       }
     },
-    /** 删除某任务对应的重复模板（软删/永久删/取消完成/恢复时调用） */
-    _deleteMasterForTask(taskId: string) {
+    /** 自愈去重（重复任务 Bug 兜底）：对某项目的活跃任务列表执行重复收敛，
+     *  规则 A 的墓碑写入回收站、规则 B 的模板写回 repeats，返回收敛后的活跃列表。
+     *  应在内存/OSS 已对账的列表上调用（_loadProjectInner / syncProject / _materializeRepeats）；
+     *  无凭据（未登录）时只改内存 + IDB，落盘调用静默跳过。 */
+    async _selfHealRepeatDuplicates(projectId: string, list: Task[]): Promise<Task[]> {
+      const { list: cleaned, tombstoned, masters } = dedupRepeatOccurrences(list)
+      if (!tombstoned.length && !masters.length) return cleaned
+      const auth = useAuthStore()
+      if (tombstoned.length) {
+        this.trash[projectId] = mergeUnique(this.trash[projectId] ?? [], tombstoned)
+        await idbPut('trash', trashCacheKey(auth.username, projectId), this.trash[projectId])
+        void this._persistTrash(projectId, true)
+        logAudit('重复任务去重', safeDetail(`项目ID：${projectId}，移除重复 ${tombstoned.length} 条`))
+      }
+      if (masters.length) {
+        const existing = this.repeats[projectId] ?? []
+        const newMasters = masters.filter((m) => !existing.some((e) => e.id === m.id))
+        if (newMasters.length) {
+          this.repeats[projectId] = [...existing, ...newMasters]
+          await idbPut('repeats', repeatsCacheKey(auth.username, projectId), this.repeats[projectId])
+          void this.saveRepeatsNow(projectId)
+          logAudit('重复任务去重', safeDetail(`项目ID：${projectId}，恢复重复模板 ${newMasters.length} 条`))
+        }
+      }
+      return cleaned
+    },
+    /** 把满足条件的重复模板标记为墓碑（R4 修复）：保留在列表内随文件传播删除，
+     *  防止离线端把已删规则通过「并集合并」写回复活；已墓碑的不重复标记。
+     *  返回被标记的项目集合（调用方决定落盘）。 */
+    _tombstoneMasters(pred: (m: RepeatMaster) => boolean): Set<string> {
+      const touched = new Set<string>()
+      const now = nowIso()
       for (const pid of Object.keys(this.repeats)) {
         const masters = this.repeats[pid] ?? []
-        if (!masters.some((m) => m.sourceTaskId === taskId)) continue
-        this.repeats[pid] = masters.filter((m) => m.sourceTaskId !== taskId)
-        this._persistRepeats(pid)
+        const next = masters.map((m) =>
+          !m.deletedAt && pred(m) ? { ...m, deletedAt: now, updatedAt: now } : m,
+        )
+        if (next.some((m, i) => m !== masters[i])) {
+          this.repeats[pid] = next
+          touched.add(pid)
+        }
       }
+      return touched
+    },
+    /** 删除某任务对应的重复模板（软删/永久删/取消完成/恢复时调用）。
+     *  R4 修复：改为写墓碑而非直接移除，删除通过并集合并复活的问题在 mergeRepeatMasters 兜底。 */
+    _deleteMasterForTask(taskId: string) {
+      const touched = this._tombstoneMasters((m) => m.sourceTaskId === taskId)
+      for (const pid of touched) this._persistRepeats(pid)
     },
     /** 编辑「时间胶囊」里的重复任务后同步其重复模板（确认式：立即落盘，成功才返回 true）：
      *  与今日任务编辑（saveTaskConfirmed/upsert）和未来任务编辑（saveFutureOccurrenceConfirmed）
@@ -1874,18 +2123,24 @@ export const useTasksStore = defineStore('tasks', {
       const snapPids = new Set<string>([pid])
       if (prevProjectId && prevProjectId !== pid) snapPids.add(prevProjectId)
       for (const [p, ms] of Object.entries(this.repeats)) {
-        if ((ms ?? []).some((m) => m.sourceTaskId === task.id)) snapPids.add(p)
+        if ((ms ?? []).some((m) => !m.deletedAt && m.sourceTaskId === task.id)) snapPids.add(p)
       }
       const repeatsSnap = new Map<string, RepeatMaster[]>()
       for (const p of snapPids) {
         if (!this.repeatsLoaded.includes(p)) await this.loadRepeats(p)
         repeatsSnap.set(p, (this.repeats[p] ?? []).slice())
       }
+      // P1-4 联动可能改到活跃任务（多端竞态下模板的出现已被物化）：一并快照以便失败回滚
+      const tasksSnap = new Map<string, Task[]>()
+      for (const p of snapPids) {
+        tasksSnap.set(p, (this.tasks[p] ?? []).slice())
+      }
       // 统一同步逻辑（只改内存 + 返回触及项目）：已完成胶囊任务会创建/更新模板（> 今天），
       // 今天的已完成记录保持完成，不会物化出「今天」的新任务
-      const touched = this._syncRepeatMasterForTask(task)
+      const { repeatPids: touched, taskPids } = this._syncRepeatMasterForTask(task)
       const results = await Promise.all([...touched].map((p) => this.saveRepeatsNow(p)))
-      if (results.every(Boolean)) {
+      const taskResults = await Promise.all([...taskPids].map((p) => this.saveProjectNow(p)))
+      if (results.every(Boolean) && taskResults.every(Boolean)) {
         this._syncReminders()
         return true
       }
@@ -1894,6 +2149,11 @@ export const useTasksStore = defineStore('tasks', {
         this.repeats[p] = list
         await idbPut('repeats', repeatsCacheKey(auth.username, p), list)
         await this.saveRepeats(p, list).catch(() => {})
+      }
+      for (const [p, list] of tasksSnap) {
+        this.tasks[p] = list
+        await idbPut('tasks', taskCacheKey(auth.username, p), list)
+        await this.saveProjectNow(p, list).catch(() => {})
       }
       return false
     },
@@ -1910,19 +2170,17 @@ export const useTasksStore = defineStore('tasks', {
      *   · 未找到模板：仅当任务已完成（时间胶囊/完成态源任务）或显式传入 masterId 时才创建，
      *     活跃的待办任务不提前生成模板（完成时由 _flipComplete 生成，避免编辑普通任务就生成模板）；
      * - 只改内存并返回触及的项目 id（调用方负责落盘，失败自行回滚）。
+     *   返回 { repeatPids: 重复模板被改动的项目, taskPids: 因联动被改动的活跃任务所在项目 }。
      */
-    _syncRepeatMasterForTask(task: Task, opts?: { masterId?: string }): Set<string> {
+    _syncRepeatMasterForTask(task: Task, opts?: { masterId?: string }): { repeatPids: Set<string>; taskPids: Set<string> } {
       const touched = new Set<string>()
+      const taskPids = new Set<string>()
       const rule = task.repeat
       if (!rule) {
-        // 移除重复：删除同源全部模板（跨项目迁移时一并清旧项目残留）
-        for (const pid of Object.keys(this.repeats)) {
-          const masters = this.repeats[pid] ?? []
-          if (!masters.some((m) => m.sourceTaskId === task.id)) continue
-          this.repeats[pid] = masters.filter((m) => m.sourceTaskId !== task.id)
-          touched.add(pid)
-        }
-        return touched
+        // 移除重复：把同源全部模板标记为墓碑（跨项目迁移时一并清旧项目残留；R4 防复活）
+        const t = this._tombstoneMasters((m) => m.sourceTaskId === task.id)
+        for (const p of t) touched.add(p)
+        return { repeatPids: touched, taskPids }
       }
       const today = todayKey()
       // 定位既有模板：未来任务编辑按 masterId（模板 id），其余按 sourceTaskId（源任务 id）
@@ -1930,7 +2188,8 @@ export const useTasksStore = defineStore('tasks', {
       let idx = -1
       const findMaster = (pred: (m: RepeatMaster) => boolean): { pid?: string; idx: number } => {
         for (const k of Object.keys(this.repeats)) {
-          const i = (this.repeats[k] ?? []).findIndex(pred)
+          // 跳过墓碑：已被删除的规则不作为「既有模板」，允许后续重新创建（复活）
+          const i = (this.repeats[k] ?? []).findIndex((m) => !m.deletedAt && pred(m))
           if (i >= 0) return { pid: k, idx: i }
         }
         return { idx: -1 }
@@ -1950,7 +2209,7 @@ export const useTasksStore = defineStore('tasks', {
         }
       }
       let targetPid = pid ?? task.projectId
-      if (!targetPid || targetPid === UNCATEGORIZED) return touched
+      if (!targetPid || targetPid === UNCATEGORIZED) return { repeatPids: touched, taskPids }
       // 跨项目迁移：既有模板位于其它项目（编辑时改了所属项目）时，先把模板从旧项目移到目标项目，
       // 使今日任务 / 时间胶囊 / 未来任务三处编辑共用同一套「模板只跟源任务项目走」的语义，
       // 避免旧项目残留模板导致「编辑后仍显示在旧项目 / 重复生成」。
@@ -1980,26 +2239,29 @@ export const useTasksStore = defineStore('tasks', {
         // - 未来任务编辑（masterId）却找不到模板 → 模板已被删，忽略；
         // - 未完成活跃任务 → 不提前生成（完成时由 _flipComplete 生成）；
         // - 已完成任务（时间胶囊编辑 / 完成态源任务）→ 创建模板（严格 > 今天）
-        if (opts?.masterId) return touched
-        if (task.status !== 'completed') return touched
+        if (opts?.masterId) return { repeatPids: touched, taskPids }
+        if (task.status !== 'completed') return { repeatPids: touched, taskPids }
         const occ = buildRepeatOccurrence(task, today)
-        if (!occ) return touched
+        if (!occ) return { repeatPids: touched, taskPids }
         const now = nowIso()
-        this.repeats[targetPid] = [
-          ...masters,
-          {
-            id: task.id,
-            projectId: targetPid,
-            sourceTaskId: task.id,
-            rootTaskId: rootIdOf(task),
-            dueDate: occ.dueDate,
-            template: occ.template,
-            createdAt: now,
-            updatedAt: now,
-          },
-        ]
+        const newMaster: RepeatMaster = {
+          id: task.id,
+          projectId: targetPid,
+          sourceTaskId: task.id,
+          rootTaskId: rootIdOf(task),
+          dueDate: occ.dueDate,
+          template: occ.template,
+          createdAt: now,
+          updatedAt: now,
+        }
+        // 若存在同 id 墓碑（规则曾被删除），原地复活它，避免同 id 墓碑+存活两条并存
+        const tombIdx = masters.findIndex((m) => m.id === newMaster.id && m.deletedAt)
+        this.repeats[targetPid] =
+          tombIdx >= 0
+            ? [...masters.slice(0, tombIdx), newMaster, ...masters.slice(tombIdx + 1)]
+            : [...masters, newMaster]
         touched.add(targetPid)
-        return touched
+        return { repeatPids: touched, taskPids }
       }
       const master = masters[idx]
       const oldRule = master.template.repeat
@@ -2011,10 +2273,10 @@ export const useTasksStore = defineStore('tasks', {
         if (task.repeatProcessed?.[dueDate]) {
           const advanced = skipProcessedRepeatDays(rule, dueDate, task.repeatProcessed)
           if (!advanced || (rule.endAfter && advanced > rule.endAfter)) {
-            // 剩余重复日全部已处理或已过结束日：删除模板，链条自然结束
-            this.repeats[targetPid] = masters.filter((m) => m.id !== master.id)
-            touched.add(targetPid)
-            return touched
+            // 剩余重复日全部已处理或已过结束日：写墓碑，链条自然结束（R4 防复活）
+            const t = this._tombstoneMasters((m) => m.id === master.id)
+            for (const p of t) touched.add(p)
+            return { repeatPids: touched, taskPids }
           }
           dueDate = advanced
         }
@@ -2023,24 +2285,41 @@ export const useTasksStore = defineStore('tasks', {
             ? dateKeyOf(task.reminderTime || task.endTime || task.startTime)
             : (rule.start ?? dueDate)
         const occ = buildOccurrenceTemplate(task, rule, anchor, dueDate)
+        // 沿用原 template.id 稳定 id：新数据为确定性派生 id，跨端重建/物化收敛为同一条
+        const templateId = master.template.id
+        const rebuilt = { ...occ.template, id: templateId }
         const next = [...masters]
         next[idx] = {
           ...master,
           projectId: targetPid,
           dueDate,
-          template: { ...occ.template, id: master.template.id },
+          template: rebuilt,
           updatedAt: nowIso(),
         }
         this.repeats[targetPid] = next
         touched.add(targetPid)
-        return touched
+        // P1-4：若该模板的出现已被物化为活跃任务（多端竞态：一端编辑模板时另一端已物化），
+        // 一并应用新内容，避免「模板新时间 + 活跃任务旧时间」的分歧（重复任务 Bug 变体）
+        const actList = this.tasks[targetPid] ?? []
+        const actIdx = actList.findIndex((t) => t.id === templateId)
+        if (actIdx >= 0) {
+          const { status: prevStatus, createdAt: prevCreatedAt } = actList[actIdx]
+          this.tasks[targetPid] = [
+            ...actList.slice(0, actIdx),
+            { ...actList[actIdx], ...rebuilt, status: prevStatus, createdAt: prevCreatedAt, updatedAt: nowIso() },
+            ...actList.slice(actIdx + 1),
+          ]
+          taskPids.add(targetPid)
+        }
+        return { repeatPids: touched, taskPids }
       }
       // 规则形状变化 / 老模型：按新规则重算「严格 > 今天」的下一次出现
       const occ = buildRepeatOccurrence(task, today)
       if (!occ) {
-        this.repeats[targetPid] = masters.filter((m) => m.id !== master.id)
-        touched.add(targetPid)
-        return touched
+        // 新规则没有可生成的出现（如结束日期已过）：写墓碑结束链条（R4 防复活）
+        const t = this._tombstoneMasters((m) => m.id === master.id)
+        for (const p of t) touched.add(p)
+        return { repeatPids: touched, taskPids }
       }
       const next = [...masters]
       next[idx] = {
@@ -2052,7 +2331,7 @@ export const useTasksStore = defineStore('tasks', {
       }
       this.repeats[targetPid] = next
       touched.add(targetPid)
-      return touched
+      return { repeatPids: touched, taskPids }
     },
     _syncReminders() {
       if (syncReminderTimer) window.clearTimeout(syncReminderTimer)
@@ -2103,6 +2382,8 @@ export const useTasksStore = defineStore('tasks', {
       // 避免服务器行被替换后旧时间打断推进或重复发信；取消完成/删除任务即删模板，提醒全部停止）
       for (const masters of Object.values(this.repeats)) {
         for (const m of masters) {
+          // 墓碑（R4）：规则已删除，绝不继续从旧模板推送提醒
+          if (m.deletedAt) continue
           const t = m.template
           const carrier = { ...t, id: m.id }
           if (t.reminderTime) {
@@ -2162,8 +2443,10 @@ export const useTasksStore = defineStore('tasks', {
       // 编辑源任务后同步重复模板（与时间胶囊 / 未来任务编辑同一套统一逻辑）：
       // 保持后续周期属性一致；移除重复则删除模板（周期提醒随之停止）。
       // 统一方法只改内存并返回触及项目，这里按原行为防抖落盘。
-      const touchedRepeats = this._syncRepeatMasterForTask(task)
+      const { repeatPids: touchedRepeats, taskPids: touchedTasks } = this._syncRepeatMasterForTask(task)
       for (const pid of touchedRepeats) this._persistRepeats(pid)
+      // P1-4 联动：模板的出现若已物化为活跃任务，一并防抖落盘
+      for (const pid of touchedTasks) this._persist(pid)
       logAudit(isNew ? '新增任务' : '修改任务', safeDetail(`任务ID：${task.id}，项目ID：${target}`))
     },
     /**
@@ -2279,21 +2562,25 @@ export const useTasksStore = defineStore('tasks', {
         const occ = buildRepeatOccurrence(task, todayKey())
         if (occ) {
           const masters = this.repeats[task.projectId] ?? []
-          if (!masters.some((m) => m.sourceTaskId === task.id)) {
+          // 已存在存活模板则跳过；墓碑（规则曾被删除）不算，允许本次完成重新创建
+          if (!masters.some((m) => m.sourceTaskId === task.id && !m.deletedAt)) {
             const now = nowIso()
-            this.repeats[task.projectId] = [
-              ...masters,
-              {
-                id: task.id,
-                projectId: task.projectId,
-                sourceTaskId: task.id,
-                rootTaskId: rootIdOf(task),
-                dueDate: occ.dueDate,
-                template: occ.template,
-                createdAt: now,
-                updatedAt: now,
-              },
-            ]
+            const newMaster: RepeatMaster = {
+              id: task.id,
+              projectId: task.projectId,
+              sourceTaskId: task.id,
+              rootTaskId: rootIdOf(task),
+              dueDate: occ.dueDate,
+              template: occ.template,
+              createdAt: now,
+              updatedAt: now,
+            }
+            // 若存在同 id 墓碑（规则曾被删除），原地复活它，避免同 id 墓碑+存活两条并存
+            const tombIdx = masters.findIndex((m) => m.id === newMaster.id && m.deletedAt)
+            this.repeats[task.projectId] =
+              tombIdx >= 0
+                ? [...masters.slice(0, tombIdx), newMaster, ...masters.slice(tombIdx + 1)]
+                : [...masters, newMaster]
             this._persistRepeats(task.projectId)
             logAudit('生成重复任务模板', safeDetail(`任务ID：${task.id}，项目ID：${task.projectId}，周期：${task.repeat.type}`))
           }
@@ -2415,6 +2702,7 @@ export const useTasksStore = defineStore('tasks', {
           const list = ms ?? []
           let changed = false
           const next = list.map((m) => {
+            if (m.deletedAt) return m // 墓碑不参与恢复（R4）
             if (m.template.repeatProcessed?.[date] && (m.rootTaskId ?? m.template.repeatRootId ?? m.id) === rootId) {
               const tp = { ...(m.template.repeatProcessed ?? {}) }
               delete tp[date]
@@ -2593,6 +2881,7 @@ export const useTasksStore = defineStore('tasks', {
           const list = ms ?? []
           let changed = false
           const next = list.map((m) => {
+            if (m.deletedAt) return m // 墓碑不参与恢复（R4）
             if (m.template.repeatProcessed?.[date] && (m.rootTaskId ?? m.template.repeatRootId ?? m.id) === rootId) {
               const tp = { ...(m.template.repeatProcessed ?? {}) }
               delete tp[date]
@@ -2652,11 +2941,10 @@ export const useTasksStore = defineStore('tasks', {
       )
       this.trash[projectId] = mergeUnique(this.trash[projectId] ?? [], moved)
       this.tasks[projectId] = []
-      // 项目归档进回收站：其重复模板一并删除，周期提醒停止（恢复项目时任务重新承担）
-      if ((this.repeats[projectId] ?? []).length) {
-        this.repeats[projectId] = []
-        this._persistRepeats(projectId)
-      }
+      // 项目归档进回收站：其重复模板一并标记墓碑，周期提醒停止（恢复项目时任务重新承担；
+      // R4：写墓碑而非直接清空，避免离线端把已归档项目的旧规则并集写回复活）
+      const t = this._tombstoneMasters((m) => m.projectId === projectId)
+      for (const p of t) this._persistRepeats(p)
       this._persist(projectId)
       this._persistTrash(projectId)
     },
@@ -2683,13 +2971,11 @@ export const useTasksStore = defineStore('tasks', {
             restored.push({ ...t, status: 'pending' as const, updatedAt: nowIso() })
           }
         }
-        // 恢复的重复任务由任务自己承担后续周期：删除其重复模板，避免与模板重复生成/重复提醒
+        // 恢复的重复任务由任务自己承担后续周期：把其重复模板标记墓碑，避免与模板重复生成/重复提醒
+        //（R4：写墓碑而非直接移除，防止离线端把已删除规则并集写回）
         const ids = new Set(deleted.map((t) => t.id))
-        const masters = this.repeats[projectId] ?? []
-        if (masters.some((m) => ids.has(m.sourceTaskId))) {
-          this.repeats[projectId] = masters.filter((m) => !ids.has(m.sourceTaskId))
-          this._persistRepeats(projectId)
-        }
+        const t = this._tombstoneMasters((m) => ids.has(m.sourceTaskId))
+        for (const p of t) this._persistRepeats(p)
         this.tasks[projectId] = sortActiveList(mergeUnique(this.tasks[projectId] ?? [], restored))
         // purgeTrashFiles 已清空内存回收站：这里只写回“历史完成”的归档记录
         this.trash[projectId] = archived
@@ -2720,17 +3006,18 @@ export const useTasksStore = defineStore('tasks', {
       this.trash[fromId] = []
       this.trash[toId] = mergeUnique(this.trash[toId] ?? [], archived)
       await this.purgeTrashFiles(fromId)
-      // 重名合并：重复模板随项目一并合并到目标项目
+      // 重名合并：重复模板随项目一并合并到目标项目；fromId 侧写墓碑（R4：防离线端
+      // 把已合并项目的旧规则并集写回 fromId 文件复活）
       const fromMasters = this.repeats[fromId] ?? []
       if (fromMasters.length) {
         this.repeats[toId] = [
           ...(this.repeats[toId] ?? []),
           ...fromMasters.map((m) => ({ ...m, projectId: toId })),
         ]
-        this.repeats[fromId] = []
         this._persistRepeats(toId)
-        this._persistRepeats(fromId)
       }
+      const tomb = this._tombstoneMasters((m) => m.projectId === fromId)
+      for (const p of tomb) this._persistRepeats(p)
       this._persist(toId)
       this._persist(fromId)
       this._persistTrash(fromId)
@@ -2853,7 +3140,7 @@ export const useTasksStore = defineStore('tasks', {
       // 未来任务的重复出现（repeats 中的模板）不在主任务列表：
       // 把后台上传完成的附件写回模板并持久化 repeats，保证“像普通任务一样编辑未来任务”时附件不丢
       const masters = this.repeats[projectId] ?? []
-      const master = masters.find((m) => m.template.id === targetTaskId)
+      const master = masters.find((m) => !m.deletedAt && m.template.id === targetTaskId)
       if (!master) return false
       const template = master.template
       if (subtaskId) {
@@ -2911,16 +3198,19 @@ export const useTasksStore = defineStore('tasks', {
       if (idx < 0) return false
       normalizeTask(task)
       task.updatedAt = nowIso()
+      // P1-4 联动可能改到活跃任务（多端竞态下模板的出现已被物化）：记录后统一落盘
+      const touchedTasks = new Set<string>()
       if (!task.repeat) {
-        // 移除重复：删除模板，本次出现转为普通一次性任务
-        this.repeats[pid] = masters.filter((m) => m.id !== masterId)
-        this._persistRepeats(pid)
+        // 移除重复：标记模板墓碑，本次出现转为普通一次性任务（R4：防并集写回复活）
+        const t = this._tombstoneMasters((m) => m.id === masterId)
+        for (const p of t) this._persistRepeats(p)
         this.upsert(task)
       } else {
         // 保留重复：统一同步逻辑（与今日任务 / 时间胶囊编辑一致），只改内存，下方统一落盘
-        this._syncRepeatMasterForTask(task, { masterId })
+        const { taskPids } = this._syncRepeatMasterForTask(task, { masterId })
+        for (const tp of taskPids) touchedTasks.add(tp)
       }
-      const okTasks = !task.repeat ? await this.saveProjectNow(pid) : true
+      const okTasks = (!task.repeat || touchedTasks.size > 0) ? await this.saveProjectNow(pid) : true
       const okRepeats = await this.saveRepeatsNow(pid)
       if (okTasks && okRepeats) return true
       this.tasks[pid] = tasksSnap
@@ -2946,7 +3236,7 @@ export const useTasksStore = defineStore('tasks', {
       let masterPid: string | undefined
       let master: RepeatMaster | undefined
       for (const pid of Object.keys(this.repeats)) {
-        const m = (this.repeats[pid] ?? []).find((x) => x.template.id === taskId)
+        const m = (this.repeats[pid] ?? []).find((x) => !x.deletedAt && x.template.id === taskId)
         if (m) {
           masterPid = pid
           master = m
@@ -3045,7 +3335,7 @@ export const useTasksStore = defineStore('tasks', {
       // 无剩余未处理重复日则删除模板（链条自然结束）。
       if (masterPid !== undefined) {
         const mlist = this.repeats[masterPid] ?? []
-        const mi = mlist.findIndex((m) => m.template.id === source.id)
+        const mi = mlist.findIndex((m) => !m.deletedAt && m.template.id === source.id)
         if (mi >= 0 && source.repeatProcessed?.[mlist[mi].dueDate]) {
           const mrule = source.repeat
           const advanced = mrule
@@ -3059,7 +3349,8 @@ export const useTasksStore = defineStore('tasks', {
               updatedAt: nowIso(),
             }
           } else {
-            mlist.splice(mi, 1)
+            // 无剩余未处理重复日：写墓碑结束链条（R4：防离线端把已结束链条并集写回）
+            mlist[mi] = { ...mlist[mi], deletedAt: nowIso(), updatedAt: nowIso() }
           }
           this.repeats[masterPid] = [...mlist]
         }
@@ -3108,7 +3399,7 @@ export const useTasksStore = defineStore('tasks', {
         let masterPid: string | undefined
         let master: RepeatMaster | undefined
         for (const pid of Object.keys(this.repeats)) {
-          const m = (this.repeats[pid] ?? []).find((x) => x.template.id === taskId)
+          const m = (this.repeats[pid] ?? []).find((x) => !x.deletedAt && x.template.id === taskId)
           if (m) {
             masterPid = pid
             master = m
@@ -3174,7 +3465,7 @@ export const useTasksStore = defineStore('tasks', {
       // （即用户感受到的「要多刷新几次才更新」）。无剩余未处理重复日则删除模板（链条自然结束）。
       if (masterPid !== undefined) {
         const mlist = this.repeats[masterPid] ?? []
-        const mi = mlist.findIndex((m) => m.template.id === source.id)
+        const mi = mlist.findIndex((m) => !m.deletedAt && m.template.id === source.id)
         if (mi >= 0 && source.repeatProcessed?.[mlist[mi].dueDate]) {
           const mrule = source.repeat
           const advanced = mrule
@@ -3188,7 +3479,8 @@ export const useTasksStore = defineStore('tasks', {
               updatedAt: nowIso(),
             }
           } else {
-            mlist.splice(mi, 1)
+            // 无剩余未处理重复日：写墓碑结束链条（R4：防离线端把已结束链条并集写回）
+            mlist[mi] = { ...mlist[mi], deletedAt: nowIso(), updatedAt: nowIso() }
           }
           this.repeats[masterPid] = [...mlist]
         }

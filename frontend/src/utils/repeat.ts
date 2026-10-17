@@ -309,8 +309,47 @@ export function buildRepeatOccurrence(task: Task, today: string): { template: Ta
   return buildOccurrenceTemplate(task, rule, anchorKey, date)
 }
 
+/** 重复规则的「形状指纹」：type / interval / weekdays / monthDay / dates 的稳定序列化。
+ *  用于派生确定性出现日 id，以及与 repeatShapeEquals 一致地判断规则是否变化。
+ *  不含 start / endAfter（相位与结束日不算形状）。 */
+export function repeatRuleFingerprint(rule: RepeatRule): string {
+  return [
+    rule.type,
+    String(rule.interval ?? 1),
+    JSON.stringify(rule.weekdays ?? []),
+    String(rule.monthDay ?? 0),
+    JSON.stringify(rule.dates ?? []),
+  ].join('|')
+}
+
+/** 稳定字符串哈希（FNV-1a 32bit），同一输入任意端/任意次结果一致 */
+function fnv1a32(input: string, seed: number): number {
+  let h = seed >>> 0
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return h >>> 0
+}
+
+/** 由 (根任务 id, 出现日, 规则指纹) 派生一个跨端稳定、UUID 格式的「出现日 id」。
+ *
+ * 背景（重复任务重复生成 Bug）：物化/重建出现时若用随机 UUID，同一逻辑重复日被
+ * 不同端（或同一端不同时刻的模板快照）物化会得到不同 id，按 id 合并（mergeTasks/
+ * dedupTasksById）永远无法收敛，于是出现两条重复任务。
+ * 改成确定性派生后：同一重复链 + 同一出现日 + 同一规则 → 任意端都算出同一 id，
+ * 多端物化/重建天然收敛为一条，从根本上消除重复。
+ * 注意：id 只依赖 dueDate（出现日）而非模板时间，同一模板跨端、跨物化保持稳定。 */
+export function deterministicOccurrenceId(rootId: string, date: string, rule: RepeatRule): string {
+  const seed = `${rootId}\u0000${date}\u0000${repeatRuleFingerprint(rule)}`
+  const words = [0x811c9dc5, 0x9e3779b9, 0x85ebca6b, 0xc2b2ae35].map((s) => fnv1a32(seed, s))
+  const hex = words.map((n) => n.toString(16).padStart(8, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
+}
+
 /** 由（源任务、重复规则、相位锚日期、出现日）构造下一次出现的任务模板：
- *  时间按 offset 顺延、子任务重置未完成、附件浅拷贝、规则原样保留。 */
+ *  时间按 offset 顺延、子任务重置未完成、附件浅拷贝、规则原样保留。
+ *  出现日 id 用确定性派生（见 deterministicOccurrenceId），保证多端物化/重建收敛为一条。 */
 export function buildOccurrenceTemplate(
   task: Task,
   rule: RepeatRule,
@@ -321,7 +360,7 @@ export function buildOccurrenceTemplate(
   const now = nowIso()
   const template: Task = {
     ...task,
-    id: crypto.randomUUID(),
+    id: deterministicOccurrenceId(rootIdOf(task), date, rule),
     status: 'pending',
     isReminded: false,
     createdAt: now,

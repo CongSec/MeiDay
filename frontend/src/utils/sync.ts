@@ -12,6 +12,7 @@ import type { DeletedProject, Profile, Project, StatsDailyEntry, StatsTaskDelta,
 type CasResult<T> =
   | { ok: true; etag: string }
   | { ok: false; reason: 'conflict'; remote: T | null; remoteEtag: string | null }
+  | { ok: false; reason: 'remote-gone'; remote: null; remoteEtag: null }
 
 /** 大小写无关地读取响应头中的 ETag，并去掉常见的包围引号，保证读写比较稳定 */
 function getEtag(headers: Record<string, unknown> | undefined): string | null {
@@ -193,8 +194,16 @@ export async function compareAndSwapPut<T>(
   const { content: remoteContent, etag: remoteEtag } = await fetchRemote<T>(client, key)
   const remoteExists = remoteEtag !== null && remoteContent !== null
 
+  if (knownEtag && !remoteExists) {
+    // R3/R8 修复：本端此前同步过该键（knownEtag 存在）而远端对象已不存在——
+    // 说明远端被清空/重置（如清空时间胶囊删除分片文件）。此时绝不能把本地缓存
+    // 当作「新建」重新写回（否则已清空的数据被缓存复活），返回 remote-gone
+    // 由调用方作废本地缓存并禁止写回。
+    return { ok: false, reason: 'remote-gone', remote: null, remoteEtag: null }
+  }
+
   const isConflict = knownEtag
-    ? !remoteExists || remoteEtag !== knownEtag
+    ? remoteEtag !== knownEtag
     : remoteExists
 
   if (isConflict) {
