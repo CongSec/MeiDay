@@ -211,9 +211,10 @@ function forcePending() {
 async function bootAfterLogin() {
   // 首登先引导加载（等同网页端 TodayView 挂载）：version=0 的账号（如测试号）
   // 没有同步日志，轮询拿不到 changes，必须显式拉取一次数据再进入 2s 轮询。
+  // 注意：「立即同步」已改为直连 OSS 全量重拉，bootstrapLoad 本身已经把全部项目拉过一遍，
+  // 这里再调 syncNow() 会把同一批项目重复全量拉一次，因此只负责引导加载 + 启动轮询。
   await bootstrapLoad().catch(() => {})
   startSyncPoll()
-  void syncNow()
 }
 async function doLogin() {
   loginErr.value = ''
@@ -335,8 +336,21 @@ function persistWidget() {
 async function onAutoStart(e: Event) {
   await widget.setAutoStart((e.target as HTMLInputElement).checked)
 }
-function onRefresh() {
-  void syncNow()
+/** 「立即同步」按钮四态：idle / 同步中 / 已同步 / 同步失败（成功失败均 2s 后复原） */
+const syncState = ref<'idle' | 'running' | 'ok' | 'fail'>('idle')
+let syncStateTimer: number | undefined
+
+async function onRefresh() {
+  // 直连 OSS 全量重拉可能耗时数秒到数十秒：同步中禁用按钮，避免连点重复发起
+  if (syncState.value === 'running') return
+  syncState.value = 'running'
+  const ok = await syncNow()
+  syncState.value = ok ? 'ok' : 'fail'
+  if (syncStateTimer !== undefined) window.clearTimeout(syncStateTimer)
+  syncStateTimer = window.setTimeout(() => {
+    syncState.value = 'idle'
+    syncStateTimer = undefined
+  }, 2000)
 }
 
 /* ---------------- 生命周期 ---------------- */
@@ -359,6 +373,7 @@ onMounted(async () => {
 })
 onUnmounted(() => {
   if (todayTimer !== undefined) window.clearInterval(todayTimer)
+  if (syncStateTimer !== undefined) window.clearTimeout(syncStateTimer)
   window.removeEventListener('mousemove', onWindowMouseMove)
   window.removeEventListener('mouseup', onWindowMouseUp)
 })
@@ -483,7 +498,9 @@ const settingsBgStyle = computed(() => ({
           </div>
           <div class="row">
             <span class="row-label">立即同步</span>
-            <button class="ghost-btn" @click="onRefresh">同步</button>
+            <button class="ghost-btn" :disabled="syncState === 'running'" @click="onRefresh">
+              {{ syncState === 'running' ? '同步中…' : syncState === 'ok' ? '已同步' : syncState === 'fail' ? '同步失败' : '同步' }}
+            </button>
           </div>
         </section>
 
@@ -764,6 +781,12 @@ const settingsBgStyle = computed(() => ({
 }
 .ghost-btn:hover {
   background: rgba(0, 0, 0, 0.12);
+}
+/* 「立即同步」执行中禁用：直连 OSS 全量重拉耗时较长，禁用态需可见 */
+.ghost-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+  background: rgba(0, 0, 0, 0.06);
 }
 .danger-btn {
   width: 100%;

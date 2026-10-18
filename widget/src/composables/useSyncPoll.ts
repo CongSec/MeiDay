@@ -331,21 +331,108 @@ export function armRecoveryLoop(): void {
 }
 
 
-/** 手动立即同步一次（标题栏刷新按钮）；轮询未启动时返回 false */
+/* ---------------- 手动「立即同步」：直连 OSS 全量重拉（纯下载） ---------------- */
+
+/** 项目分批并发度：与 loadAllProgressive 一致，避免上百项目一次性打满网络 */
+const MANUAL_BATCH_SIZE = 4
+
+/** 手动同步的并发去重：连点多次复用同一次全量拉取。
+ *  刻意不暂停 2s 轮询——两条链路并行，靠 If-Modified-Since 304 + 「远端即权威、绝不写回」
+ *  保证幂等（两者都不写 OSS；IDB 只是内容相同的后写覆盖）。 */
+let manualSyncPromise: Promise<boolean> | null = null
+
+/** 逐项目直连 OSS 重拉（分批并发）；返回失败项目数。
+ *  复用 tasks.syncProject：远端即权威、不并入本地缓存、不 PUT、不上报。 */
+async function pullAllProjectsDirect(): Promise<number> {
+  const projects = useProjectsStore()
+  const tasks = useTasksStore()
+  const ids = projects.projects.map((p) => p.id)
+  let failed = 0
+  for (let i = 0; i < ids.length; i += MANUAL_BATCH_SIZE) {
+    const batch = ids.slice(i, i + MANUAL_BATCH_SIZE)
+    const okList = await Promise.all(
+      batch.map(async (id) => {
+        try {
+          await tasks.syncProject(id)
+          return true
+        } catch (e) {
+          // 远端文件不存在（项目刚建/已清空）不算失败，与轮询口径一致
+          if (isIgnorableError(e)) return true
+          console.error('[widget] 立即同步拉取失败', id, e)
+          return false
+        }
+      }),
+    )
+    failed += okList.filter((ok) => !ok).length
+  }
+  return failed
+}
+
+/**
+ * 「立即同步」：完全不查 /api/sync/state，无视本地版本游标，直接对 OSS 全量重拉一遍。
+ *
+ * 与 2s 轮询（pollOnce）的分工：
+ *  - 轮询：靠中心服务器的变更事件做增量被动更新（保留不动）；
+ *  - 本函数：手动强制兜底，不看 version、不受 version=0 账号的 15s 节流限制，
+ *    保证「另一台设备把任务改到今天的项目」即使不在 todayRelevantProjectIds 里也能被拉到。
+ *
+ * 只下载不上传：全部走条件 GET（304 即零下载），不 PUT、不 report。
+ * 返回是否全部成功（任一项目/元数据拉取失败即 false）。
+ */
+async function syncAllFromOss(): Promise<boolean> {
+  const auth = useAuthStore()
+  if (!auth.isLoggedIn) return false
+  // 凭证未就绪（冷启动自动解锁未完成 / 网络恢复中）：先补解锁，否则下面全是空转
+  if (!auth.creds) {
+    const unlocked = await auth.tryAutoUnlock().catch(() => false)
+    if (!unlocked || !auth.creds) return false
+  }
+  const projects = useProjectsStore()
+  const tasks = useTasksStore()
+  const stats = useStatsStore()
+  let failed = 0
+  // 项目列表（含删除墓碑）：别的设备新建/删除的项目必须先同步，否则待拉集合本身是旧的
+  try {
+    await projects.load()
+  } catch (e) {
+    failed++
+    console.error('[widget] 立即同步：项目列表拉取失败', e)
+  }
+  // 统计（只读展示，不影响今日列表）
+  try {
+    await stats.load()
+  } catch (e) {
+    failed++
+    console.error('[widget] 立即同步：统计拉取失败', e)
+  }
+  // 今日跨项目顺序表（内部已吞异常，这里保持调用顺序）
+  await tasks.loadTodayOrder()
+  // 全部项目任务（无条件，不再用 todayRelevantProjectIds 缩小范围）
+  const projectFailed = await pullAllProjectsDirect()
+  failed += projectFailed
+  // 任务侧全部拿到即可认为「已同步」，避免只挂在统计/项目列表这类旁支上报错让界面一直显示「正在同步…」
+  if (projectFailed === 0) synced.value = true
+  return failed === 0
+}
+
+/** 手动「立即同步」按钮入口。轮询未启动时先做会话恢复（离线待恢复 / 冷启动解锁失败）。 */
 export function syncNow(): Promise<boolean> {
   const auth = useAuthStore()
   if (!active.value) {
-    // 轮询未启动（离线待恢复 / 冷启动解锁失败）：有登录态则执行完整恢复，而不是直接返回 false
     if (!auth.isLoggedIn) return Promise.resolve(false)
     return recoverSession()
   }
-  if (timer !== undefined) window.clearTimeout(timer)
-  timer = undefined
-  return pollOnce().then((ok) => {
-    intervalMs = ok ? POLL_INTERVAL_MS : Math.min(intervalMs * 2, MAX_BACKOFF_MS)
-    if (!stopped) timer = window.setTimeout(tick, intervalMs)
-    return ok
-  })
+  if (manualSyncPromise) return manualSyncPromise
+  manualSyncPromise = syncAllFromOss()
+    .then((ok) => {
+      // 能拉通说明网络正常：复位轮询退避间隔（不重排定时器，下一轮 tick 生效）
+      if (ok) intervalMs = POLL_INTERVAL_MS
+      return ok
+    })
+    .finally(() => {
+      manualSyncPromise = null
+    })
+  return manualSyncPromise
 }
 
 // 回到前台 / 网络恢复时立即同步一次，不等下一个周期
