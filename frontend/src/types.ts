@@ -131,6 +131,14 @@ export interface UserStats {
 }
 
 
+/** 时间胶囊墓碑日志条目（tombstones.json）：只存 id + updatedAt，不存任务负载。
+ *  供多端同步「防复活」使用：active 列表合并时按此集合剔除已被他端完成/删除归档的任务。
+ *  updatedAt = 任务离开活跃列表时的 updatedAt（已完成=完成时间；已删除=删除时间）。 */
+export interface TombstoneEntry {
+  id: string
+  updatedAt: string
+}
+
 /** 隐私日记：附件密文的元信息（二进制密文存于 users/{username}/diary/files/{fileId}） */
 export interface DiaryFileRef {
   fileId: string

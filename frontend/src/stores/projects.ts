@@ -13,7 +13,7 @@ import { idbGet, idbPut, idbDel } from '@/utils/idb'
 import { queueSyncChange } from '@/utils/syncReport'
 import { nowIso, todayKey } from '@/utils/time'
 import { logAudit, safeDetail } from '@/utils/audit'
-import type { DeletedProject, Profile, Project, RepeatMaster, Task } from '@/types'
+import type { DeletedProject, Profile, Project, RepeatMaster, Task, TombstoneEntry } from '@/types'
 
 const COLORS = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899']
 
@@ -332,6 +332,7 @@ export const useProjectsStore = defineStore('projects', {
       const tasksSnap = (tasks.tasks[id] ?? []).slice()
       const trashSnap = (tasks.trash[id] ?? []).slice()
       const repeatsSnap = (tasks.repeats[id] ?? []).slice()
+      const tombstonesSnap = (tasks.tombstones[id] ?? []).slice()
       // 变更内存
       this.projects = this.projects.filter((x) => x.id !== id)
       // 保留项目元数据（id/名称/颜色/图标 + 删除时间），供回收站「恢复整个项目」使用
@@ -340,6 +341,8 @@ export const useProjectsStore = defineStore('projects', {
         { id: p.id, name: p.name, color: p.color, icon: p.icon, deletedAt: nowIso() },
       ]
       tasks.markAllDeleted(id)
+      // 墓碑先落：整项目删除必须先让墓碑日志写盘，再写 tasks（防复活写顺序约束）
+      await tasks.saveTombstonesNow(id)
       // 立即写盘：profile + 任务 + 回收站 + 重复模板
       const [okProfile, okTasks, okTrash, okRepeats] = await Promise.all([
         this.saveNow(),
@@ -362,7 +365,12 @@ export const useProjectsStore = defineStore('projects', {
       // 失败回滚：恢复内存与缓存到保存前状态，避免“提示失败但界面已删除”
       this.projects = projectsSnap
       this.deletedProjects = deletedSnap
-      await tasks.rollbackProject(id, { tasks: tasksSnap, trash: trashSnap, repeats: repeatsSnap })
+      await tasks.rollbackProject(id, {
+        tasks: tasksSnap,
+        trash: trashSnap,
+        repeats: repeatsSnap,
+        tombstones: tombstonesSnap,
+      })
       if (auth.username) {
         await idbPut('profile', auth.username, {
           projects: applyDeletedProjectTombstones([...projectsSnap], deletedSnap),
@@ -395,10 +403,12 @@ export const useProjectsStore = defineStore('projects', {
       const tasksSnap = new Map<string, Task[]>()
       const trashSnap = new Map<string, Task[]>()
       const repeatsSnap = new Map<string, RepeatMaster[]>()
+      const tombstonesSnap = new Map<string, TombstoneEntry[]>()
       for (const pid of pids) {
         tasksSnap.set(pid, (tasks.tasks[pid] ?? []).slice())
         trashSnap.set(pid, (tasks.trash[pid] ?? []).slice())
         repeatsSnap.set(pid, (tasks.repeats[pid] ?? []).slice())
+        tombstonesSnap.set(pid, (tasks.tombstones[pid] ?? []).slice())
       }
       if (existing) {
         // 重名：不新建项目，把该项目的任务（含回收站）合并进同名现有项目，避免出现重名项目
@@ -411,6 +421,9 @@ export const useProjectsStore = defineStore('projects', {
         await tasks.restoreProjectTasks(id)
       }
 
+      // 恢复路径先落墓碑（把恢复任务的墓碑移除写盘），再写 tasks/trash，
+      // 避免其他设备在「tasks 已恢复、墓碑未删」窗口内按旧墓碑误杀任务
+      await Promise.all(pids.map((pid) => tasks.saveTombstonesNow(pid).catch(() => false)))
       const saves: Promise<boolean>[] = [
         this.saveNow(),
         ...pids.map((pid) => tasks.saveProjectNow(pid)),
@@ -440,6 +453,7 @@ export const useProjectsStore = defineStore('projects', {
           tasks: tasksSnap.get(pid) ?? [],
           trash: trashSnap.get(pid) ?? [],
           repeats: repeatsSnap.get(pid) ?? [],
+          tombstones: tombstonesSnap.get(pid) ?? [],
         })
       }
       if (auth.username) {

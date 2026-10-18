@@ -589,6 +589,8 @@ export const paths = {
   trashShard: (username: string, projectId: string, month: string) => `users/${username}/projects/${projectId}/trash/${month}.json`,
   trashShardPrefix: (username: string, projectId: string) => `users/${username}/projects/${projectId}/trash/`,
   repeats: (username: string, projectId: string) => `users/${username}/projects/${projectId}/repeats.json`,
+  /** 墓碑日志（每项目一份紧凑文件，只存 {id, updatedAt}，日常同步条件 GET / 304 命中零下载） */
+  tombstones: (username: string, projectId: string) => `users/${username}/projects/${projectId}/tombstones.json`,
   /** 隐私日记命名空间（独立于任务数据）：所有对象均为密文 */
   diary: (username: string) => `users/${username}/diary/`,
   diaryMeta: (username: string) => `users/${username}/diary/_meta.json`,
