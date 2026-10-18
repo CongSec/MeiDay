@@ -56,7 +56,11 @@ function loadExpanded() {
     expanded.value = {}
   }
 }
+/** 搜索/筛选期间的手动折叠覆盖：与常规展开记忆分开，避免污染 localStorage 里的展开偏好 */
+const collapsedWhileFiltering = ref<Record<string, boolean>>({})
 function isExpanded(key: string) {
+  // 搜索/筛选期间默认全部展开（命中即见），用户手动折叠的写进覆盖表
+  if (anyCondition.value) return !collapsedWhileFiltering.value[key]
   return !!expanded.value[key]
 }
 
@@ -79,6 +83,115 @@ watch(searchInput, (v) => {
 })
 /** 是否处于搜索状态（决定空状态文案） */
 const searching = computed(() => searchQuery.value.trim().length > 0)
+
+/* ---- 项目图筛选：任务状态 + 单一时间字段范围（按天，含当天整天） ---- */
+/** 可筛选的时间字段：创建 / 开始 / 提醒 / 截止 / 完成（入舱） */
+type TimeField = '' | 'created' | 'start' | 'reminder' | 'end' | 'done'
+const TIME_FIELD_OPTIONS: { key: Exclude<TimeField, ''>; label: string }[] = [
+  { key: 'created', label: '创建时间' },
+  { key: 'start', label: '开始时间' },
+  { key: 'reminder', label: '提醒时间' },
+  { key: 'end', label: '截止时间' },
+  { key: 'done', label: '完成/入舱时间' },
+]
+/** 状态筛选：已完成 / 已删除（默认全选 = 不筛） */
+const statusCompleted = ref(true)
+const statusDeleted = ref(true)
+/** 时间字段（空 = 不限）与起止日期（YYYY-MM-DD，含首含尾；空 = 该侧不限） */
+const timeField = ref<TimeField>('')
+const timeFrom = ref('')
+const timeTo = ref('')
+
+/** 时间筛选中：选定字段即生效（该字段为空的任务一律排除），起止日期为可选收窄 */
+const timeFilterActive = computed(() => !!timeField.value)
+const statusFilterActive = computed(() => !statusCompleted.value || !statusDeleted.value)
+/** 是否启用了筛选（不含关键词） */
+const filtering = computed(() => statusFilterActive.value || timeFilterActive.value)
+/** 是否处于「搜索或筛选」状态：决定自动展开、全月份展示、空状态文案 */
+const anyCondition = computed(() => searching.value || filtering.value)
+/** 当前所选时间字段的展示名 */
+const timeFieldLabel = computed(() => TIME_FIELD_OPTIONS.find((o) => o.key === timeField.value)?.label ?? '')
+
+/** 取某任务的指定时间字段原始值（ISO 字符串；缺失为空串） */
+function timeRawOf(t: Task, f: TimeField): string {
+  switch (f) {
+    case 'created':
+      return t.createdAt || ''
+    case 'start':
+      return t.startTime || ''
+    case 'reminder':
+      return t.reminderTime || ''
+    case 'end':
+      return t.endTime || ''
+    case 'done':
+      return t.updatedAt || ''
+    default:
+      return ''
+  }
+}
+/** 取某任务的指定时间字段日期键（YYYY-MM-DD）：按天口径，与 dateKeyOf / 日历热力图一致 */
+function timeKeyOf(t: Task, f: TimeField): string {
+  return timeRawOf(t, f).slice(0, 10)
+}
+/** 卡片上展示的时间（YYYY-MM-DD HH:MM，精确到分但筛选按天） */
+function timeTextOf(t: Task, f: TimeField): string {
+  return timeRawOf(t, f).slice(0, 16).replace('T', ' ')
+}
+/** 状态谓词：已完成/已删除分别受对应 chip 控制；未知状态仅在两 chip 全选时保留 */
+function matchStatus(t: Task): boolean {
+  if (t.status === 'completed') return statusCompleted.value
+  if (t.status === 'deleted') return statusDeleted.value
+  return statusCompleted.value && statusDeleted.value
+}
+/** 时间谓词：未选字段直接通过；选了字段则「该字段为空 → 排除」，再按起止日期收窄（字符串字典序 = 时间序） */
+function matchTime(t: Task): boolean {
+  if (!timeFilterActive.value) return true
+  const k = timeKeyOf(t, timeField.value)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(k)) return false
+  if (timeFrom.value && k < timeFrom.value) return false
+  if (timeTo.value && k > timeTo.value) return false
+  return true
+}
+/** 关键词谓词：任务名 / 描述 / 子任务名 / 子任务描述 / 附件名（含子任务附件） */
+function matchKeyword(t: Task, q: string): boolean {
+  if (!q) return true
+  const hit = (s?: string) => !!s && s.toLowerCase().includes(q)
+  if (hit(t.name) || hit(t.description)) return true
+  for (const sb of t.subtasks ?? []) if (hit(sb.name) || hit(sb.description)) return true
+  const attHit = (arr?: AttachmentMeta[]) => (arr ?? []).some((a) => hit(a.name))
+  if (attHit(t.attachments)) return true
+  for (const sb of t.subtasks ?? []) if (attHit(sb.attachments)) return true
+  return false
+}
+/** 命中来源提示：关键词不是由任务名/描述命中时，卡片上标出命中的子任务或附件 */
+function keywordHitHint(t: Task, q: string): string {
+  if (!q) return ''
+  const hit = (s?: string) => !!s && s.toLowerCase().includes(q)
+  if (hit(t.name) || hit(t.description)) return ''
+  for (const sb of t.subtasks ?? []) {
+    if (hit(sb.name) || hit(sb.description)) return `命中子任务：${sb.name || '未命名子任务'}`
+  }
+  const att = [...(t.attachments ?? []), ...(t.subtasks ?? []).flatMap((s) => s.attachments ?? [])].find((a) =>
+    hit(a.name),
+  )
+  return att ? `命中附件：${att.name}` : ''
+}
+/** 卡片用：直接按当前关键词算命中来源提示（模板调用，避免重复取查询串） */
+function hitHintOf(t: Task): string {
+  return keywordHitHint(t, searchQuery.value.trim().toLowerCase())
+}
+/** 重置全部搜索与筛选条件 */
+function resetFilters() {
+  // 先杀掉待触发的防抖定时器，否则刚清空就被上一次输入回写
+  clearTimeout(searchTimer)
+  searchInput.value = ''
+  searchQuery.value = ''
+  statusCompleted.value = true
+  statusDeleted.value = true
+  timeField.value = ''
+  timeFrom.value = ''
+  timeTo.value = ''
+}
 
 /** 编辑弹窗状态（任务详情页已废弃，所有视图点击任务直接进编辑） */
 const editTask = ref<Task | null>(null)
@@ -111,6 +224,11 @@ function currentMonthKey(): string {
 
 /** 折叠/展开项目：所选年份数据已一次性加载进内存，折叠只收拢 UI（不再按需拉取） */
 function toggleGroup(key: string) {
+  // 搜索/筛选期间：只翻转本次会话的覆盖表，不改动常规展开记忆
+  if (anyCondition.value) {
+    collapsedWhileFiltering.value = { ...collapsedWhileFiltering.value, [key]: !collapsedWhileFiltering.value[key] }
+    return
+  }
   const next = !isExpanded(key)
   expanded.value = { ...expanded.value, [key]: next }
   localStorage.setItem(expandedKey(), JSON.stringify(expanded.value))
@@ -118,6 +236,8 @@ function toggleGroup(key: string) {
 
 /** 展开区展示的月份分组：默认只展示最近 N 个月，更早月份通过「加载更早月份」追加（数据已在内存，纯 UI 切片） */
 function visibleMonthGroups(g: TrashGroup): { key: string; tasks: Task[] }[] {
+  // 搜索/筛选期间展示全部命中月份：否则命中项被「加载更早月份」挡住，看起来像没搜到
+  if (anyCondition.value) return g.monthGroups
   return g.monthGroups.slice(0, visibleMonths.value[g.key] ?? MONTHS_VISIBLE)
 }
 
@@ -359,6 +479,8 @@ interface TrashGroup {
   deletedProject: DeletedProject | null
   /** 按月份分组（最新在前），包含该年份全部已加载月份 */
   monthGroups: { key: string; tasks: Task[] }[]
+  /** 该项目当前年份的全部胶囊任务（updatedAt 倒序），供搜索/筛选复用，避免重复取数组 */
+  all: Task[]
   /** 排序键：回收站最新变动时间（ISO），用于项目名倒序；缺失时为空 */
   updatedAt: string
 }
@@ -435,11 +557,6 @@ const projectGroups = computed<TrashGroup[]>(() => {
   if (!scanned.value) return []
   const seen = new Set<string>()
   const groups: TrashGroup[] = []
-  /** 本地已加载回收站 + 活跃已完成任务的最新时间，作为扫描时间缺失时的兜底排序键 */
-  const maxTaskTime = (key: string) => {
-    const arr = capsuleGroupArr(key)
-    return arr.reduce((m, t) => (t.updatedAt > m ? t.updatedAt : m), '')
-  }
   const push = (key: string, label: string, deleted: boolean, deletedProject: DeletedProject | null) => {
     if (seen.has(key)) return
     seen.add(key)
@@ -448,12 +565,13 @@ const projectGroups = computed<TrashGroup[]>(() => {
     if (!arr.length) return
     const monthGroups = toMonthGroups(arr)
     // 排序键：优先扫描到的回收站文件最新变动时间；已删除项目回退到删除时间；
-    // 再回退到本地已加载任务的最新时间；全无则为空（排最后，按名称正序）
+    // 再回退到本地已加载任务的最新时间（arr 已按 updatedAt 倒序，取首条即最新）；全无则为空（排最后，按名称正序）
     const updatedAt =
       scanLatest.value[key] ||
       (deleted && deletedProject ? deletedProject.deletedAt : '') ||
-      maxTaskTime(key)
-    groups.push({ key, label, deleted, deletedProject, monthGroups, updatedAt })
+      arr[0]?.updatedAt ||
+      ''
+    groups.push({ key, label, deleted, deletedProject, monthGroups, updatedAt, all: arr })
   }
   // 活跃项目：仅展示该年份内存中有数据的项目
   for (const p of projects.projects) {
@@ -481,28 +599,22 @@ const projectGroups = computed<TrashGroup[]>(() => {
     if (!ta && tb) return 1
     return a.label.localeCompare(b.label)
   })
-  // 搜索过滤：项目名包含关键词，或项目中任务名/内容匹配（该年数据已全部加载，直接全量搜索）
+  // 搜索/筛选（严格 AND）：状态谓词与时间谓词恒生效；关键词命中项目名只豁免「任务级关键词」这一项。
+  // 无关键词且无筛选条件时走快路径，原样返回（不复制、不重算分组）
+  if (!anyCondition.value) return groups
   const q = searchQuery.value.trim().toLowerCase()
-  if (!q) return groups
   const out: TrashGroup[] = []
   for (const g of groups) {
-    if (g.label.toLowerCase().includes(q)) {
-      out.push(g)
-      continue
-    }
-    const matched = capsuleGroupArr(g.key).filter((t) => {
-      const name = (t.name || '').toLowerCase()
-      const desc = (t.description || '').toLowerCase()
-      return name.includes(q) || desc.includes(q)
-    })
+    const nameHit = !!q && g.label.toLowerCase().includes(q)
+    // g.all 已按 updatedAt 倒序（capsuleGroupArr 保证），命中后无需再 sort
+    const matched = g.all.filter((t) => matchStatus(t) && matchTime(t) && (nameHit || matchKeyword(t, q)))
     if (!matched.length) continue
-    out.push({
-      ...g,
-      monthGroups: toMonthGroups(matched.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))),
-    })
+    out.push({ ...g, monthGroups: toMonthGroups(matched) })
   }
   return out
 })
+/** 当前展示（筛选后）的任务总数：无条件下即该年份全部胶囊任务数 */
+const hitTotal = computed(() => projectGroups.value.reduce((n, g) => n + trashTotal(g), 0))
 /** 回收站项目名列表分页：每页 20 个；进入/重新扫描回到第 1 页，翻页时收起全部项目 */
 const PAGE_SIZE = 20
 const page = ref(1)
@@ -541,6 +653,8 @@ function goToPage(p: number | '…') {
 function collapseAll() {
   expanded.value = {}
   visibleMonths.value = {}
+  // 搜索/筛选期间的临时折叠覆盖一并清掉（此时展示策略是「全部展开」）
+  collapsedWhileFiltering.value = {}
   localStorage.setItem(expandedKey(), JSON.stringify({}))
 }
 watch(totalPages, (t) => {
@@ -551,6 +665,21 @@ watch(totalPages, (t) => {
 })
 watch(page, (v) => {
   jumpPage.value = v
+})
+/** 搜索/筛选条件变化：回到第 1 页，避免停在不存在的页码 */
+watch([searchQuery, statusCompleted, statusDeleted, timeField, timeFrom, timeTo], () => {
+  page.value = 1
+})
+/** 取消时间字段：同时清空起止范围，避免残留的日期在下次选字段时突然生效 */
+watch(timeField, (v) => {
+  if (!v) {
+    timeFrom.value = ''
+    timeTo.value = ''
+  }
+})
+/** 退出搜索/筛选：清空本次会话的临时折叠覆盖 */
+watch(anyCondition, (v) => {
+  if (!v) collapsedWhileFiltering.value = {}
 })
 
 /** 导出/清空回收站操作进行中：禁用对应按钮，防重复提交 */
@@ -1119,24 +1248,94 @@ async function confirmCalendarDelete() {
 
     <!-- 项目视图：搜索 + 按项目分组（默认视图） -->
     <div v-if="viewMode === 'list'">
-    <!-- 搜索：项目名 + 已加载项目的任务名/内容 -->
+    <!-- 搜索 + 筛选：关键词覆盖项目名/任务名/内容/子任务/附件名；状态与时间字段严格 AND -->
     <div class="mt-4">
       <div class="relative">
         <AppIcon name="search" :size="15" class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
         <input
           v-model="searchInput"
           type="text"
-          placeholder="搜索项目名 / 任务名 / 任务内容"
+          placeholder="搜索项目名 / 任务名 / 内容 / 子任务 / 附件名"
           class="w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-700 placeholder:text-slate-400 focus:border-brand focus:outline-none"
         />
       </div>
-      <div v-if="searching" class="mt-1.5 text-[11px] text-slate-400">
-        所选年份数据已全部加载，可直接搜索
+
+      <!-- 筛选行：状态 chip + 时间字段 + 起止日期（flex-wrap，窄屏自动换行） -->
+      <div class="mt-2 flex flex-wrap items-center gap-1.5">
+        <button
+          class="rounded-lg border px-2.5 py-1.5 text-xs transition-colors"
+          :class="statusCompleted ? 'border-brand bg-brand text-white' : 'border-slate-200 text-slate-600 hover:bg-slate-50'"
+          title="只看已完成的任务"
+          @click="statusCompleted = !statusCompleted"
+        >
+          已完成
+        </button>
+        <button
+          class="rounded-lg border px-2.5 py-1.5 text-xs transition-colors"
+          :class="statusDeleted ? 'border-red-500 bg-red-500 text-white' : 'border-slate-200 text-slate-600 hover:bg-slate-50'"
+          title="只看已删除（存入胶囊时删除）的任务"
+          @click="statusDeleted = !statusDeleted"
+        >
+          已删除
+        </button>
+
+        <span class="mx-0.5 h-4 w-px bg-slate-200" aria-hidden="true"></span>
+
+        <select
+          v-model="timeField"
+          class="rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-600 focus:border-brand focus:outline-none"
+          title="按哪个时间字段筛选（按天，含当天整天）"
+        >
+          <option value="">不限时间</option>
+          <option v-for="o in TIME_FIELD_OPTIONS" :key="o.key" :value="o.key">{{ o.label }}</option>
+        </select>
+        <template v-if="timeField">
+          <input
+            v-model="timeFrom"
+            type="date"
+            :max="timeTo || undefined"
+            class="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 focus:border-brand focus:outline-none"
+            title="起始日期（含当天 00:00）"
+          />
+          <span class="text-xs text-slate-400">~</span>
+          <input
+            v-model="timeTo"
+            type="date"
+            :min="timeFrom || undefined"
+            class="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 focus:border-brand focus:outline-none"
+            title="结束日期（含当天 23:59）"
+          />
+        </template>
+        <button
+          v-if="anyCondition"
+          class="ml-auto inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-500 hover:bg-slate-50"
+          title="清空关键词与全部筛选条件"
+          @click="resetFilters"
+        >
+          <AppIcon name="close" :size="12" />
+          重置
+        </button>
+      </div>
+
+      <!-- 结果统计 / 口径提示 -->
+      <div v-if="anyCondition" class="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-400">
+        <span>筛选出 {{ projectGroups.length }} 个项目 / {{ hitTotal }} 条记录</span>
+        <template v-if="timeFilterActive">
+          <span>「{{ timeFieldLabel }}」为空的任务不参与时间筛选</span>
+          <span v-if="!timeFrom && !timeTo">可再选起止日期收窄范围</span>
+        </template>
+        <span v-else>所选年份数据已全部加载，可直接搜索</span>
       </div>
     </div>
 
     <div v-if="!projectGroups.length" class="mt-4 py-16 text-center text-sm text-slate-400">
-      <template v-if="searching">未找到匹配的时间胶囊记录</template>
+      <template v-if="!statusCompleted && !statusDeleted">请至少勾选「已完成」或「已删除」</template>
+      <template v-else-if="anyCondition">
+        <p>当前年份没有符合筛选条件的记录</p>
+        <p class="mt-1.5 text-[11px] text-slate-400">
+          搜索与筛选只覆盖当前选中年份，可点击右上角「扫描时间胶囊文件」切换到其他年份
+        </p>
+      </template>
       <template v-else>该年份暂无胶囊数据，可点击右上角「扫描时间胶囊文件」切换年份</template>
     </div>
     <div v-for="g in paginatedGroups" :key="g.key" class="mt-4">
@@ -1172,7 +1371,7 @@ async function confirmCalendarDelete() {
               <div
                 v-for="t in mg.tasks"
                 :key="t.id"
-                v-memo="[t.id, t.name, t.status, t.updatedAt, t.projectId]"
+                v-memo="[t.id, t.name, t.status, t.updatedAt, t.projectId, searchQuery, timeField, statusCompleted, statusDeleted]"
                 class="cursor-pointer bg-white rounded-lg border border-slate-200 p-4 flex items-center gap-3 hover:bg-slate-50/60"
                 title="点击编辑该任务"
                 @click="openEdit(t)"
@@ -1194,9 +1393,13 @@ async function confirmCalendarDelete() {
                     {{ durationText(t) }}
                   </span>
                 </div>
-                <div class="mt-1 flex flex-wrap gap-x-4 text-[11px] text-slate-400">
+                <div class="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-[11px] text-slate-400">
                   <span>{{ t.projectId ? (projectOf(t.projectId)?.name ?? '未知项目') : '无分类' }}</span>
                   <span>{{ formatTodayTitle(t.updatedAt) }}</span>
+                  <span v-if="timeFilterActive && timeField !== 'done' && timeRawOf(t, timeField)" class="text-slate-500">
+                    {{ timeFieldLabel }}：{{ timeTextOf(t, timeField) }}
+                  </span>
+                  <span v-if="hitHintOf(t)" class="text-brand/70">{{ hitHintOf(t) }}</span>
                 </div>
               </div>
               <button
@@ -1223,7 +1426,7 @@ async function confirmCalendarDelete() {
             </div>
         </div>
         <button
-          v-if="(visibleMonths[g.key] ?? MONTHS_VISIBLE) < g.monthGroups.length"
+          v-if="!anyCondition && (visibleMonths[g.key] ?? MONTHS_VISIBLE) < g.monthGroups.length"
           class="mt-1 w-full py-2 rounded-lg text-xs text-brand border border-brand/30 hover:bg-brand/5"
           @click="loadMoreGroup(g.key)"
         >
