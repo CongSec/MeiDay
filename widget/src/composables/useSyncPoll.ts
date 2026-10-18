@@ -180,8 +180,11 @@ async function pollOnce(): Promise<boolean> {
     const tasks = useTasksStore()
     if (!projects.loaded) await projects.load()
     const reported = await flushPendingSyncReports(auth.username)
+    // 只用于"按 id 精确排除本端刚上报的事件"。**绝不能**用服务端返回的 version(MAX(id))
+    // 抬高本地游标：那会连带跳过 (本地游标, MAX] 区间内其它设备刚产生、本端尚未拉取的
+    // 事件，而它们已被视为"已消费"，后端不会再补发 → 该端永久陈旧。
+    const selfIds = new Set<number>(reported?.ids ?? [])
     let cur = await loadVersion(auth.username)
-    if (reported !== undefined && reported > cur) cur = reported
     const state = await api.getSyncState(cur)
     let pulledAll = true
     let cursor = cur
@@ -189,10 +192,13 @@ async function pollOnce(): Promise<boolean> {
       pulledAll = await fullSync()
       cursor = state.version
     } else if (state.version > cur && cur > 0) {
-      pulledAll = await pullChanges(state.changes)
+      // 本端刚上报的事件（自己已写入 OSS）跳过，其余照常增量拉取
+      const others = state.changes.filter((c) => !selfIds.has(c.id))
+      pulledAll = others.length ? await pullChanges(others) : true
       // 游标只能推进到“实际拉取到的最后一条事件 id”，不能直接用总版本号：
       // 服务端每次最多返回 200 条，若待处理事件超过 200 条，直接用 state.version
       // 会跳过中间未拉取的事件，造成跨设备同步漏变更。
+      // 必须用未过滤的 state.changes：本端自己的事件也要越过，否则会一直重问同一批。
       cursor = state.changes.length ? state.changes[state.changes.length - 1].id : state.version
     } else if (state.version > cur) {
       // 全新设备（本地无游标 cur=0）：本地无缓存，无法判断哪些项目今日有任务，

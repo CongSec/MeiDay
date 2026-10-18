@@ -229,7 +229,7 @@ export const api = {
     return request<OssCheckResult>('POST', '/api/credentials/oss-check', body)
   },
   reportSyncChanges(events: SyncChangeItem[]) {
-    return request<{ ok: true; version: number }>('POST', '/api/sync/report', { events })
+    return request<{ ok: true; version: number; ids: number[] }>('POST', '/api/sync/report', { events })
   },
   getSyncState(since = 0) {
     return request<SyncState>('GET', `/api/sync/state?since=${since}`)

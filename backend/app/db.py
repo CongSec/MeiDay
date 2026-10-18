@@ -361,18 +361,28 @@ def get_sync_version(conn: sqlite3.Connection, username: str) -> int:
     return int(row["v"])
 
 
-def add_sync_changes(username: str, events) -> int:
-    """写入一批变更事件并返回该用户最新的总版本号。events: [(res_type, project_id), ...]"""
+def add_sync_changes(username: str, events) -> tuple[int, list[int]]:
+    """写入一批变更事件，返回 (该用户最新的总版本号, 本次新插入的事件 id 列表)。
+
+    返回 id 列表是为了让上报方能"精确排除自己刚上报的事件"：若改用总版本号(MAX(id))
+    抬本地游标，会连带跳过同一区间内其它设备刚产生、本端尚未拉取的事件（漏同步）。
+    """
     if not events:
         with get_conn() as conn:
-            return get_sync_version(conn, username)
+            return get_sync_version(conn, username), []
     with get_conn() as conn:
+        before = get_sync_version(conn, username)
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         conn.executemany(
             "INSERT INTO sync_changes (username, res_type, project_id, ts) VALUES (?,?,?,?)",
             [(username, res_type, project_id, ts) for (res_type, project_id) in events],
         )
-        return get_sync_version(conn, username)
+        # 同一次隐式写事务内其它连接无法插入，因此 id > before 且属于该用户的行就是本次插入的
+        rows = conn.execute(
+            "SELECT id FROM sync_changes WHERE username=? AND id>? ORDER BY id ASC",
+            (username, before),
+        ).fetchall()
+        return get_sync_version(conn, username), [int(r["id"]) for r in rows]
 
 
 def delete_sync_changes_older_than(hours: int) -> int:

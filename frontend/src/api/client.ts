@@ -381,9 +381,10 @@ export const api = {
   setLogRetention(days: number) {
     return request<{ ok: true; days: number }>('PUT', '/api/settings/log-retention', { days })
   },
-  /** 同步协调中心：OSS 写入成功后上报变更事件（报告给中心服务器，由它通知其它设备） */
+  /** 同步协调中心：OSS 写入成功后上报变更事件（报告给中心服务器，由它通知其它设备）。
+   *  ids = 本次新插入的事件 id，供轮询精确排除「自己刚上报的事件」（避免跳过别端变更）。 */
   reportSyncChanges(events: SyncChangeItem[]) {
-    return request<{ ok: true; version: number }>('POST', '/api/sync/report', { events })
+    return request<{ ok: true; version: number; ids: number[] }>('POST', '/api/sync/report', { events })
   },
   /** 同步协调中心：轮询获取总版本号与 since 之后的变更列表，判断是否有数据需要拉取 */
   getSyncState(since = 0) {

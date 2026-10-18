@@ -185,6 +185,10 @@ export const useProjectsStore = defineStore('projects', {
           // 记录本次成功写盘的内容指纹，供 _persist 判断后续是否真的发生了变化
           lastSavedProfileUser = auth.username
           lastSavedProfileFingerprint = profileContentFingerprint(auth.username, profile)
+          // ★ 必须在"写成功"分支上报：以前只在下面的 CAS 冲突分支里上报，导致常规路径
+          // 写成功（新建/改名/排序/删除项目）从不广播，其它设备永远收不到项目列表变更，
+          // 只能靠手动刷新/重启才发现（跨端不同步的主因之一）。
+          queueSyncChange(auth.username, 'profile')
           if (attempt > 0 && mergedNewData) useUiStore().toast('检测到其他设备同时修改，已合并项目列表', 'ok')
           return true
         }
@@ -202,8 +206,6 @@ export const useProjectsStore = defineStore('projects', {
           if (!snapshot) {
             this.projects = profile.projects
             this.deletedProjects = profile.deletedProjects ?? []
-
-            queueSyncChange(auth.username, 'profile')
           }
         } else {
           knownEtag = undefined

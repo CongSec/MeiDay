@@ -21,11 +21,13 @@ def report(body: SyncReportRequest, username: str = Depends(get_username)):
     """客户端在某类资源 OSS 写入成功后上报变更事件。
 
     后端只记录"谁的数据变了"（res_type + project_id），不接触任何业务数据。
-    返回该用户最新的总版本号，供上报方本地对齐。
+    返回该用户最新的总版本号 + 本次插入的事件 id 列表（ids）：上报方据此精确排除
+    "自己刚上报的事件"，而不是把本地游标一次性抬到 MAX(id)（那会跳过同一区间内
+    其它设备刚产生、本端尚未拉取的事件，造成该端永久陈旧）。
     """
     events = [(e.res_type, e.project_id) for e in body.events]
-    version = add_sync_changes(username, events)
-    return {"ok": True, "version": version}
+    version, ids = add_sync_changes(username, events)
+    return {"ok": True, "version": version, "ids": ids}
 
 
 @router.get("/state", response_model=SyncStateResponse)

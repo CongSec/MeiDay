@@ -10,12 +10,12 @@ import { idbDel, idbGet, idbPut } from '@/utils/idb'
  *   变更不会丢，网络恢复后由 flushPendingSyncReports 补报，保证其它设备能看到；
  * - 同一用户的「入队 + 上报 + 清空」用互斥锁串行化，避免并发写同一个 IDB 队列
  *   时互相覆盖（把未上报的新事件误清掉）；
- * - 内存去重：同一 (用户, 资源, 项目) 1 秒内只入队一次，避免防抖保存连发刷屏。
+ * - 队列成员去重：同一 (用户, 资源, 项目) 只要队列里还有未上报的条目就不再重复入队。
+ *   不用"时间戳窗口"去重——上报成功会整队清空，若清空后 1 秒内的同类写入被时间窗口
+ *   丢弃，这次变更就永远不会广播给其它设备（漏同步的经典成因）。
  */
 
 const PENDING_KEY_PREFIX = 'sync:pending:'
-const DEDUP_MS = 1000
-const recent = new Map<string, number>()
 // 每用户异步互斥锁：队列的任何读写/上报/清空都串行执行
 const mutexes = new Map<string, Promise<void>>()
 
@@ -56,15 +56,21 @@ async function enqueueLocked(username: string, resType: SyncResType, projectId: 
   await savePending(username, filtered)
 }
 
-/** 锁内：上报并清空队列；成功返回服务端最新版本号，无可上报/失败返回 undefined。 */
-async function flushLocked(username: string): Promise<number | undefined> {
+/** 上报结果：version = 服务端最新总版本号；ids = 本次插入的事件 id（供精确排除"自己刚上报的"） */
+export interface FlushResult {
+  version: number
+  ids: number[]
+}
+
+/** 锁内：上报并清空队列；成功返回 {version, ids}，无可上报/失败返回 undefined。 */
+async function flushLocked(username: string): Promise<FlushResult | undefined> {
   if (!getToken()) return undefined
   const pending = await loadPending(username)
   if (!pending.length) return undefined
   try {
     const r = await api.reportSyncChanges(pending)
     await idbDel('kv', pendingKey(username))
-    return r.version
+    return { version: r.version, ids: r.ids ?? [] }
   } catch {
     /* 网络/后端不可达：保留待发队列，下次轮询重试 */
     return undefined
@@ -78,18 +84,21 @@ export function queueSyncChange(
   projectId?: string | null,
 ): void {
   if (!username || typeof window === 'undefined') return
-  const now = Date.now()
-  const dedupKey = `${username}|${resType}|${projectId ?? ''}`
-  const last = recent.get(dedupKey)
-  if (last !== undefined && now - last < DEDUP_MS) return
-  recent.set(dedupKey, now)
-  // 只入队，不在此处立即上报：上报统一由 2 秒轮询循环（或登出前）执行，
-  // 把请求频率严格限制为每用户每轮询周期最多一次。
-  void withLock(username, () => enqueueLocked(username, resType, projectId ?? null))
+  const pid = projectId ?? null
+  // 去重只看"队列里是否还有该资源未上报的条目"，不再用时间戳窗口：
+  // 旧实现是「距上次入队 <1s 就丢弃」，而队列会在每次上报成功后被整队清空，
+  // 因此"入队 → 上报成功清空 → 1 秒内再次写入"这一序列里，第二次写入会被永久丢弃，
+  // 其它设备再也收不到通知（且后端不会补发，事件被视为已消费）。
+  // 只入队、不在此处立即上报：上报统一由 2 秒轮询循环（或登出前）执行。
+  void withLock(username, async () => {
+    const pending = await loadPending(username)
+    if (pending.some((e) => e.res_type === resType && (e.project_id ?? null) === pid)) return
+    await enqueueLocked(username, resType, pid)
+  })
 }
 
-/** 冲刷该用户的全部待发上报（轮询循环 / 登出前调用）；返回服务端最新版本号，供游标对齐。 */
-export async function flushPendingSyncReports(username: string): Promise<number | undefined> {
+/** 冲刷该用户的全部待发上报（轮询循环 / 登出前调用）；返回服务端版本号与本次插入的事件 id。 */
+export async function flushPendingSyncReports(username: string): Promise<FlushResult | undefined> {
   if (!username || typeof window === 'undefined') return undefined
   return withLock(username, () => flushLocked(username))
 }
