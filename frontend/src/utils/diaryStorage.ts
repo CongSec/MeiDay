@@ -139,7 +139,9 @@ export async function saveDiaryBatch(
   )
 }
 
-/** 删除某天的一个批次文件（空批次清理用） */
+/** 删除某天的一个批次文件（空批次清理用）
+ *  S3 的 DELETE 是幂等的（对象不存在也返回 204），所以失败一定是真失败，必须抛出：
+ *  调用方要靠它回滚"删除墓碑"并提示用户，否则会出现"界面已删、云端文件还在"的假成功，刷新后消息复活。 */
 export async function deleteDiaryBatch(
   client: OssClient,
   username: string,
@@ -147,11 +149,7 @@ export async function deleteDiaryBatch(
   batchId: string,
 ): Promise<void> {
   const [y, m, d] = dateKey.split('-')
-  try {
-    await client.delete(diaryBatchKey(username, y, m, d, batchId))
-  } catch {
-    /* 删除失败不影响业务 */
-  }
+  await client.delete(diaryBatchKey(username, y, m, d, batchId))
 }
 
 /** 列出某天的全部批次文件并解密（消息按 createdAt 排序），用于天级懒加载 */
@@ -251,12 +249,11 @@ export async function downloadDiaryFileBytes(
   return decryptFileBytes(dek, bytes)
 }
 
+/** 删除附件密文（独立对象，可直接 DELETE）
+ *  失败必须抛出：附件是明文数据的密文，删不掉就意味着隐私数据仍留在云端，
+ *  不能像原来那样 catch 掉当"没发生"。 */
 export async function deleteDiaryFile(client: OssClient, username: string, fileId: string): Promise<void> {
-  try {
-    await client.delete(`users/${username}/diary/files/${fileId}`)
-  } catch {
-    /* 忽略 */
-  }
+  await client.delete(`users/${username}/diary/files/${fileId}`)
 }
 
 /** ---- 解密文件的可预览 Blob URL 缓存（内存态，退出系统时统一释放） ---- */

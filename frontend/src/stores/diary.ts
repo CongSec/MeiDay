@@ -92,6 +92,10 @@ export const useDiaryStore = defineStore('diary', {
     days: {} as Record<string, DiaryMessage[]>,
     /** 本次会话在当前天产生的消息（dateKey -> messages，是会话批次文件的落盘源） */
     sessionMsgs: {} as Record<string, DiaryMessage[]>,
+    /** 本次会话内已删除的消息 id（dateKey -> id 集合），即"删除意图"的墓碑。
+     *  会话批次落盘是「读回 existing ∪ sessionMsgs」的合并写：existing 是 OSS 上的旧快照，
+     *  仍含刚被删掉的消息，不带墓碑就会被原样写回云端，删除永远不生效（刷新/重进日记即复活）。 */
+    sessionDeleted: {} as Record<string, Set<string>>,
     /** 已从云端加载过完整历史批次的日期（未加载的天不在其中） */
     loadedDates: {} as Record<string, boolean>,
     /** 有记录的日期集合（日历绿点） */
@@ -193,6 +197,8 @@ export const useDiaryStore = defineStore('diary', {
       await flushAllPending(20000)
       this.days = {}
       this.sessionMsgs = {}
+      // 会话重置后会换新的 sessionBatchId，旧批次转为"历史批次"（删除走重写分支），墓碑随之作废
+      this.sessionDeleted = {}
       this.loadedDates = {}
       this.knownDates = []
       this.loadingDates = {}
@@ -210,6 +216,7 @@ export const useDiaryStore = defineStore('diary', {
       this.sessionBatchId = ''
       this.days = {}
       this.sessionMsgs = {}
+      this.sessionDeleted = {}
       this.loadedDates = {}
       this.knownDates = []
       this.loadingDates = {}
@@ -247,9 +254,10 @@ export const useDiaryStore = defineStore('diary', {
           const dek = getDiaryDek()
           if (!ossClient || !this.username || !dek) return
           const batches = await listDiaryDayBatches(ossClient, this.username, dek, dateKey)
+          const deleted = this.sessionDeleted[dateKey]
           const byId = new Map<string, DiaryMessage>()
-          for (const b of batches) for (const m of b.messages ?? []) byId.set(m.id, m)
-          for (const m of this.sessionMsgs[dateKey] ?? []) byId.set(m.id, m)
+          for (const b of batches) for (const m of b.messages ?? []) if (!deleted?.has(m.id)) byId.set(m.id, m)
+          for (const m of this.sessionMsgs[dateKey] ?? []) if (!deleted?.has(m.id)) byId.set(m.id, m)
           const msgs = Array.from(byId.values()).sort(sortMsgs)
           this.days[dateKey] = msgs
           this.loadedDates[dateKey] = true
@@ -368,9 +376,12 @@ export const useDiaryStore = defineStore('diary', {
       const batchId = this.sessionBatchId
       if (!batchId) return
       const existing = await loadDiaryBatch(ossClient, this.username, getDiaryDek()!, dateKey, batchId)
+      // 合并写必须减掉"本次会话已删"的墓碑：existing 是从 OSS 读回的上一次快照，
+      // 里面仍含刚被删掉的消息，不排除它就会被原样写回，删除永远不生效。
+      const deleted = this.sessionDeleted[dateKey]
       const byId = new Map<string, DiaryMessage>()
-      for (const m of existing?.messages ?? []) byId.set(m.id, m)
-      for (const m of this.sessionMsgs[dateKey] ?? []) byId.set(m.id, m)
+      for (const m of existing?.messages ?? []) if (!deleted?.has(m.id)) byId.set(m.id, m)
+      for (const m of this.sessionMsgs[dateKey] ?? []) if (!deleted?.has(m.id)) byId.set(m.id, m)
       const messages = Array.from(byId.values()).sort(sortMsgs)
       if (!messages.length) {
         await deleteDiaryBatch(ossClient, this.username, dateKey, batchId)
@@ -386,50 +397,68 @@ export const useDiaryStore = defineStore('diary', {
       await saveDiaryBatch(ossClient, this.username, getDiaryDek()!, dateKey, batch)
     },
 
-    /** 删除单条消息（含附件密文清理）；历史批次的删除会重写对应批次文件 */
+    /** 删除单条消息（含附件密文清理）；历史批次的删除会重写对应批次文件。
+     *  删除意图必须先同步登记到 sessionDeleted（在排队写入之前），否则排队中的 flush
+     *  会把它从 existing 里合并回云端。附件密文是独立对象，可直接从云端删除。 */
     async deleteMessage(dateKey: string, msgId: string): Promise<void> {
-      if (!ossClient || !this.username || !getDiaryDek()) return
-      const arr = this.days[dateKey]
-      if (!arr) return
-      const msg = arr.find((m) => m.id === msgId)
-      if (!msg) return
-      if (msg.file) {
-        await deleteDiaryFile(ossClient, this.username, msg.file.fileId)
-        releaseDiaryFileUrl(msg.file.fileId)
+      if (!this.unlocked || !ossClient || !this.username || !getDiaryDek()) {
+        // 原实现是静默 return：界面照样弹"已删除"，但本地与云端都没动，属于"假装成功"
+        throw new Error('日记会话已锁定，请重新进入日记后再删除')
       }
+      const msg = this.days[dateKey]?.find((m) => m.id === msgId)
+      if (!msg) throw new Error('该消息已不在当前列表，请重新打开该日期后再试')
       const sessionList = this.sessionMsgs[dateKey]
       const inSession = sessionList?.some((m) => m.id === msgId) ?? false
       if (inSession) {
         this.sessionMsgs[dateKey] = sessionList!.filter((m) => m.id !== msgId)
       }
-      await enqueueWrite(dateKey, async () => {
-        if (!inSession) {
-          // 属于历史批次：找到包含它的批次文件，移除该消息后重写（空则删除文件）
-          const batches = await listDiaryDayBatches(ossClient!, this.username, getDiaryDek()!, dateKey)
-          for (const b of batches) {
-            if (b.batchId === this.sessionBatchId) continue // 会话批次由 sessionMsgs 负责
-            if (b.messages.some((m) => m.id === msgId)) {
-              const rest = b.messages.filter((m) => m.id !== msgId)
-              if (rest.length) {
-                await saveDiaryBatch(ossClient!, this.username, getDiaryDek()!, dateKey, {
-                  ...b,
-                  messages: rest,
-                  updatedAt: nowIso(),
-                })
-              } else {
-                await deleteDiaryBatch(ossClient!, this.username, dateKey, b.batchId)
+      if (!this.sessionDeleted[dateKey]) this.sessionDeleted[dateKey] = new Set<string>()
+      this.sessionDeleted[dateKey].add(msgId)
+      try {
+        if (msg.file) {
+          // 附件密文是独立对象，可直接 DELETE；但删不掉就必须让整体失败——
+          // 否则消息没了、密文永远留在云端，对"隐私日记"而言等于没删干净
+          await deleteDiaryFile(ossClient, this.username, msg.file.fileId)
+          releaseDiaryFileUrl(msg.file.fileId)
+        }
+        await enqueueWrite(dateKey, async () => {
+          if (!inSession) {
+            // 属于历史批次：找到包含它的批次文件，移除该消息后重写（空则删除文件）
+            const batches = await listDiaryDayBatches(ossClient!, this.username, getDiaryDek()!, dateKey)
+            for (const b of batches) {
+              if (b.batchId === this.sessionBatchId) continue // 会话批次由 flushSessionBatch（带墓碑）负责
+              if (b.messages.some((m) => m.id === msgId)) {
+                const rest = b.messages.filter((m) => m.id !== msgId)
+                if (rest.length) {
+                  await saveDiaryBatch(ossClient!, this.username, getDiaryDek()!, dateKey, {
+                    ...b,
+                    messages: rest,
+                    updatedAt: nowIso(),
+                  })
+                } else {
+                  await deleteDiaryBatch(ossClient!, this.username, dateKey, b.batchId)
+                }
+                break
               }
-              break
             }
           }
+          await this.flushSessionBatch(dateKey)
+          // 重建展示列表（按墓碑过滤）并维护日历绿点
+          const deleted = this.sessionDeleted[dateKey]
+          const rest = (this.days[dateKey] ?? []).filter((m) => !deleted?.has(m.id))
+          this.days[dateKey] = rest.sort(sortMsgs)
+          if (!rest.length) this.removeKnownDate(dateKey)
+        })
+      } catch (e) {
+        // 任一步失败（附件密文 / 历史批次重写 / 会话批次落盘）：撤回墓碑 + 恢复会话消息列表，
+        // 让界面、内存、云端三者保持一致，并让错误冒泡给 DiaryChat 弹错误 toast，不再"假装删成功"
+        this.sessionDeleted[dateKey]?.delete(msgId)
+        if (inSession) {
+          if (!this.sessionMsgs[dateKey]) this.sessionMsgs[dateKey] = []
+          this.sessionMsgs[dateKey].push(msg)
         }
-        await this.flushSessionBatch(dateKey)
-        // 重建展示列表并维护日历绿点
-        const byId = new Map<string, DiaryMessage>()
-        for (const m of this.days[dateKey] ?? []) if (m.id !== msgId) byId.set(m.id, m)
-        this.days[dateKey] = Array.from(byId.values()).sort(sortMsgs)
-        if (!this.days[dateKey].length) this.removeKnownDate(dateKey)
-      })
+        throw e
+      }
       logAudit('日记-删除消息')
     },
 
@@ -474,6 +503,8 @@ export const useDiaryStore = defineStore('diary', {
         this.loadedDates = {}
         this.knownDates = []
         this.reviewDays = []
+        // 导入会把归档内容重新写回云端：清空墓碑，否则刚导入回来、id 与本次已删消息相同的条目会被内存隐掉
+        this.sessionDeleted = {}
         await this.refreshMonth(Number(this.selectedDate.slice(0, 4)), Number(this.selectedDate.slice(5, 7)))
         await this.loadDay(this.selectedDate)
         logAudit(
@@ -505,6 +536,10 @@ export const useDiaryStore = defineStore('diary', {
         // 目标范围内的本会话消息同步清空（云端该范围已整体删除）
         for (const k of Object.keys(this.sessionMsgs)) {
           if (k.startsWith(prefix)) delete this.sessionMsgs[k]
+        }
+        // 墓碑同步清理：这些天已整体删除，留着只会影响后续导入/重建的可见性
+        for (const k of Object.keys(this.sessionDeleted)) {
+          if (k.startsWith(prefix)) delete this.sessionDeleted[k]
         }
         this.reviewDays = this.reviewDays.filter((d) => !d.dateKey.startsWith(prefix))
         this.knownDates = this.knownDates.filter((d) => !d.startsWith(prefix))
