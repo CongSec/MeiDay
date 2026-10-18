@@ -96,7 +96,6 @@ function codeLine() {
 
           <section class="space-y-3">
             <h3 class="font-semibold text-slate-800">5. 给用户配置 OSS 权限</h3>
-            <TutorialImage src="https://congsec.oss-cn-beijing.aliyuncs.com/tuhcuanchajian/image-20260825032538-sgpa9lq.png" alt="配置 OSS 权限" />
             <p>回到 OSS 存储桶界面中，给在存储桶中赋予用户权限。</p>
             <TutorialImage src="https://congsec.oss-cn-beijing.aliyuncs.com/tuhcuanchajian/image-20260825032648-ws40kp4.png" alt="存储桶授权" />
           </section>
