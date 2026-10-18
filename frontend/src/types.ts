@@ -133,7 +133,11 @@ export interface UserStats {
 
 /** 时间胶囊墓碑日志条目（tombstones.json）：只存 id + updatedAt，不存任务负载。
  *  供多端同步「防复活」使用：active 列表合并时按此集合剔除已被他端完成/删除归档的任务。
- *  updatedAt = 任务离开活跃列表时的 updatedAt（已完成=完成时间；已删除=删除时间）。 */
+ *  updatedAt = 任务离开活跃列表时的 updatedAt（已完成=完成时间；已删除=删除时间）。
+ *
+ *  另有「永久删除墓碑」：id 形如 `purged:<任务id>`（见 stores/tasks.ts 的 PURGED_TOMBSTONE_PREFIX）。
+ *  普通墓碑只挡住「活跃列表」的并集复活；回收站分片合并（多端缓存并集）由 purged 条目挡住。
+ *  用 id 前缀而不是新增字段：旧版客户端 prune 时按 {id, updatedAt} 原样保留，标记不会被抹掉。 */
 export interface TombstoneEntry {
   id: string
   updatedAt: string

@@ -942,6 +942,9 @@ async function onImportFile(e: Event) {
       }
       const existing = tasks.trash[pid] ?? []
       tasks.trash[pid] = [...list, ...existing.filter((t) => !list.some((x) => x.id === t.id))]
+      // 显式导入 = 用户要把备份里的这些记录找回来：先清除它们的「永久删除墓碑」，
+      // 否则下面的写盘过滤会把它们当作已永久删除的记录剔除（表现为「导入后记录不见了」）
+      await tasks.clearPurgedTombstones(pid, list.map((t) => t.id))
       const ok = await tasks.saveTrashNow(pid)
       if (ok) {
         touched += 1

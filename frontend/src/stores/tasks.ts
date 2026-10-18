@@ -96,7 +96,9 @@ function trashFilePath(username: string, projectId: string, month?: string): str
 /** 墓碑日志保留窗口（天）：日志为 KB 级，窗口远大于回收站分片的 2 个月，离线设备复活几乎不可能 */
 const TOMBSTONE_RETENTION_DAYS = 180
 function tombstonesFilePath(username: string, projectId: string): string {
-  return paths.tombstones(username, projectId)
+  // 未分类回收站只有 today_trash.json（projectId 为空串，拼不出 projects/<id>/ 目录）：
+  // 它的墓碑单独放用户级文件，让未分类的永久删除同样具备防复活证据。
+  return projectId === UNCATEGORIZED ? paths.todayTombstones(username) : paths.tombstones(username, projectId)
 }
 function tombstonesCacheKey(username: string, projectId: string): string {
   return `tombstones:${username}:${projectId}`
@@ -116,12 +118,30 @@ function pruneTombstones(entries: TombstoneEntry[] | undefined): TombstoneEntry[
   }
   return [...byId.entries()].map(([id, updatedAt]) => ({ id, updatedAt }))
 }
-/** 合并多组墓碑（同 id 保留 updatedAt 最新），返回可直接交给 applyDeletedTombstones 的 Task 形态 */
+/** 「永久删除」墓碑的 id 命名空间前缀（见 types.ts TombstoneEntry 注释）。
+ *  普通墓碑（真实任务 id）只挡住「活跃列表」的并集复活；永久删除再额外写一条 purged:<id>，
+ *  让「回收站分片」的冲突并集合并也能剔除它——否则本端陈旧内存/IDB 缓存会把已永久删除的
+ *  记录并回分片写进 OSS（多端复活）。 */
+const PURGED_TOMBSTONE_PREFIX = 'purged:'
+function purgedTombstoneId(taskId: string): string {
+  return `${PURGED_TOMBSTONE_PREFIX}${taskId}`
+}
+/** 从墓碑条目里剥出「已永久删除」的真实任务 id（普通墓碑不参与） */
+function purgedTaskIds(entries: TombstoneEntry[] | undefined): Set<string> {
+  const out = new Set<string>()
+  for (const e of entries ?? []) {
+    if (e?.id?.startsWith(PURGED_TOMBSTONE_PREFIX)) out.add(e.id.slice(PURGED_TOMBSTONE_PREFIX.length))
+  }
+  return out
+}
+/** 合并多组墓碑（同 id 保留 updatedAt 最新），返回可直接交给 applyDeletedTombstones 的 Task 形态。
+ *  purged:<id> 是永久删除的命名空间标记，不是任务 id，必须排除，避免污染活跃列表的剔除集合。 */
 function mergeTombstoneTasks(...groups: Array<TombstoneEntry[] | Task[] | undefined>): Task[] {
   const byId = new Map<string, string>()
   for (const group of groups) {
     for (const t of group ?? []) {
       if (!t?.id) continue
+      if (t.id.startsWith(PURGED_TOMBSTONE_PREFIX)) continue
       const cur = byId.get(t.id)
       if (!cur || (t.updatedAt || '').localeCompare(cur) > 0) byId.set(t.id, t.updatedAt)
     }
@@ -1009,9 +1029,15 @@ export const useTasksStore = defineStore('tasks', {
         const client = await createOssClient(auth.creds)
         // 旧版 projects/{pid}/trash.json 先迁移到按月分片（幂等，只做一次）
         await migrateLegacyTrash(client, auth.username, projectId)
+        // 永久删除墓碑：合并远端前先取一次（条件 GET / 304 零下载）并剔除本端缓存里
+        // 已被他端永久删除的记录——否则下面的并集合并会把它留在内存、随后被写回 OSS。
+        await this.fetchTombstones(projectId, { backfill: false }).catch(() => [])
+        await this._dropPurgedTrash(projectId)
         const remote = await fetchRemoteTrash(client, auth.username, projectId)
         if (remote.length) {
           this.trash[projectId] = mergeUnique(this.trash[projectId] ?? [], remote)
+          // 远端仍残留已永久删除的记录（历史并集写回）：本地不入内存/缓存
+          await this._dropPurgedTrash(projectId)
           await idbPut('trash', trashCacheKey(auth.username, projectId), this.trash[projectId])
         }
         if (projectId !== UNCATEGORIZED) {
@@ -1070,6 +1096,10 @@ export const useTasksStore = defineStore('tasks', {
       const remote = await fetchRemoteTrashShard(client, auth.username, projectId, next)
       if (remote.length) {
         this.trash[projectId] = mergeUnique(this.trash[projectId] ?? [], remote)
+        // 「加载更早」同样先剔除已被他端永久删除的记录：本支路可能没走过 loadTrash，
+        // 此时内存墓碑还没加载过，先取一次（条件 GET / 304 零下载）再过滤
+        if (this.tombstones[projectId] === undefined) await this.fetchTombstones(projectId, { backfill: false }).catch(() => [])
+        await this._dropPurgedTrash(projectId)
         await idbPut('trash', trashCacheKey(auth.username, projectId), this.trash[projectId])
       }
       const updated = [...loaded, next].sort()
@@ -1127,17 +1157,27 @@ export const useTasksStore = defineStore('tasks', {
           continue
         }
         let changed = false
-        // 有界并发拉取该年各分片（Last-Modified 条件 GET，未变动的月份直接 304 复用缓存）
-        const results = await mapLimit(months, TRASH_FETCH_CONCURRENCY, async (m) => {
-          const remote = await fetchRemoteTrashShard(client, auth.username, pid, m)
-          return { remote }
-        })
+        // 有界并发拉取该年各分片（Last-Modified 条件 GET，未变动的月份直接 304 复用缓存）。
+        // 永久删除墓碑与分片并行拉取：必须早于下面的合并就绪，否则并集会把已永久删除的记录留在内存。
+        const [results] = await Promise.all([
+          mapLimit(months, TRASH_FETCH_CONCURRENCY, async (m) => {
+            const remote = await fetchRemoteTrashShard(client, auth.username, pid, m)
+            return { remote }
+          }),
+          this.fetchTombstones(pid, { backfill: false }).catch(() => []),
+        ])
         for (const { remote } of results) {
           if (remote.length) {
             this.trash[pid] = mergeUnique(this.trash[pid] ?? [], remote)
             changed = true
             taskCount += remote.length
           }
+        }
+        // 合并后剔除已是「永久删除」的记录（含远端历史残留），计数同步扣减
+        const dropped = await this._dropPurgedTrash(pid)
+        if (dropped) {
+          changed = true
+          taskCount = Math.max(0, taskCount - dropped)
         }
         if (changed) await idbPut('trash', trashCacheKey(auth.username, pid), this.trash[pid])
         const loaded = new Set(this.trashLoadedMonths[pid] ?? [])
@@ -1244,11 +1284,15 @@ export const useTasksStore = defineStore('tasks', {
           continue
         }
         // 有界并发拉取该年各分片（Last-Modified 条件 GET，未变动的月份 304 复用缓存）；
-        // 先收集结果再串行合并，避免并发写共享 trash[pid] 数组
-        const results = await mapLimit(months, TRASH_FETCH_CONCURRENCY, async (m) => {
-          const remote = await fetchRemoteTrashShard(client, auth.username, pid, m)
-          return { m, remote }
-        })
+        // 先收集结果再串行合并，避免并发写共享 trash[pid] 数组。
+        // 永久删除墓碑并行拉取：必须早于合并就绪，否则并集会把已永久删除的记录留在内存。
+        const [results] = await Promise.all([
+          mapLimit(months, TRASH_FETCH_CONCURRENCY, async (m) => {
+            const remote = await fetchRemoteTrashShard(client, auth.username, pid, m)
+            return { m, remote }
+          }),
+          this.fetchTombstones(pid, { backfill: false }).catch(() => []),
+        ])
         let changed = false
         for (const { remote } of results) {
           if (remote.length) {
@@ -1256,6 +1300,12 @@ export const useTasksStore = defineStore('tasks', {
             changed = true
             taskCount += remote.length
           }
+        }
+        // 合并后剔除已是「永久删除」的记录（含远端历史残留），计数同步扣减
+        const dropped = await this._dropPurgedTrash(pid)
+        if (dropped) {
+          changed = true
+          taskCount = Math.max(0, taskCount - dropped)
         }
         if (changed) {
           await idbPut('trash', trashCacheKey(auth.username, pid), this.trash[pid])
@@ -1321,11 +1371,15 @@ export const useTasksStore = defineStore('tasks', {
           continue
         }
         let changed = false
-        // 有界并发拉取该项目全部分片（Last-Modified 条件 GET，未变动的月份直接 304 复用缓存）
-        const results = await mapLimit(allMonths, TRASH_FETCH_CONCURRENCY, async (m) => {
-          const remote = await fetchRemoteTrashShard(client, auth.username, pid, m)
-          return { m, remote }
-        })
+        // 有界并发拉取该项目全部分片（Last-Modified 条件 GET，未变动的月份直接 304 复用缓存）。
+        // 永久删除墓碑并行拉取：必须早于合并就绪，否则并集会把已永久删除的记录留在内存。
+        const [results] = await Promise.all([
+          mapLimit(allMonths, TRASH_FETCH_CONCURRENCY, async (m) => {
+            const remote = await fetchRemoteTrashShard(client, auth.username, pid, m)
+            return { m, remote }
+          }),
+          this.fetchTombstones(pid, { backfill: false }).catch(() => []),
+        ])
         for (const { m, remote } of results) {
           if (remote.length) {
             this.trash[pid] = mergeUnique(this.trash[pid] ?? [], remote)
@@ -1333,6 +1387,12 @@ export const useTasksStore = defineStore('tasks', {
             taskCount += remote.length
           }
           loadedYears.add(Number(m.slice(0, 4)))
+        }
+        // 合并后剔除已是「永久删除」的记录（含远端历史残留），计数同步扣减
+        const dropped = await this._dropPurgedTrash(pid)
+        if (dropped) {
+          changed = true
+          taskCount = Math.max(0, taskCount - dropped)
         }
         if (changed) await idbPut('trash', trashCacheKey(auth.username, pid), this.trash[pid])
         const loaded = new Set(this.trashLoadedMonths[pid] ?? [])
@@ -1697,7 +1757,9 @@ export const useTasksStore = defineStore('tasks', {
       }
     },
     /** 写单个回收站文件（真实项目某月分片 / 未分类单文件）：CAS 条件写入 + 冲突合并。
-     *  返回 { ok, merged }：merged 为冲突合并后实际写入（或即将写入）的任务列表。 */
+     *  返回 { ok, merged }：merged 为冲突合并后实际写入（或即将写入）的任务列表。
+     *  过滤：已写入「永久删除墓碑」（purged:<id>）的记录既不参与并集合并、也不写盘，
+     *  否则本端陈旧内存/缓存会把别端已永久删除的记录并回复活。 */
     async _saveTrashShard(
       client: OssClient,
       username: string,
@@ -1710,6 +1772,9 @@ export const useTasksStore = defineStore('tasks', {
       const key = trashFilePath(username, projectId, month)
       const etagKey = `etag:${username}:${projectId}:trash${month ? `:${month}` : ''}`
       const cacheKey = trashCacheKey(username, projectId, month)
+      // 本端内存已知的永久删除墓碑：写前直接剔除（无网络请求）
+      const purgedLocal = purgedTaskIds(this.tombstones[projectId])
+      if (purgedLocal.size) list = list.filter((t) => !purgedLocal.has(t.id))
       let knownEtag = await idbGet<string>('kv', etagKey)
       for (let attempt = 0; attempt < 3; attempt++) {
         const result = await compareAndSwapPut<Task[]>(client, key, list, knownEtag)
@@ -1738,9 +1803,17 @@ export const useTasksStore = defineStore('tasks', {
           return { ok: true, merged: [], gone: true }
         }
         if (result.remote) {
+          // 冲突合并前把「永久删除墓碑」拉到最新（条件 GET / 304 零下载，一次写盘最多一次）：
+          // 本端缓存可能比别端的删除动作旧，只靠内存墓碑会漏掉刚被永久删除的记录。
+          const purged = purgedTaskIds(await this.fetchTombstones(projectId, { backfill: false }).catch(() => []))
+          if (purged.size) {
+            list = list.filter((t) => !purged.has(t.id))
+            await this._dropPurgedTrash(projectId)
+          }
           const remoteList = [...(result.remote as Task[])]
           normalizeTasks(remoteList)
           list = mergeTasks(list, remoteList)
+          if (purged.size) list = list.filter((t) => !purged.has(t.id))
           knownEtag = result.remoteEtag ?? undefined
         } else {
           knownEtag = undefined
@@ -1754,7 +1827,12 @@ export const useTasksStore = defineStore('tasks', {
       const auth = useAuthStore()
       if (!auth.creds || !auth.username) return false
       const client = await createOssClient(auth.creds)
-      let list = (snapshot ?? this.trash[projectId] ?? []).slice()
+      // 永久删除墓碑（防并集复活）：本端还没加载过该项目墓碑时先取一次（条件 GET / 304 零下载），
+      // 再剔除内存里已被他端永久删除的记录。否则下面的并集合并会把它们写回 OSS 分片。
+      if (this.tombstones[projectId] === undefined) await this.fetchTombstones(projectId, { backfill: false })
+      await this._dropPurgedTrash(projectId)
+      const purged = purgedTaskIds(this.tombstones[projectId])
+      let list = (snapshot ?? this.trash[projectId] ?? []).filter((t) => !purged.has(t.id)).slice()
       // 未分类回收站：单文件直写（不分片）
       if (projectId === UNCATEGORIZED) {
         const r = await this._saveTrashShard(client, auth.username, projectId, undefined, list)
@@ -1766,7 +1844,7 @@ export const useTasksStore = defineStore('tasks', {
           useUiStore().toast('保存时间胶囊失败：检测到其他设备持续修改，请稍后重试', 'error')
           return false
         }
-        await idbPut('trash', trashCacheKey(auth.username, projectId), list)
+        await idbPut('trash', trashCacheKey(auth.username, projectId), r.merged)
         queueSyncChange(auth.username, 'trash', projectId)
         return true
       }
@@ -1851,9 +1929,9 @@ export const useTasksStore = defineStore('tasks', {
     },
     /* ---- 时间胶囊墓碑日志：写入 / 移除 / 落盘 / 读取 ---- */
     /** 把离开活跃列表的任务 upsert 进墓碑日志（按 id 保留 updatedAt 最新，写时按窗口裁剪）。
-     *  应在「任务移入回收站」的同一操作中调用（先墓碑、后 tasks.json 移除可见）。 */
-    async upsertTombstones(projectId: string, tasks: Task[]) {
-      if (projectId === UNCATEGORIZED) return
+     *  应在「任务移入回收站」的同一操作中调用（先墓碑、后 tasks.json 移除可见）。
+     *  永久删除额外传 purged:<id> 形态的条目，用于回收站分片合并时剔除（见 purgedTaskIds）。 */
+    async upsertTombstones(projectId: string, tasks: Array<Pick<Task, 'id' | 'updatedAt'>>) {
       const entries: TombstoneEntry[] = tasks
         .filter((t) => t && t.id && t.updatedAt)
         .map((t) => ({ id: t.id, updatedAt: t.updatedAt }))
@@ -1868,7 +1946,7 @@ export const useTasksStore = defineStore('tasks', {
     },
     /** 从墓碑日志移除指定 id（恢复任务/项目、导入覆盖时调用），整文件替换语义保证删除传播到其他设备 */
     async removeTombstones(projectId: string, ids: string[]) {
-      if (!ids.length || projectId === UNCATEGORIZED) return
+      if (!ids.length) return
       if (!this.tombstones[projectId]) return
       const next = pruneTombstones((this.tombstones[projectId] ?? []).filter((e) => !ids.includes(e.id)))
       this.tombstones[projectId] = next
@@ -1893,7 +1971,6 @@ export const useTasksStore = defineStore('tasks', {
     /** 墓碑日志 CAS 写盘（与 tasks 同模式，etag 条件写 + 冲突按 id 合并）。
      *  失败仅记日志（防抖重试，系统容忍短暂一致性降级），不弹错误提示。 */
     async saveTombstones(projectId: string, snapshot?: TombstoneEntry[]): Promise<boolean> {
-      if (projectId === UNCATEGORIZED) return false
       const auth = useAuthStore()
       if (!auth.creds || !auth.username) return false
       const client = await createOssClient(auth.creds)
@@ -1928,11 +2005,54 @@ export const useTasksStore = defineStore('tasks', {
         return false
       }
     },
+    /** 剔除内存 + IDB 里「已被他端永久删除」的回收站记录（多端复活的源头）。
+     *  回收站分片是按「只在一侧出现就保留」的并集合并：本端陈旧内存/IDB 缓存会把别端已永久
+     *  删除的记录并回、并写进 OSS。这里只动本地缓存，不写 OSS（OSS 由 saveTrash 的写前过滤负责）。
+     *  返回被剔除的条数。 */
+    async _dropPurgedTrash(projectId: string): Promise<number> {
+      const purged = purgedTaskIds(this.tombstones[projectId])
+      if (!purged.size) return 0
+      const list = this.trash[projectId] ?? []
+      if (!list.length) return 0
+      const dropped = list.filter((t) => purged.has(t.id))
+      if (!dropped.length) return 0
+      this.trash[projectId] = list.filter((t) => !purged.has(t.id))
+      const auth = useAuthStore()
+      if (auth.username) {
+        await idbPut('trash', trashCacheKey(auth.username, projectId), this.trash[projectId])
+        if (projectId !== UNCATEGORIZED) {
+          // 月份分片缓存里可能也留着同一条：连 etag/lm 一起作废，下次强制按远端真值重拉
+          for (const m of new Set(dropped.map((t) => monthOfTask(t)))) {
+            await idbDel('trash', trashCacheKey(auth.username, projectId, m))
+            await idbDel('kv', `etag:${auth.username}:${projectId}:trash:${m}`)
+            await idbDel('kv', lmKeyOf(`etag:${auth.username}:${projectId}:trash:${m}`))
+          }
+        }
+      }
+      return dropped.length
+    },
+    /** 显式重新引入这些 id（导入时间胶囊备份 / 恢复任务）时，清除它们的「永久删除墓碑」。
+     *  用户显式操作优先于防复活约束：否则写盘过滤会把刚导入的记录当作已永久删除的记录剔除，
+     *  表现为「导入备份后这些记录不见了」。先确保墓碑已就绪，再整文件替换落盘。 */
+    async clearPurgedTombstones(projectId: string, ids: string[]): Promise<void> {
+      if (!ids.length) return
+      // 本端还没加载过该项目的墓碑：先取一次，避免只清掉内存里没有、OSS 上仍存在的标记
+      if (this.tombstones[projectId] === undefined) await this.fetchTombstones(projectId, { backfill: false })
+      const targets = new Set(ids.map(purgedTombstoneId))
+      const cur = this.tombstones[projectId] ?? []
+      const next = cur.filter((e) => !targets.has(e.id))
+      if (next.length === cur.length) return
+      this.tombstones[projectId] = next
+      const auth = useAuthStore()
+      if (auth.username) await idbPut('kv', tombstonesCacheKey(auth.username, projectId), next)
+      await this.saveTombstonesNow(projectId)
+    },
     /** 拉取远端墓碑日志（条件 GET，304 命中零下载）。
      *  - 日志缺失（NoSuchKey）→ 回填：从回收站近窗分片（当月+上月）剥出墓碑写一份日志（一次性成本）；
+     *  - opts.backfill === false → 日志缺失时不回填（只读对账场景：载入回收站 / 取永久删除墓碑）；
      *  - 网络/权限错误 → 本轮降级为回收站近窗分片墓碑（不写错误标记，下轮重试）；
      *  - 返回墓碑条目；极端失败返回空数组（由 collectTombstones 兜底）。 */
-    async fetchTombstones(projectId: string): Promise<TombstoneEntry[]> {
+    async fetchTombstones(projectId: string, opts?: { backfill?: boolean }): Promise<TombstoneEntry[]> {
       const auth = useAuthStore()
       if (!auth.creds || !auth.username) return []
       const client = await createOssClient(auth.creds)
@@ -1967,6 +2087,14 @@ export const useTasksStore = defineStore('tasks', {
           } catch {
             return []
           }
+        }
+        // 未分类不做回填：它只有一个单文件回收站，回填只会凭空多出一份用户级墓碑文件（收益为零）
+        if (projectId === UNCATEGORIZED || opts?.backfill === false) {
+          // 只读对账场景（载入回收站 / 写盘前取永久删除墓碑）：日志不存在即代表「没有墓碑」，
+          // 不触发回填写盘（省一次 OSS 写）；标成「空」避免后续对账重复 404 拉取。
+          // 注意：内存里已有条目时不清空——那可能是防抖尚未落盘的墓碑，清掉会让删掉的任务复活。
+          if (this.tombstones[projectId] === undefined) this.tombstones[projectId] = []
+          return []
         }
         // 日志缺失：回填（从回收站近窗分片剥出墓碑写一份日志），一次性成本
         try {
@@ -2947,6 +3075,9 @@ export const useTasksStore = defineStore('tasks', {
         }
       }
       if (!task) return
+      // 显式恢复 = 用户要把这条记录找回来：清除它的「永久删除墓碑」。
+      // 单日记录的 id 是合成的（同一重复日会再次物化出同一 id），不清会挡住它下次入舱。
+      void this.clearPurgedTombstones(trashPid ?? task.projectId, [id])
       // 单日记录（提前完成/入舱生成的 per-day 回收站记录）：恢复时清除根任务/模板上该日的
       // 已处理标记，让该重复日重新作为待办出现；不生成合成 id 的活跃任务
       if (task.repeatOccurrence) {
@@ -3125,6 +3256,16 @@ export const useTasksStore = defineStore('tasks', {
       const target =
         (this.tasks[projectId] ?? []).find((t) => t.id === id) ??
         (this.trash[projectId] ?? []).find((t) => t.id === id)
+      // 永久删除的防复活证据（落盘顺序见 permanentDeleteConfirmed：墓碑必须先于 tasks/trash）：
+      //  · 真实 id 墓碑：其它端的「活跃列表」合并据此剔除（当天完成未归档的任务否则会被并回）；
+      //    updatedAt 必须沿用任务的 updatedAt，applyDeletedTombstones 靠它判断「谁更新」；
+      //  · purged:<id> 墓碑：其它端的「回收站分片」合并据此剔除（否则并集合并 + 本地缓存写回）；
+      //    updatedAt 用「此刻」——永久删除的生效时间，否则老记录（updatedAt 在裁剪窗口外）的标记
+      //    会被 pruneTombstones 立刻裁掉，防复活失效。
+      if (target) {
+        void this.upsertTombstones(projectId, [target])
+        void this.upsertTombstones(projectId, [{ id: purgedTombstoneId(target.id), updatedAt: nowIso() }])
+      }
       // 永久删除单日记录：清除根任务/模板上该日的已处理标记，该重复日重新作为待办出现
       if (target?.repeatOccurrence) {
         const { rootId, date } = target.repeatOccurrence
@@ -3243,7 +3384,11 @@ export const useTasksStore = defineStore('tasks', {
         this.trash[projectId] = archived
         // 恢复的任务（待办 + 今天完成）从墓碑日志移除：恢复后不应再被墓碑压掉；
         // 历史完成记录留在胶囊，其墓碑保留（防复活证据不随恢复丢失）
-        if (restored.length) await this.removeTombstones(projectId, restored.map((x) => x.id))
+        if (restored.length) {
+          await this.removeTombstones(projectId, restored.map((x) => x.id))
+          // 显式恢复整项目 = 用户要把这些任务找回来：一并清除永久删除墓碑（否则它们会被写盘过滤剔除）
+          await this.clearPurgedTombstones(projectId, restored.map((x) => x.id))
+        }
         this._persist(projectId)
         this._persistTrash(projectId, true)
       }
@@ -3276,6 +3421,8 @@ export const useTasksStore = defineStore('tasks', {
       if (movedBack.length) {
         await this.removeTombstones(fromId, movedBack)
         await this.removeTombstones(toId, movedBack)
+        // 显式恢复/合并 = 用户要把这些任务找回来：一并清除永久删除墓碑（否则写盘过滤会剔除它们）
+        await this.clearPurgedTombstones(toId, movedBack)
       }
       await this.purgeTrashFiles(fromId)
       // 重名合并：重复模板随项目一并合并到目标项目；fromId 侧写墓碑（R4：防离线端
@@ -3989,15 +4136,46 @@ export const useTasksStore = defineStore('tasks', {
       const tasksSnap = new Map<string, Task[]>()
       const trashSnap = new Map<string, Task[]>()
       const repeatsSnap = new Map<string, RepeatMaster[]>()
+      const tombstonesSnap = new Map<string, TombstoneEntry[]>()
       for (const pid of affected) {
         tasksSnap.set(pid, (this.tasks[pid] ?? []).slice())
         trashSnap.set(pid, (this.trash[pid] ?? []).slice())
+        tombstonesSnap.set(pid, (this.tombstones[pid] ?? []).slice())
       }
       for (const pid of affectedRepeats) {
         repeatsSnap.set(pid, JSON.parse(JSON.stringify(this.repeats[pid] ?? [])))
       }
       const rootSnap = root ? JSON.parse(JSON.stringify(root)) : undefined
       this.permanentDelete(projectId, id)
+      // 先落「永久删除墓碑」，再写 tasks/trash（与 restoreConfirmed / sweepCompleted 同一写序）：
+      // 其它端合并回收站分片/活跃列表时据此剔除，避免记录被并集写回（多端复活）。
+      // 墓碑都写不进去就不做不可逆的永久删除：直接回滚并让用户重试。
+      const tombOk = (await Promise.all([...affected].map((pid) => this.saveTombstonesNow(pid)))).every(Boolean)
+      if (!tombOk) {
+        useUiStore().toast('永久删除失败：无法写入防复活墓碑，请检查网络后重试', 'error')
+        // 先同步还原全部内存并取消防抖写盘，再做 IDB/墓碑还原：
+        // 否则还原过程中的网络等待期间，permanentDelete 排定的防抖写盘会把「已删除」状态写进 OSS
+        for (const pid of affected) tombstoneDebouncers.get(pid)?.cancel()
+        if (root && rootSnap) Object.assign(root, rootSnap)
+        for (const [pid, list] of tombstonesSnap) this.tombstones[pid] = list
+        for (const [pid, list] of tasksSnap) this.tasks[pid] = list
+        for (const [pid, list] of trashSnap) this.trash[pid] = list
+        for (const [pid, list] of repeatsSnap) this.repeats[pid] = list
+        for (const pid of affected) {
+          await idbPut('kv', tombstonesCacheKey(auth.username, pid), this.tombstones[pid] ?? [])
+          await this.saveTombstonesNow(pid).catch(() => false)
+        }
+        for (const [pid, list] of tasksSnap) {
+          await idbPut('tasks', taskCacheKey(auth.username, pid), list)
+        }
+        for (const [pid, list] of trashSnap) {
+          await idbPut('trash', trashCacheKey(auth.username, pid), list)
+        }
+        for (const [pid, list] of repeatsSnap) {
+          await idbPut('repeats', repeatsCacheKey(auth.username, pid), list)
+        }
+        return false
+      }
       const jobs: Promise<boolean>[] = []
       for (const pid of affected) {
         jobs.push(this.saveProjectNow(pid))
@@ -4006,18 +4184,25 @@ export const useTasksStore = defineStore('tasks', {
       for (const pid of affectedRepeats) jobs.push(this.saveRepeatsNow(pid))
       const ok = (await Promise.all(jobs)).every(Boolean)
       if (ok) return true
-      // 失败回滚：内存 + IDB（根任务对象被原地改过，需用深拷贝还原）
+      // 失败回滚：先同步还原全部内存（含墓碑，避免「删除没成功、墓碑却留下」导致该任务被其它端
+      // 永久剔除），再还原 IDB / 墓碑写盘。根任务对象被原地改过，需用深拷贝还原。
+      for (const pid of affected) tombstoneDebouncers.get(pid)?.cancel()
       if (root && rootSnap) Object.assign(root, rootSnap)
+      for (const [pid, list] of tombstonesSnap) this.tombstones[pid] = list
+      for (const [pid, list] of tasksSnap) this.tasks[pid] = list
+      for (const [pid, list] of trashSnap) this.trash[pid] = list
+      for (const [pid, list] of repeatsSnap) this.repeats[pid] = list
+      for (const [pid, list] of tombstonesSnap) {
+        await idbPut('kv', tombstonesCacheKey(auth.username, pid), list)
+        await this.saveTombstonesNow(pid).catch(() => false)
+      }
       for (const [pid, list] of tasksSnap) {
-        this.tasks[pid] = list
         await idbPut('tasks', taskCacheKey(auth.username, pid), list)
       }
       for (const [pid, list] of trashSnap) {
-        this.trash[pid] = list
         await idbPut('trash', trashCacheKey(auth.username, pid), list)
       }
       for (const [pid, list] of repeatsSnap) {
-        this.repeats[pid] = list
         await idbPut('repeats', repeatsCacheKey(auth.username, pid), list)
       }
       return false

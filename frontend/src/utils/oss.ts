@@ -580,6 +580,8 @@ export const paths = {
   today: (username: string) => `users/${username}/today.json`,
   todayTrash: (username: string) => `users/${username}/today_trash.json`,
   todayRepeats: (username: string) => `users/${username}/today_repeats.json`,
+  /** 未分类的墓碑日志（未分类没有 projects/<id>/ 目录，projectId 为空串，故用用户级文件） */
+  todayTombstones: (username: string) => `users/${username}/today_tombstones.json`,
   /** 今日任务跨项目拖拽顺序（独立于任务 JSON 的全局顺序表） */
   todayOrder: (username: string) => `users/${username}/today_order.json`,
   meta: (username: string, projectId: string) => `users/${username}/projects/${projectId}/meta.json`,
