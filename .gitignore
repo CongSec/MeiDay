@@ -22,7 +22,7 @@ env/
 backend/.venv/
 
 # ===== 后端运行产物 =====
-backend/logs/
+b/logs/
 logs/
 backend/dev.db
 *.db
@@ -137,3 +137,5 @@ verify_real.py
 
 # ===== 一键构建输出 =====
 output/
+
+backend/update.txt
