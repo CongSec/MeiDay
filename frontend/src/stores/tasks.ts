@@ -55,6 +55,28 @@ let materializeChain: Promise<unknown> = Promise.resolve()
 /** 项目加载的 in-flight Promise：ProjectView 的 onMounted 与路由 watch 会同时调用
  *  loadProject，复用同一个请求避免打开项目时重复下载该项目的 tasks/repeats 数据包。 */
 const loadingProjectPromises = new Map<string, Promise<void>>()
+/* ---- 读路径回写熔断（防多端互写风暴）----
+ * syncProject 在“合并结果与远端不一致”时会回写 OSS，回写成功又会广播变更事件唤醒对端，
+ * 对端再回写……正常数据下最多一两轮即收敛；但病态数据（对端持续产生反向差异 / 未上云的
+ * 幽灵副本）会让这个环每 2 秒轮询都触发一次 PUT。这里对同一项目的回写做窗口限流：
+ * 超限即跳过本轮回写并告警，宁可短暂保留本地视图，也不无限刷 OSS。 */
+const WRITEBACK_WINDOW_MS = 30_000
+const WRITEBACK_MAX_PER_WINDOW = 5
+const writeBackTimes = new Map<string, number[]>()
+function allowWriteBack(projectId: string): boolean {
+  const now = Date.now()
+  const list = (writeBackTimes.get(projectId) ?? []).filter((t) => now - t < WRITEBACK_WINDOW_MS)
+  if (list.length >= WRITEBACK_MAX_PER_WINDOW) {
+    writeBackTimes.set(projectId, list)
+    console.warn(
+      `[同步] 项目 ${projectId} 读路径回写在 ${WRITEBACK_WINDOW_MS / 1000}s 内已达 ${list.length} 次，跳过本轮回写（防多端互写风暴）`,
+    )
+    return false
+  }
+  list.push(now)
+  writeBackTimes.set(projectId, list)
+  return true
+}
 /** 任务文件固定存 projects/{pid}/tasks.json（未分类活跃任务存储 today.json 已下线，所有任务强制归属真实项目） */
 function tasksFilePath(username: string, projectId: string): string {
   return paths.tasks(username, projectId)
@@ -1514,10 +1536,23 @@ export const useTasksStore = defineStore('tasks', {
       if (newEtag) await idbPut('kv', etagKey, newEtag)
       const newLm = lastModifiedOf(res.res.headers as Record<string, unknown>)
       if (newLm) await idbPut('kv', lmKey, newLm)
-      // 合并结果相对远端内容有差异（规范化 + 排序后比较，含被过滤掉的过期副本）时写回，
-      // 让其他设备也能看到，并顺带“自愈”掉源项目里残留的旧副本（BUG）。
-      // 仅排序/字段顺序不同而内容一致时不写回，避免多端轮询反复改写导致版本号跳动误报冲突
-      if (canonicalJson(merged) !== canonicalJson(sortActiveList([...rawRemoteActive]))) {
+      // 合并结果相对远端内容有差异时写回。**但只有本端确实"新增或替换"了内容才写回**：
+      // 即 merged 里存在远端没有的 id（本地独有任务），或同 id 的内容与远端不同
+      // （本地改动尚未上云 / 平局裁决出的胜者）。仅"远端有条目被本端过滤掉"（跨项目
+      // 过期副本过滤、墓碑剔除）不触发写回——否则会出现一端删、一端并集保留的
+      // 两端互写死循环（每 2 秒一次 PUT）。
+      // 配合 canonicalJson 的 undefined 归一 + mergeTasks 平局确定性裁决：
+      // 内容其实一致（含显式 undefined 键）不再误判为差异，真正分歧最多回写一次即收敛。
+      const remoteById = new Map<string, Task>(rawRemoteActive.map((t) => [t.id, t]))
+      const localAddsOrReplaces = merged.some((t) => {
+        const r = remoteById.get(t.id)
+        return !r || canonicalJson(t) !== canonicalJson(r)
+      })
+      if (
+        localAddsOrReplaces &&
+        canonicalJson(merged) !== canonicalJson(sortActiveList([...rawRemoteActive])) &&
+        allowWriteBack(projectId)
+      ) {
         await this.saveProject(projectId, [...merged])
       }
     },

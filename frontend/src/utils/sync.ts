@@ -1,4 +1,5 @@
 import type { OssClient } from '@/utils/oss'
+import { canonicalJson } from '@/utils/task'
 import type { DeletedProject, Profile, Project, StatsDailyEntry, StatsTaskDelta, Task, UserStats } from '@/types'
 
 /**
@@ -222,19 +223,36 @@ function compareTime(a: string, b: string): number {
 }
 
 /**
+ * 同 id 任务“谁更新”的判定：updatedAt 严格更新者胜；
+ * **updatedAt 平局时按内容指纹确定性裁决，而不是无条件“本地胜”**。
+ *
+ * 为什么平局不能本地胜：updatedAt 只精确到秒（utils/time.ts 的 nowIso），多端同时在线时
+ * 平局很常见（典型场景：两端各自物化同一个重复日——任务 id 相同、updatedAt 都继承模板
+ * 所以相同，只有 createdAt 是各自物化时刻而不同）。若平局时两端各自保留本地副本，
+ * 两份内容永远不同，于是每轮 2 秒轮询都会「拉取 → 发现差异 → 回写 OSS → 上报事件 →
+ * 对端再回写」，形成永不收敛的写放大/乒乓。按内容指纹裁决后，两端面对同一对候选必然
+ * 选出同一个胜者，最多回写一次即收敛。
+ */
+function winsOver(a: Task, b: Task): boolean {
+  const c = compareTime(a.updatedAt, b.updatedAt)
+  if (c !== 0) return c > 0
+  return canonicalJson(a) > canonicalJson(b)
+}
+
+/**
  * 合并两个任务列表（本地 vs 远端）：
  * - 只在一侧出现的任务直接保留；
- * - 两侧都出现：updatedAt 更新的覆盖，相等时以本地为准（本地为最近一次用户操作）。
+ * - 两侧都出现：updatedAt 更新者胜，平局按内容指纹确定性裁决（见 winsOver）。
  */
 export function mergeTasks(local: Task[], remote: Task[]): Task[] {
   const byId = new Map<string, Task>()
-  // 先放本地：远端仅在“严格更新”时才覆盖，保证秒级时间戳相等时本地修改不丢失
   for (const t of local) {
-    if (!byId.has(t.id) || compareTime(t.updatedAt, byId.get(t.id)!.updatedAt) > 0) byId.set(t.id, t)
+    const cur = byId.get(t.id)
+    if (!cur || winsOver(t, cur)) byId.set(t.id, t)
   }
   for (const t of remote) {
     const r = byId.get(t.id)
-    if (!r || compareTime(t.updatedAt, r.updatedAt) > 0) byId.set(t.id, t)
+    if (!r || winsOver(t, r)) byId.set(t.id, t)
   }
   return [...byId.values()]
 }
@@ -264,7 +282,8 @@ export function dedupTasksById(tasks: Task[]): Task[] {
   const byId = new Map<string, Task>()
   for (const t of tasks) {
     const cur = byId.get(t.id)
-    if (!cur || compareTime(t.updatedAt, cur.updatedAt) > 0) byId.set(t.id, t)
+    // 平局同样按内容指纹裁决：保证同一份输入在任何端都收敛到同一副本（显示/计数一致）
+    if (!cur || winsOver(t, cur)) byId.set(t.id, t)
   }
   return [...byId.values()]
 }
@@ -275,7 +294,7 @@ export function mergeDeletedTombstones(...groups: Task[][]): Task[] {
   for (const group of groups) {
     for (const t of group) {
       const cur = byId.get(t.id)
-      if (!cur || compareTime(t.updatedAt, cur.updatedAt) > 0) byId.set(t.id, t)
+      if (!cur || winsOver(t, cur)) byId.set(t.id, t)
     }
   }
   return [...byId.values()]
