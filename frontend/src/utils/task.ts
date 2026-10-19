@@ -71,8 +71,9 @@ export function compareTasksByTime(
   return (a.createdAt || '').localeCompare(b.createdAt || '')
 }
 
-/** 在 list 现有顺序中求 task 的时间落点下标：从 from 起用统一时间链（提醒 > 开始 > 创建）
- *  向前扫描，遇到第一个“时间更晚”的任务即停。
+/** 在 list 现有顺序中求 task 的时间落点下标：落在最后一个「时间不晚于 task」的任务之后。
+ *  即 task 永远不会插到任何时间更早的任务前面，落点只由时间链（提醒 > 开始 > 创建）决定，
+ *  与其它任务的手动拖拽位置无关（列表若本就按时间排好，则等价于严格升序插入）。
  *  全程忽略各方已有的手动键（sort / todayOrder 下标），供「新建任务插入落点」与
  *  「编辑时间后归位」共用，保证两者的排序语义完全一致。 */
 export function timeInsertIndex<T extends Task | Subtask>(
@@ -81,10 +82,13 @@ export function timeInsertIndex<T extends Task | Subtask>(
   from = 0,
   to: number = list.length,
 ): number {
-  let at = Math.max(0, from)
+  const start = Math.max(0, from)
   const end = Math.min(to, list.length)
-  while (at < end && compareTasksByTime(list[at], task) <= 0) at++
-  return at
+  let lastEarlier = start - 1
+  for (let i = start; i < end; i++) {
+    if (compareTasksByTime(list[i], task) <= 0) lastEarlier = i
+  }
+  return lastEarlier + 1
 }
 
 /** 统一排序链（带手动键）：手动排序 > 提醒时间 > 开始时间 > 创建时间。

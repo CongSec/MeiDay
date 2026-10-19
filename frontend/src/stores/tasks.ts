@@ -202,10 +202,6 @@ function isServerEmptyError(e: unknown): boolean {
  * 统一排序链：手动 sort > 提醒时间 > 开始时间 > 创建时间（升序；缺失键排后，endTime 不参与）。
  * 拖拽过（有 sort）的任务按 sort 升序、未拖过的按时间链自动排序，让手动顺序在加载/同步合并后保持。
  */
-/** 新建任务插入比较：统一时间链（提醒 > 开始 > 创建时间），无视已有 sort（新任务按时间就位） */
-function compareTaskSort(a: Task, b: Task): number {
-  return compareTasksByTime(a, b)
-}
 function sortActiveList(list: Task[]): Task[] {
   const cmp = (a: Task, b: Task) => compareTaskChain(a, b, a.sort, b.sort)
   const pending = list.filter((t) => t.status === 'pending').sort(cmp)
@@ -2831,13 +2827,12 @@ export const useTasksStore = defineStore('tasks', {
           this.repositionTodayOrder(before)
         }
       } else {
-        // 新建/跨项目移入：不继承旧项目的 sort；仅把该任务按「同一天提醒 > 开始，
-        // 不同一天按实际时间先后」插入当前顺序的合适位置（其他任务顺序保持不变），
-        // 再整体重排 sort 序号，使新顺序在加载/同步合并后依然保持
+        // 新建/跨项目移入：不继承旧项目的 sort；按统一时间链（提醒 > 开始 > 创建）把新任务
+        // 插到最后一个「时间不晚于它」的任务之后——落点只看时间，不受其它任务手动拖拽位置影响；
+        // 其它任务相对顺序保持不变。再整体重排 sort 序号，使新顺序在加载/同步合并后依然保持。
         const pendingEnd = list.findIndex((t) => t.status !== 'pending')
         const bound = pendingEnd === -1 ? list.length : pendingEnd
-        let at = 0
-        while (at < bound && compareTaskSort(list[at], task) <= 0) at++
+        const at = timeInsertIndex(list, task, 0, bound)
         list.splice(at, 0, task)
         list.forEach((t, i) => {
           t.sort = i
@@ -2910,6 +2905,99 @@ export const useTasksStore = defineStore('tasks', {
       logAudit('调整子任务顺序', safeDetail(`任务ID：${taskId}，项目ID：${projectId}，共 ${orderedSubtasks.length} 项`))
     },
     /**
+     * 拖拽成子任务：把任务 sourceId 变成任务 targetId 的子任务（松手即生效）。
+     * 校验：source 自身含子任务 / 带重复规则时禁止（toast 提示，返回 false）。
+     * 字段规则：source 自身属性（名称/描述/时间/提醒/附件）原样保留，仅「项目归属」继承
+     * 目标任务所在项目；完成状态不保留（新子任务 completed=false）。
+     * 跨项目时同时持久化新旧两个项目；今日视图同步从 todayOrder 移除 source id
+     * （它不再作为顶层任务出现，防残留引用）。
+     */
+    convertTaskToSubtask(sourceId: string, targetId: string): boolean {
+      const source = this.all.find((t) => t.id === sourceId)
+      const target = this.all.find((t) => t.id === targetId)
+      if (!source || !target || source.id === target.id) return false
+      if ((source.subtasks?.length ?? 0) > 0) {
+        useUiStore().toast('该任务含子任务，无法作为子任务', 'error')
+        return false
+      }
+      if (source.repeat) {
+        useUiStore().toast('重复任务不支持作为子任务', 'error')
+        return false
+      }
+      const srcPid = source.projectId
+      const dstPid = target.projectId
+      const now = nowIso()
+      const sub: Subtask = {
+        id: source.id,
+        name: source.name,
+        description: source.description,
+        startTime: source.startTime,
+        endTime: source.endTime,
+        reminderTime: source.reminderTime,
+        completed: false,
+        createdAt: source.createdAt,
+        updatedAt: now,
+        sort: target.subtasks?.length ?? 0,
+        attachments: source.attachments ?? [],
+      }
+      // 从源项目移除 source
+      this.tasks[srcPid] = (this.tasks[srcPid] ?? []).filter((t) => t.id !== sourceId)
+      if (srcPid !== dstPid) this._persist(srcPid)
+      // 追加为目标任务的子任务并刷新
+      target.subtasks = [...(target.subtasks ?? []), sub]
+      target.updatedAt = now
+      this._persist(dstPid)
+      // 今日视图：source 不再作为顶层任务，从 todayOrder 移除（防残留引用）
+      if (this.todayOrder.includes(sourceId)) {
+        this.setTodayOrder(this.todayOrder.filter((id) => id !== sourceId), { audit: false })
+      }
+      // 完成状态不保留：已完成任务转为未完成子任务，回退当日完成统计
+      if (source.status === 'completed') void useStatsStore().addDelta(-1, source.id)
+      logAudit('设为子任务', safeDetail(`任务ID：${sourceId}，项目ID：${srcPid} → 父任务ID：${targetId}，项目ID：${dstPid}`))
+      return true
+    },
+    /**
+     * 子任务提升为主任务：把 parentTaskId 下 subId 子任务变成该项目顶层任务（松手即生效）。
+     * 归属父任务所在项目（仅「项目」是继承关系）；自身属性（名称/描述/时间/提醒/附件）
+     * 原样保留；完成状态不保留（新任务 status='pending'）；追加到该项目任务列表末尾
+     * （sort=当前长度，放最后）。
+     */
+    promoteSubtaskToTask(parentTaskId: string, subId: string): boolean {
+      const parent = this.all.find((t) => t.id === parentTaskId)
+      if (!parent) return false
+      const sub = parent.subtasks?.find((s) => s.id === subId)
+      if (!sub) return false
+      const pid = parent.projectId
+      const now = nowIso()
+      const task: Task = {
+        id: sub.id,
+        name: sub.name,
+        description: sub.description,
+        startTime: sub.startTime,
+        endTime: sub.endTime,
+        reminderTime: sub.reminderTime,
+        projectId: pid,
+        status: 'pending',
+        isReminded: false,
+        createdAt: sub.createdAt,
+        updatedAt: now,
+        subtasks: [],
+        attachments: sub.attachments ?? [],
+      }
+      // 从父任务移除该子任务
+      parent.subtasks = parent.subtasks.filter((s) => s.id !== subId)
+      parent.updatedAt = now
+      // 追加到项目任务列表末尾
+      const list = this.tasks[pid] ?? []
+      task.sort = list.length
+      this.tasks[pid] = [...list, task]
+      this._persist(pid)
+      // 今日视图：新任务若今日可见则登记顺序（按时间链归位；不可见时自动跳过）
+      this.repositionTodayOrder(task)
+      logAudit('提升为主任务', safeDetail(`子任务ID：${subId}，父任务ID：${parentTaskId} → 任务ID：${task.id}，项目ID：${pid}`))
+      return true
+    },
+    /**
      * 保存今日视图的跨项目拖拽顺序（任务 id 全局有序）。
      * 顺序表独立于各项目 tasks.json 单独存储 + CAS + 同步上报，保证换设备后
      * 今日视图的排列与拖拽时完全一致；展示时按「今日可见 + 仍存在」过滤引用。
@@ -2935,10 +3023,11 @@ export const useTasksStore = defineStore('tasks', {
       if (!isTaskVisibleToday(task, today)) return
       const byId = new Map(this.all.map((t) => [t.id, t]))
       const orderMap = new Map(this.todayOrder.map((id, i) => [id, i]))
-      /** 锚点判定：该 id 是「今日可见且时间比 task 更晚」的任务（跳过历史/不可见 id） */
-      const isLaterAnchor = (id: string) => {
+      /** 锚点时间比较：仅今日可见的任务参与（跳过历史/不可见 id）；返回该任务相对 task 的排序结果 */
+      const anchorRank = (id: string): number | null => {
         const other = byId.get(id)
-        return !!other && isTaskVisibleToday(other, today) && compareTasksByTime(other, task) > 0
+        if (!other || !isTaskVisibleToday(other, today)) return null
+        return compareTasksByTime(other, task)
       }
       let ids: string[]
       let renderedBefore: string | null = null
@@ -2954,12 +3043,14 @@ export const useTasksStore = defineStore('tasks', {
         renderedBefore = ids.join('|')
         ids = ids.filter((id) => id !== task.id)
       }
-      let at = ids.length
+      // 与项目页新建/编辑的落点语义一致：从段首起步，逐项推进到最后一个「时间不晚于 task」的
+      // 可见任务之后——task 永远不会显示在时间更早任务的上方（不受手动拖拽位置影响），
+      // 无更早锚点时即最前（与 timeInsertIndex 一致）
+      let at = 0
       for (let i = 0; i < ids.length; i++) {
-        if (isLaterAnchor(ids[i])) {
-          at = i
-          break
-        }
+        const r = anchorRank(ids[i])
+        if (r === null) continue
+        if (r <= 0) at = i + 1
       }
       ids.splice(at, 0, task.id)
       if (ids.join('|') === (renderedBefore ?? this.todayOrder.join('|'))) return

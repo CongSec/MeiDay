@@ -2,7 +2,7 @@
 import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { VueDraggable } from 'vue-draggable-plus'
-import { getDragOptions, setDragging } from '@/utils/drag'
+import { getDragOptions, setDragging, beginSubtaskDrop, updateSubtaskDrop, endSubtaskDrop } from '@/utils/drag'
 import { useProjectsStore } from '@/stores/projects'
 import { useTasksStore } from '@/stores/tasks'
 import { useUiStore } from '@/stores/ui'
@@ -62,12 +62,30 @@ watch(
   { immediate: true },
 )
 
-function onDragStart() {
+/** 当前被拖任务 id（@start 记录，@end 判定落点） */
+let dragSourceId: string | null = null
+
+function onDragStart(evt?: { oldIndex?: number; item?: HTMLElement | null }) {
   setDragging(true)
+  dragSourceId = evt?.oldIndex != null ? dragList.value[evt.oldIndex]?.id ?? null : null
+  if (dragSourceId) beginSubtaskDrop(dragSourceId, evt?.item)
+}
+
+function onDragMove(evt: { related?: HTMLElement | null; originalEvent?: DragEvent | MouseEvent | TouchEvent | null }) {
+  updateSubtaskDrop(evt)
 }
 
 function onDragEnd() {
   setDragging(false)
+  const targetId = endSubtaskDrop()
+  const sourceId = dragSourceId
+  dragSourceId = null
+  // 落到另一张任务卡上 → 把被拖任务设为该任务的子任务
+  if (sourceId && targetId && targetId !== sourceId) {
+    const ok = tasks.convertTaskToSubtask(sourceId, targetId)
+    if (ok) ui.toast('已设为子任务')
+    return
+  }
   const full = tasks.tasks[projectId.value] ?? []
   const done = full.filter((t) => t.status !== 'pending')
   tasks.setOrder(projectId.value, [...dragList.value, ...done])
@@ -178,6 +196,11 @@ function onRemoveSubtask(taskId: string, subId: string) {
   tasks.removeSubtaskFrom(taskId, subId)
 }
 
+function onPromoteSubtask(parent: Task, sub: Subtask) {
+  const ok = tasks.promoteSubtaskToTask(parent.id, sub.id)
+  if (ok) ui.toast('已提升为主任务')
+}
+
 function onDelete(id: string) {
   const t = tasks.all.find((x) => x.id === id)
   if (t) deleteTarget.value = t
@@ -263,7 +286,7 @@ async function confirmDelete() {
       </div>
 
       <div class="mt-4">
-        <VueDraggable v-model="dragList" v-bind="dragOptions" item-key="id" class="space-y-2" @start="onDragStart" @end="onDragEnd">
+        <VueDraggable v-model="dragList" v-bind="dragOptions" item-key="id" class="space-y-2" @start="onDragStart" @move="onDragMove" @end="onDragEnd">
           <TaskCard
             v-for="t in dragList"
             :key="t.id"
@@ -275,6 +298,7 @@ async function confirmDelete() {
             @edit-subtask="onEditSubtask"
             @toggle-subtask="onToggleSubtask"
             @remove-subtask="onRemoveSubtask"
+            @promote-subtask="onPromoteSubtask"
             @delete="onDelete"
           />
         </VueDraggable>
@@ -307,6 +331,7 @@ async function confirmDelete() {
               @edit-subtask="onEditSubtask"
               @toggle-subtask="onToggleSubtask"
               @remove-subtask="onRemoveSubtask"
+              @promote-subtask="onPromoteSubtask"
               @delete="onDelete"
             />
           </div>

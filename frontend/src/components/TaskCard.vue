@@ -6,7 +6,7 @@ import { dateKeyOf, formatTodayTitle, todayKey } from '@/utils/time'
 import { formatRepeat, isNewStyleRepeat, isRepeatDay } from '@/utils/repeat'
 import type { Project, Subtask, Task } from '@/types'
 import { VueDraggable } from 'vue-draggable-plus'
-import { getDragOptions, setDragging } from '@/utils/drag'
+import { getDragOptions, setDragging, startPointerTrack, stopPointerTrack, trackDropPointer, lastDropPointer } from '@/utils/drag'
 import { useTasksStore } from '@/stores/tasks'
 import { sortSubtasks } from '@/utils/task'
 import AppIcon from '@/components/AppIcon.vue'
@@ -20,10 +20,15 @@ const emit = defineEmits<{
   editSubtask: [Task, Subtask]
   toggleSubtask: [taskId: string, subId: string]
   removeSubtask: [taskId: string, subId: string]
+  /** 子任务拖出卡片落到空白区：请求把该子任务提升为主任务 */
+  promoteSubtask: [parent: Task, sub: Subtask]
 }>()
 
 const auth = useAuthStore()
 const tasks = useTasksStore()
+
+/** 卡片根元素：子任务拖出卡片判定用（松手位置是否已离开卡片边界） */
+const cardRoot = ref<HTMLElement | null>(null)
 
 // 全局共享时钟（单一 30s 定时器，替代每个卡片各自 setInterval）
 const { now } = useNow()
@@ -102,19 +107,49 @@ watch(
 /** 子任务拖拽参数：仅手柄可拖（与整卡拖拽互不干扰） */
 const subDragOptions = { ...getDragOptions({ wholeCard: false }), handle: '.sub-drag-handle' }
 
-function onSubDragStart() {
+/** 正在拖拽的子任务 id（@start 时记录，@end 时判定是否拖出卡片） */
+let draggingSubId: string | null = null
+
+function onSubDragStart(evt?: { oldIndex?: number }) {
   setDragging(true)
+  draggingSubId = evt?.oldIndex != null ? subDragList.value[evt.oldIndex]?.id ?? null : null
+  // 追踪指针：松手时判断是否已拖出卡片（落到列表空白区 → 提升为主任务）
+  startPointerTrack()
+}
+
+function onSubDragMove(evt: { related?: HTMLElement | null; originalEvent?: DragEvent | MouseEvent | TouchEvent | null }) {
+  trackDropPointer(evt)
 }
 
 function onSubDragEnd() {
   setDragging(false)
+  stopPointerTrack()
+  const subId = draggingSubId
+  draggingSubId = null
+  const root = cardRoot.value
+  // 判定是否拖出卡片边界：是 → 提升为主任务；否则 → 卡片内排序
+  if (subId && root) {
+    const pt = lastDropPointer()
+    const r = root.getBoundingClientRect()
+    const outside = pt.x < r.left || pt.x > r.right || pt.y < r.top || pt.y > r.bottom
+    if (outside) {
+      const sub = props.task.subtasks?.find((s) => s.id === subId)
+      if (sub) {
+        emit('promoteSubtask', props.task, sub)
+        return
+      }
+    }
+  }
   tasks.setSubtaskOrder(props.task.projectId, props.task.id, subDragList.value)
 }
 </script>
 
 <template>
   <div
+    ref="cardRoot"
     class="task-card group bg-white rounded-xl shadow-card border border-line p-4 transition hover:shadow-lift"
+    :data-task-id="task.id"
+    :data-future="future ? '1' : '0'"
     :class="[
       warm ? 'hover:border-amber-300' : 'hover:border-slate-200',
       overdue ? 'border-l-4 border-l-red-500' : '',
@@ -232,7 +267,7 @@ function onSubDragEnd() {
           <span class="inline-flex items-center gap-1"><AppIcon name="plus" :size="11" />添加子任务</span>
         </button>
       </div>
-      <VueDraggable v-model="subDragList" v-bind="subDragOptions" item-key="id" class="space-y-1.5" @start="onSubDragStart" @end="onSubDragEnd">
+      <VueDraggable v-model="subDragList" v-bind="subDragOptions" item-key="id" class="space-y-1.5" @start="onSubDragStart" @move="onSubDragMove" @end="onSubDragEnd">
         <div
           v-for="s in subDragList"
           :key="s.id"
