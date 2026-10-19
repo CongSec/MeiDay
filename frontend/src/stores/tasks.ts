@@ -16,7 +16,7 @@ import { buildOccurrenceTemplate, buildReminderPayload, buildRepeatOccurrence, h
 import { api } from '@/api/client'
 import { logAudit, logAttachmentDeletion, safeDetail } from '@/utils/audit'
 import { UNCATEGORIZED, type AttachmentMeta, type RepeatMaster, type Subtask, type Task, type TombstoneEntry } from '@/types'
-import { canonicalJson, compareTaskChain, compareTasksByTime, newSubtask, normalizeTask, normalizeTasks, pendingSubtaskReminders } from '@/utils/task'
+import { canonicalJson, compareTaskChain, compareTasksByTime, newSubtask, normalizeTask, normalizeTasks, pendingSubtaskReminders, timeInsertIndex } from '@/utils/task'
 import { deleteAttachments, ossFileName } from '@/utils/attachments'
 const saveDebouncers = new Map<string, Debounced<[]>>()
 const trashDebouncers = new Map<string, Debounced<[]>>()
@@ -211,6 +211,13 @@ function sortActiveList(list: Task[]): Task[] {
   const pending = list.filter((t) => t.status === 'pending').sort(cmp)
   const rest = list.filter((t) => t.status !== 'pending').sort(cmp)
   return [...pending, ...rest]
+}
+/** 排序时间键（用于“本次编辑是否改了时间”的判定）：截到分钟再比。
+ *  表单往返是 toLocalInput(slice(0,16)) → fromLocalInput，秒与时区后缀会被抹掉，
+ *  直接比原始字符串会把「只改了描述」误判成「改了时间」，从而把任务弹离手动位置。
+ *  空值统一为 null，避免 null / '' / undefined 被判成不同。 */
+function sortTimeKey(v?: string | null): string | null {
+  return v ? v.slice(0, 16) : null
 }
 function ensureDebouncer(store: ReturnType<typeof useTasksStore>, projectId: string) {
   if (!saveDebouncers.has(projectId)) {
@@ -2799,7 +2806,30 @@ export const useTasksStore = defineStore('tasks', {
       const isNew = idx < 0
       task.updatedAt = nowIso()
       if (idx >= 0) {
-        Object.assign(list[idx], task)
+        const before = list[idx]
+        // 「改了时间」判定：只看排序链真正用到的两个字段（endTime 不参与排序，改它不归位），
+        // 且按分钟归一后比较，避免表单往返抹掉秒/时区后缀导致误判（见 sortTimeKey）
+        const timeChanged =
+          sortTimeKey(before.startTime) !== sortTimeKey(task.startTime) ||
+          sortTimeKey(before.reminderTime) !== sortTimeKey(task.reminderTime)
+        Object.assign(before, task)
+        if (timeChanged) {
+          // 与新建任务同一套语义：按统一时间链（提醒 > 开始 > 创建）重找落点，忽略已有手动 sort。
+          // 先按状态判定所属区段（pending 区在前、其余在后，与 sortActiveList 一致），
+          // 只在段内按时间插入，其余任务的相对顺序保持不变；最后整体重编 sort 序号。
+          const baseline = list.slice()
+          list.splice(idx, 1)
+          const pendingEnd = list.findIndex((t) => t.status !== 'pending')
+          const bound = pendingEnd === -1 ? list.length : pendingEnd
+          const at =
+            before.status === 'pending'
+              ? timeInsertIndex(list, before, 0, bound)
+              : timeInsertIndex(list, before, bound, list.length)
+          list.splice(at, 0, before)
+          this._renumberOrder(target, list, baseline)
+          // 今日页/桌面小组件走另一套手动键（todayOrder 下标），同步按时间归位
+          this.repositionTodayOrder(before)
+        }
       } else {
         // 新建/跨项目移入：不继承旧项目的 sort；仅把该任务按「同一天提醒 > 开始，
         // 不同一天按实际时间先后」插入当前顺序的合适位置（其他任务顺序保持不变），
@@ -2827,14 +2857,13 @@ export const useTasksStore = defineStore('tasks', {
       logAudit(isNew ? '新增任务' : '修改任务', safeDetail(`任务ID：${task.id}，项目ID：${target}`))
     },
     /**
-     * 拖拽排序：整体替换该项目的任务数组（顺序即展示顺序）。
-     * 写入每个任务的 sort=下标，并仅对「位置发生变化的任务」更新 updatedAt，
-     * 使本端的 sort 值在跨设备合并（mergeTasks 按 updatedAt 取新）时胜出；
-     * 未移动的任务保持原 updatedAt，避免覆盖其他设备对该任务的内容编辑。
+     * 按“数组顺序即展示顺序”重编 sort 序号（不落盘、不写审计，由调用方决定）：
+     * 仅对「位置发生变化的任务」更新 updatedAt，使本端 sort 在跨设备合并（mergeTasks 按 updatedAt 取新）
+     * 时胜出；未移动的任务保持原 updatedAt，避免覆盖其他设备对该任务的内容编辑。
+     * baseline 为位次比对基准（缺省取当前内存数组）；就地改动过 ordered 的调用方必须传入改动前的快照。
      */
-    setOrder(projectId: string, ordered: Task[]) {
-      const prev = this.tasks[projectId] ?? []
-      const prevIndex = new Map(prev.map((t, i) => [t.id, i]))
+    _renumberOrder(projectId: string, ordered: Task[], baseline?: Task[]) {
+      const prevIndex = new Map((baseline ?? this.tasks[projectId] ?? []).map((t, i) => [t.id, i]))
       const now = nowIso()
       for (let i = 0; i < ordered.length; i++) {
         const t = ordered[i]
@@ -2844,6 +2873,12 @@ export const useTasksStore = defineStore('tasks', {
         if (moved) t.updatedAt = now
       }
       this.tasks[projectId] = ordered
+    },
+    /**
+     * 拖拽排序：整体替换该项目的任务数组（顺序即展示顺序），重编 sort 序号并落盘。
+     */
+    setOrder(projectId: string, ordered: Task[]) {
+      this._renumberOrder(projectId, ordered)
       this._persist(projectId)
       logAudit('调整任务顺序', safeDetail(`项目ID：${projectId}，共 ${ordered.filter((t) => t.status === 'pending').length} 项`))
     },
@@ -2879,11 +2914,56 @@ export const useTasksStore = defineStore('tasks', {
      * 顺序表独立于各项目 tasks.json 单独存储 + CAS + 同步上报，保证换设备后
      * 今日视图的排列与拖拽时完全一致；展示时按「今日可见 + 仍存在」过滤引用。
      */
-    setTodayOrder(orderedIds: string[]) {
+    setTodayOrder(orderedIds: string[], opts?: { audit?: boolean }) {
       this.todayOrder = [...orderedIds]
       void idbPut('kv', todayOrderCacheKey(useAuthStore().username), { ids: this.todayOrder })
       void this.saveTodayOrderNow()
-      logAudit('调整今日任务顺序', safeDetail(`共 ${orderedIds.length} 项`))
+      // 编辑时间触发的自动归位不单独记账，避免每次编辑都刷一条“调整今日任务顺序”
+      if (opts?.audit !== false) logAudit('调整今日任务顺序', safeDetail(`共 ${orderedIds.length} 项`))
+    },
+    /**
+     * 编辑时间后的今日页归位（与项目页同一套「忽略手动键」的时间链语义）：
+     *  - 任务已登记进 todayOrder：只在该顺序表内部把这个 id 挪到时间落点，
+     *    不新增登记、不裁剪历史 id（未在今日显示的历史 id 保持原样）；
+     *  - 任务未登记：确实需要把它登记进正确位置，但展示层是「已登记组整组前置」的硬分组
+     *    （见 TodayView.sorted），只登记单条会让它直接跳到列表顶部，与“按时间归位”相反；
+     *    因此把当屏今日可见任务按当前渲染顺序整体落表（与拖拽 onDragEnd 写整屏 id 的语义一致）。
+     * 今日不可见的任务不处理。渲染顺序没有变化时不写盘，避免无意义的 CAS 写与跨端广播。
+     */
+    repositionTodayOrder(task: Task) {
+      const today = todayKey()
+      if (!isTaskVisibleToday(task, today)) return
+      const byId = new Map(this.all.map((t) => [t.id, t]))
+      const orderMap = new Map(this.todayOrder.map((id, i) => [id, i]))
+      /** 锚点判定：该 id 是「今日可见且时间比 task 更晚」的任务（跳过历史/不可见 id） */
+      const isLaterAnchor = (id: string) => {
+        const other = byId.get(id)
+        return !!other && isTaskVisibleToday(other, today) && compareTasksByTime(other, task) > 0
+      }
+      let ids: string[]
+      let renderedBefore: string | null = null
+      if (orderMap.has(task.id)) {
+        ids = this.todayOrder.filter((id) => id !== task.id)
+      } else {
+        const visible = this.all.filter((t) => isTaskVisibleToday(t, today))
+        const registered = visible
+          .filter((t) => orderMap.has(t.id))
+          .sort((a, b) => (orderMap.get(a.id) ?? 0) - (orderMap.get(b.id) ?? 0))
+        const unregistered = visible.filter((t) => !orderMap.has(t.id)).sort(compareTasksByTime)
+        ids = [...registered, ...unregistered].map((t) => t.id)
+        renderedBefore = ids.join('|')
+        ids = ids.filter((id) => id !== task.id)
+      }
+      let at = ids.length
+      for (let i = 0; i < ids.length; i++) {
+        if (isLaterAnchor(ids[i])) {
+          at = i
+          break
+        }
+      }
+      ids.splice(at, 0, task.id)
+      if (ids.join('|') === (renderedBefore ?? this.todayOrder.join('|'))) return
+      this.setTodayOrder(ids, { audit: false })
     },
     /** 立即把今日顺序表落盘 OSS（CAS + 冲突合并：本地顺序优先，远端新增 id 追加到末尾） */
     async saveTodayOrderNow(): Promise<boolean> {

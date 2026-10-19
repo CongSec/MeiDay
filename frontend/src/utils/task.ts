@@ -71,9 +71,27 @@ export function compareTasksByTime(
   return (a.createdAt || '').localeCompare(b.createdAt || '')
 }
 
+/** 在 list 现有顺序中求 task 的时间落点下标：从 from 起用统一时间链（提醒 > 开始 > 创建）
+ *  向前扫描，遇到第一个“时间更晚”的任务即停。
+ *  全程忽略各方已有的手动键（sort / todayOrder 下标），供「新建任务插入落点」与
+ *  「编辑时间后归位」共用，保证两者的排序语义完全一致。 */
+export function timeInsertIndex<T extends Task | Subtask>(
+  list: T[],
+  task: T,
+  from = 0,
+  to: number = list.length,
+): number {
+  let at = Math.max(0, from)
+  const end = Math.min(to, list.length)
+  while (at < end && compareTasksByTime(list[at], task) <= 0) at++
+  return at
+}
+
 /** 统一排序链（带手动键）：手动排序 > 提醒时间 > 开始时间 > 创建时间。
- *  manualA / manualB 为手动顺序值（今日视图为 todayOrder 下标、项目/子任务为 sort），
- *  缺失时该键跳过（直接落到下一键比较）。 */
+ *  manualA / manualB 为手动顺序值（今日视图为 todayOrder 下标、项目/子任务为 sort）。
+ *  注意：只有双方都有手动键时才比较该键；缺失的一侧按 Number.MAX_SAFE_INTEGER 处理，
+ *  即“没拖过（无 sort）”的任务会排在所有已拖过的任务之后——并非“跳过该键直接比时间”。
+ *  需要忽略手动键的场景（新建落点 / 编辑时间归位）请直接用 compareTasksByTime 或 timeInsertIndex。 */
 export function compareTaskChain(
   a: Task | Subtask,
   b: Task | Subtask,
