@@ -265,6 +265,10 @@ function splitDeleted(list: Task[]): { active: Task[]; deleted: Task[] } {
  * 跨项目移动时目标项目副本的 updatedAt 恒比源项目残留副本新，因此轮询/CAS 冲突合并
  * 若把移动前读到的旧副本“复活”回源项目，此处能按最新归属收敛到唯一一份（BUG）。
  * 仅比较已加载项目，未加载项目由 projectId 过滤与后续同步自愈兜底。
+ *
+ * 归属判定（防误删）：副本必须“明确属于其它项目”（o.projectId === 副本所在项目 pid）
+ * 才视为该任务已移走；projectId 缺失/指向本项目/指向第三方的副本不参与判定，避免
+ * 把仍归属本项目的正常任务误判为过期副本剔除（BUG：来回拖拽子任务后任务“消失”）。
  */
 function filterStaleAcrossProjects(
   allTasks: Record<string, Task[]>,
@@ -272,15 +276,25 @@ function filterStaleAcrossProjects(
   tasks: Task[],
 ): Task[] {
   if (!tasks.length) return tasks
-  const others: Task[] = []
+  // 收集其它项目中“明确归属该其它项目”的同 id 副本（projectId 与所在项目一致才视为已移走）
+  const movedElsewhere = new Map<string, string>()
   for (const [pid, list] of Object.entries(allTasks)) {
     if (pid === projectId) continue
-    for (const t of list) others.push(t)
+    for (const t of list) {
+      // 副本明确属于它所在的项目 → 该 id 已被移往其它项目
+      if (t.projectId === pid) {
+        const cur = movedElsewhere.get(t.id)
+        if (!cur || (t.updatedAt || '').localeCompare(cur) > 0) movedElsewhere.set(t.id, t.updatedAt)
+      }
+    }
   }
-  if (!others.length) return tasks
-  return tasks.filter(
-    (t) => !others.some((o) => o.id === t.id && (o.updatedAt || '').localeCompare(t.updatedAt || '') > 0),
-  )
+  if (!movedElsewhere.size) return tasks
+  return tasks.filter((t) => {
+    const otherUpdatedAt = movedElsewhere.get(t.id)
+    if (!otherUpdatedAt) return true
+    // 仅当其它项目副本 updatedAt 严格更新时才丢弃本项目这份（防时间相等/落后时误删）
+    return (otherUpdatedAt.localeCompare(t.updatedAt || '') <= 0)
+  })
 }
 /**
  * 跨项目去重（异步版）：在同步写回 / CAS 冲突合并 / 保存前，除内存中已加载项目外，
@@ -321,11 +335,45 @@ async function filterStaleAcrossProjectsAsync(
     if (!cached || !cached.length) continue
     for (const t of cached) {
       const cur = byId.get(t.id)
-      if (cur && (t.updatedAt || '').localeCompare(cur.updatedAt || '') > 0) staleIds.add(t.id)
+      // 与内存版一致：仅“明确归属该缓存项目”的副本参与判定，防误删仍归属本项目的任务
+      if (cur && t.projectId === pid && (t.updatedAt || '').localeCompare(cur.updatedAt || '') > 0) {
+        staleIds.add(t.id)
+      }
     }
   }
   if (!staleIds.size) return result
   return result.filter((t) => !staleIds.has(t.id))
+}
+/**
+ * 按 id 定位任务：优先返回「归属明确」的副本（projectId 与所在项目数组一致），
+ * 否则返回 updatedAt 最新的一份；preferPid 提供时（单项目视图）直接锁定该数组。
+ *
+ * 不用 this.all.find 的原因：this.all 是跨项目按 updatedAt 收敛的聚合，同 id 若在
+ * 多个项目数组残留脏副本时会命中“另一项目”的副本，导致 convert/promote 作用于
+ * 错误项目的任务对象（BUG：来回拖拽子任务/主任务后任务在视图里消失）。
+ */
+function findTaskByIdAcrossProjects(
+  allTasks: Record<string, Task[]>,
+  id: string,
+  preferPid?: string,
+): Task | undefined {
+  if (preferPid) {
+    const hit = (allTasks[preferPid] ?? []).find((t) => t.id === id)
+    if (hit) return hit
+  }
+  let owned: Task | undefined
+  let latest: Task | undefined
+  for (const [pid, list] of Object.entries(allTasks)) {
+    const t = list.find((x) => x.id === id)
+    if (!t) continue
+    // 归属明确（projectId === 所在数组）的副本是权威归属；记录 updatedAt 最新兜底
+    if (t.projectId === pid) {
+      if (!owned || (t.updatedAt || '').localeCompare(owned.updatedAt || '') > 0) owned = t
+    } else if (!latest || (t.updatedAt || '').localeCompare(latest.updatedAt || '') > 0) {
+      latest = t
+    }
+  }
+  return owned ?? latest
 }
 /** 有界并发 map：限制同时执行的异步任务数，避免回收站分片全量拉取时一次性打满网络/连接池。 */
 async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
@@ -2486,22 +2534,34 @@ export const useTasksStore = defineStore('tasks', {
      *  这里扫描本项目顶层数组中 id 同时出现在「任一已加载项目任一任务的 subtasks」里的任务，
      *  判定为孤儿残留（两层数据模型下，同 id 不可能合法地既在顶层又在某任务子任务里），
      *  移除并写墓碑（防对端复活）。应在内存/OSS 已对账的列表上调用
-     *  （_loadProjectInner / syncProject / CAS 冲突合并），与 _selfHealRepeatDuplicates 同级。 */
+     *  （_loadProjectInner / syncProject / CAS 冲突合并），与 _selfHealRepeatDuplicates 同级。
+     *  时序兜底（防误删）：转换时子任务 updatedAt=now ≥ source.updatedAt，故仅当本项目这份
+     *  顶层副本“不晚于”它作为子任务出现的时间才清理；若顶层副本被用户后续编辑过
+     *  （updatedAt 更新）则保留，避免把仍在使用/已还原的任务误删（BUG：来回拖拽子任务后任务消失）。 */
     async _selfHealOrphanSubtasks(projectId: string, list: Task[]): Promise<Task[]> {
       if (!list.length) return list
-      // 收集所有已加载项目顶层任务的子任务 id（含本项目：同项目转换同样可能残留；
-      // 首载时 this.tasks[projectId] 尚未赋值，需把当前 list 自身的子任务一并纳入）
-      const subIds = new Set<string>()
-      for (const [pid, ts] of Object.entries(this.tasks)) {
+      // 收集所有已加载项目顶层任务的子任务 id → 其最新 updatedAt（含本项目：
+      // 同项目转换同样可能残留；首载时 this.tasks[projectId] 尚未赋值，需把当前 list 自身的子任务一并纳入）
+      const subInfo = new Map<string, string>()
+      const track = (ts: Task[]) => {
         for (const t of ts) {
-          for (const s of t.subtasks ?? []) subIds.add(s.id)
+          for (const s of t.subtasks ?? []) {
+            const cur = subInfo.get(s.id)
+            if (!cur || (s.updatedAt || '').localeCompare(cur) > 0) subInfo.set(s.id, s.updatedAt || '')
+          }
         }
       }
-      for (const t of list) {
-        for (const s of t.subtasks ?? []) subIds.add(s.id)
-      }
-      if (!subIds.size) return list
-      const orphans = list.filter((t) => subIds.has(t.id))
+      for (const [, ts] of Object.entries(this.tasks)) track(ts)
+      track(list)
+      if (!subInfo.size) return list
+      const orphans = list.filter((t) => {
+        const subAt = subInfo.get(t.id)
+        if (subAt === undefined) return false
+        // 顶层副本有 updatedAt 且晚于子任务出现 → 可能被后续编辑/还原，保留
+        const topAt = t.updatedAt || ''
+        if (topAt && topAt > subAt) return false
+        return true
+      })
       if (!orphans.length) return list
       // 写墓碑（防对端按并集合并复活）→ 移除顶层残留
       await this.upsertTombstones(
@@ -2509,7 +2569,8 @@ export const useTasksStore = defineStore('tasks', {
         orphans.map((t) => ({ id: t.id, updatedAt: t.updatedAt })),
       )
       logAudit('清理孤儿副本', safeDetail(`项目ID：${projectId}，移除 ${orphans.length} 条（已转成其他任务的子任务）`))
-      return list.filter((t) => !subIds.has(t.id))
+      const drop = new Set(orphans.map((t) => t.id))
+      return list.filter((t) => !drop.has(t.id))
     },
     /** 把满足条件的重复模板标记为墓碑（R4 修复）：保留在列表内随文件传播删除，
      *  防止离线端把已删规则通过「并集合并」写回复活；已墓碑的不重复标记。
@@ -2967,10 +3028,13 @@ export const useTasksStore = defineStore('tasks', {
      * 目标任务所在项目；完成状态不保留（新子任务 completed=false）。
      * 跨项目时同时持久化新旧两个项目；今日视图同步从 todayOrder 移除 source id
      * （它不再作为顶层任务出现，防残留引用）。
+     * viewProjectId（可选）：调用方（项目视图）传入当前所在项目，优先在该项目数组内定位
+     * source/target，避免 this.all 跨项目收敛命中错误项目的同名副本（BUG：拖拽子任务后
+     * 任务在视图里“消失”）。跨项目视图（今日页）不传，由 helper 按归属一致兜底。
      */
-    convertTaskToSubtask(sourceId: string, targetId: string): boolean {
-      const source = this.all.find((t) => t.id === sourceId)
-      const target = this.all.find((t) => t.id === targetId)
+    convertTaskToSubtask(sourceId: string, targetId: string, viewProjectId?: string): boolean {
+      const source = findTaskByIdAcrossProjects(this.tasks, sourceId, viewProjectId)
+      const target = findTaskByIdAcrossProjects(this.tasks, targetId, viewProjectId)
       if (!source || !target || source.id === target.id) return false
       if ((source.subtasks?.length ?? 0) > 0) {
         useUiStore().toast('该任务含子任务，无法作为子任务', 'error')
@@ -3097,9 +3161,12 @@ export const useTasksStore = defineStore('tasks', {
      * 归属父任务所在项目（仅「项目」是继承关系）；自身属性（名称/描述/时间/提醒/附件）
      * 原样保留；完成状态不保留（新任务 status='pending'）；追加到该项目任务列表末尾
      * （sort=当前长度，放最后）。
+     * viewProjectId（可选）：调用方（项目视图）传入当前所在项目，优先在该项目数组内定位
+     * 父任务，避免 this.all 跨项目收敛命中错误项目的同名父任务（BUG：拖拽子任务后
+     * 任务在视图里“消失”）。
      */
-    promoteSubtaskToTask(parentTaskId: string, subId: string): boolean {
-      const parent = this.all.find((t) => t.id === parentTaskId)
+    promoteSubtaskToTask(parentTaskId: string, subId: string, viewProjectId?: string): boolean {
+      const parent = findTaskByIdAcrossProjects(this.tasks, parentTaskId, viewProjectId)
       if (!parent) return false
       const sub = parent.subtasks?.find((s) => s.id === subId)
       if (!sub) return false

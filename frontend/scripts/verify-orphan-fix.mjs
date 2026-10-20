@@ -170,4 +170,46 @@ console.log('A2 同项目转换不写墓碑：')
   ok('墓碑写入限定跨项目（同项目无对端复活风险，避免墓碑误伤）')
 }
 
+// ---- 用例 A3：filterStaleAcrossProjects 归属校验（防误删仍归属本项目的任务）----
+console.log('A3 跨项目过滤归属校验（静态断言）：')
+{
+  const src = fs.readFileSync(storePath(), 'utf-8')
+  const stale = src.slice(src.indexOf('function filterStaleAcrossProjects('), src.indexOf('function filterStaleAcrossProjectsAsync('))
+  assert.ok(stale.includes('t.projectId === pid'), '仅“明确归属其它项目”的副本参与判定')
+  assert.ok(stale.includes('movedElsewhere'), '按“已移往其它项目”集合过滤')
+  const staleAsync = src.slice(src.indexOf('function filterStaleAcrossProjectsAsync('), src.indexOf('async function mapLimit'))
+  assert.ok(staleAsync.includes("t.projectId === pid"), 'IDB 缓存比对同样要求副本归属其它项目')
+  ok('跨项目过滤只对“确认已移走”的副本生效，不再误伤仍归属本项目的任务')
+}
+
+// ---- 用例 A4：convert/promote 按视图当前项目定位（防 this.all 跨项目错位）----
+console.log('A4 落点/父任务定位绑定视图项目（静态断言）：')
+{
+  const src = fs.readFileSync(storePath(), 'utf-8')
+  assert.ok(src.includes('function findTaskByIdAcrossProjects('), '跨项目定位 helper 存在')
+  assert.ok(src.includes('convertTaskToSubtask(sourceId: string, targetId: string, viewProjectId?: string)'), 'convert 增加 viewProjectId 参数')
+  assert.ok(src.includes('promoteSubtaskToTask(parentTaskId: string, subId: string, viewProjectId?: string)'), 'promote 增加 viewProjectId 参数')
+  const helper = src.slice(src.indexOf('function findTaskByIdAcrossProjects('), src.indexOf('convertTaskToSubtask(sourceId'))
+  assert.ok(helper.includes('t.projectId === pid'), 'helper 优先归属明确的副本')
+  assert.ok(helper.includes('preferPid'), 'helper 支持视图项目优先')
+  // 视图传入视图项目
+  const pv = fs.readFileSync(path.resolve(__dirname, '../src/views/ProjectView.vue'), 'utf-8')
+  assert.ok(pv.includes('tasks.promoteSubtaskToTask(parent.id, sub.id, projectId.value)'), 'ProjectView promote 传当前项目')
+  assert.ok(pv.includes('tasks.convertTaskToSubtask(sourceId, targetId, projectId.value)'), 'ProjectView convert 传当前项目')
+  const tv = fs.readFileSync(path.resolve(__dirname, '../src/views/TodayView.vue'), 'utf-8')
+  assert.ok(tv.includes('tasks.promoteSubtaskToTask(parent.id, sub.id, parent.projectId)'), 'TodayView promote 传父任务归属项目')
+  ok('转换/提升按视图当前项目定位对象，杜绝跨项目同名副本错位')
+}
+
+// ---- 用例 A5：自愈孤儿清理时序校验（防误删被编辑/还原的任务）----
+console.log('A5 自愈清理时序校验（静态断言）：')
+{
+  const src = fs.readFileSync(storePath(), 'utf-8')
+  const heal = src.slice(src.indexOf('async _selfHealOrphanSubtasks('), src.indexOf('_tombstoneMasters('))
+  assert.ok(heal.includes('subInfo'), '子任务 id → updatedAt 映射存在')
+  assert.ok(heal.includes('topAt'), '顶层副本时间校验存在')
+  assert.ok(heal.includes('if (topAt && topAt > subAt) return false'), '顶层副本更新则保留（防误删）')
+  ok('自愈仅在顶层副本不晚于其作为子任务出现时清理，避免误删仍在使用的任务')
+}
+
 console.log(`\n全部通过：${passed} 项断言`)

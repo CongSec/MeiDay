@@ -83,7 +83,7 @@ function onDragEnd() {
   dragSourceId = null
   // 落到另一张任务卡上 → 把被拖任务设为该任务的子任务
   if (sourceId && targetId && targetId !== sourceId) {
-    const ok = tasks.convertTaskToSubtask(sourceId, targetId)
+    const ok = tasks.convertTaskToSubtask(sourceId, targetId, projectId.value)
     if (ok) {
       ui.toast('已设为子任务', 'ok', {
         label: '撤销',
@@ -213,7 +213,7 @@ function onRemoveSubtask(taskId: string, subId: string) {
 }
 
 function onPromoteSubtask(parent: Task, sub: Subtask) {
-  const ok = tasks.promoteSubtaskToTask(parent.id, sub.id)
+  const ok = tasks.promoteSubtaskToTask(parent.id, sub.id, projectId.value)
   if (ok) ui.toast('已提升为主任务')
 }
 

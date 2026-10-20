@@ -194,7 +194,8 @@ function onDragEnd() {
   dragSourceId = null
   // 落到另一张任务卡上 → 把被拖任务设为该任务的子任务（可能跨项目，归父任务项目）
   if (sourceId && targetId && targetId !== sourceId) {
-    const ok = tasks.convertTaskToSubtask(sourceId, targetId)
+    // 今日页跨项目：source 的真实归属项目作为定位基准（parent 项目就是目标卡所在项目）
+    const ok = tasks.convertTaskToSubtask(sourceId, targetId, tasks.all.find((t) => t.id === sourceId)?.projectId)
     if (ok) {
       ui.toast('已设为子任务', 'ok', {
         label: '撤销',
@@ -304,7 +305,8 @@ function onRemoveSubtask(taskId: string, subId: string) {
 }
 
 function onPromoteSubtask(parent: Task, sub: Subtask) {
-  const ok = tasks.promoteSubtaskToTask(parent.id, sub.id)
+  // 今日页跨项目：父任务归属即其所在项目（parent 来自 tasks.all 聚合，projectId 为真实归属）
+  const ok = tasks.promoteSubtaskToTask(parent.id, sub.id, parent.projectId)
   if (ok) ui.toast('已提升为主任务')
 }
 
