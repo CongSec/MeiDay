@@ -812,6 +812,8 @@ export const useTasksStore = defineStore('tasks', {
           remoteActive = applyDeletedTombstones(remoteActive, tombstones)
           // 自愈去重：同链重复日 / 同链多 pending 收敛为一条（异常时写回收站 / repeats 落盘）
           remoteActive = await this._selfHealRepeatDuplicates(projectId, remoteActive)
+          // 自愈孤儿副本：跨项目转成子任务后源项目残留的顶层旧副本（同 id 已作为某任务子任务）
+          remoteActive = await this._selfHealOrphanSubtasks(projectId, remoteActive)
           this.tasks[projectId] = sortActiveList(remoteActive)
           // 跨天归档：非当天完成的已完成任务稍后由 sweepCompleted 统一移入回收站
           await idbPut('tasks', taskCacheKey(auth.username, projectId), this.tasks[projectId])
@@ -1603,6 +1605,8 @@ export const useTasksStore = defineStore('tasks', {
       // 自愈去重：同链重复日 / 同链多 pending 收敛为一条（异常时写回收站 / repeats 落盘），
       // 让「手机端陈旧缓存恢复/物化出的第二条重复任务」在同步合并时被清理并写回 OSS
       merged = sortActiveList(await this._selfHealRepeatDuplicates(projectId, merged))
+      // 自愈孤儿副本：跨项目转成子任务后源项目残留的顶层旧副本（同 id 已作为某任务子任务）
+      merged = sortActiveList(await this._selfHealOrphanSubtasks(projectId, merged))
       this.tasks[projectId] = merged
       await idbPut('tasks', taskCacheKey(auth.username, projectId), merged)
       // 任务文件内残留的 deleted 墓碑（遗留数据迁移）并入本地回收站；展示数据不再由日常同步预载
@@ -1745,6 +1749,8 @@ export const useTasksStore = defineStore('tasks', {
           // 才标记为真合并；否则只是版本号过期、内容一致，不弹「已自动合并」提示
           const beforeMerge = list
           list = sortActiveList(applyDeletedTombstones(mergeTasks(list, filteredRemote), tombstones))
+          // 自愈孤儿副本：跨项目转成子任务后源项目残留的顶层旧副本，CAS 冲突合并时一并清理
+          list = sortActiveList(await this._selfHealOrphanSubtasks(projectId, list))
           if (canonicalJson(list) !== canonicalJson(sortActiveList([...beforeMerge]))) {
             mergedNewData = true
           }
@@ -2473,6 +2479,38 @@ export const useTasksStore = defineStore('tasks', {
       }
       return cleaned
     },
+    /** 自愈清理孤儿副本（跨项目转成子任务的残留 Bug 兜底）：把任务 A 拖成任务 B 的子任务时，
+     *  A 不再携带 projectId（Subtask 无此字段），源项目里残留的 A 旧副本无法被
+     *  filterStaleAcrossProjects（只比较顶层数组）识别，对端合并会按「只在一侧出现则保留」
+     *  把 A 并回源项目 → 顶层 A 与子任务 A 同时存在（复制）。
+     *  这里扫描本项目顶层数组中 id 同时出现在「任一已加载项目任一任务的 subtasks」里的任务，
+     *  判定为孤儿残留（两层数据模型下，同 id 不可能合法地既在顶层又在某任务子任务里），
+     *  移除并写墓碑（防对端复活）。应在内存/OSS 已对账的列表上调用
+     *  （_loadProjectInner / syncProject / CAS 冲突合并），与 _selfHealRepeatDuplicates 同级。 */
+    async _selfHealOrphanSubtasks(projectId: string, list: Task[]): Promise<Task[]> {
+      if (!list.length) return list
+      // 收集所有已加载项目顶层任务的子任务 id（含本项目：同项目转换同样可能残留；
+      // 首载时 this.tasks[projectId] 尚未赋值，需把当前 list 自身的子任务一并纳入）
+      const subIds = new Set<string>()
+      for (const [pid, ts] of Object.entries(this.tasks)) {
+        for (const t of ts) {
+          for (const s of t.subtasks ?? []) subIds.add(s.id)
+        }
+      }
+      for (const t of list) {
+        for (const s of t.subtasks ?? []) subIds.add(s.id)
+      }
+      if (!subIds.size) return list
+      const orphans = list.filter((t) => subIds.has(t.id))
+      if (!orphans.length) return list
+      // 写墓碑（防对端按并集合并复活）→ 移除顶层残留
+      await this.upsertTombstones(
+        projectId,
+        orphans.map((t) => ({ id: t.id, updatedAt: t.updatedAt })),
+      )
+      logAudit('清理孤儿副本', safeDetail(`项目ID：${projectId}，移除 ${orphans.length} 条（已转成其他任务的子任务）`))
+      return list.filter((t) => !subIds.has(t.id))
+    },
     /** 把满足条件的重复模板标记为墓碑（R4 修复）：保留在列表内随文件传播删除，
      *  防止离线端把已删规则通过「并集合并」写回复活；已墓碑的不重复标记。
      *  返回被标记的项目集合（调用方决定落盘）。 */
@@ -2972,7 +3010,12 @@ export const useTasksStore = defineStore('tasks', {
         sort: target.subtasks?.length ?? 0,
         attachments: source.attachments ?? [],
       }
-      // 从源项目移除 source
+      // 从源项目移除 source（跨项目时先写墓碑：A 变成子任务后不再携带 projectId，
+      // 源项目残留副本无法被 filterTasksForProject 识别，对端合并会按「只在一侧出现则保留」
+      // 把旧副本并回源项目 → 顶层 A 与子任务 A 同时存在（复制）。墓碑确保跨设备合并时剔除。）
+      if (srcPid !== dstPid) {
+        void this.upsertTombstones(srcPid, [{ id: sourceId, updatedAt: source.updatedAt }])
+      }
       this.tasks[srcPid] = (this.tasks[srcPid] ?? []).filter((t) => t.id !== sourceId)
       if (srcPid !== dstPid) this._persist(srcPid)
       // 追加为目标任务的子任务并刷新
@@ -3034,6 +3077,10 @@ export const useTasksStore = defineStore('tasks', {
       this.tasks[snap.srcPid] = next
       this._persist(snap.srcPid)
       if (snap.srcPid !== snap.dstPid) this._persist(snap.dstPid)
+      // 跨项目撤销：转换时在源项目写了墓碑，A 已回到源项目活跃列表，移除墓碑避免残留语义混淆
+      if (snap.srcPid !== snap.dstPid) {
+        void this.removeTombstones(snap.srcPid, [snap.sourceId])
+      }
       // 4) 今日视图顺序：转换时已从 todayOrder 移除，撤销后按原位置放回
       if (snap.todayIndex >= 0 && !this.todayOrder.includes(snap.sourceId)) {
         const to = [...this.todayOrder]
