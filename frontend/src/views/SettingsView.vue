@@ -370,7 +370,7 @@ async function save() {
               >刷新</span>
             </div>
             <div v-if="callbackId" class="text-[11px] text-slate-400 leading-relaxed break-all">
-              消息通知回调（POST）：{{ callbackUrl }}，请求体（JSON 或表单）传 title / content / dst
+              消息通知回调（POST）：{{ callbackUrl }}，请求体（JSON 或表单）传 title / content / dst；字段支持常见别名（content 也认 body/text/message，title 也认 subject），自动识别嵌套字段，未命中时正文兜底为完整请求体
             </div>
             <button
               type="button"

@@ -9,11 +9,20 @@
   - dst 非法或发送失败：给账号配置的收件邮箱发一封「报错回显」邮件；
     回显邮件发送失败则仅记录日志，不重试、不影响响应。
 
+字段别名归一化（外部系统字段名可不同，无需改造对方）：
+  - content 也认 body/text/message/msg/description/summary/detail/data/payload 等；
+  - title 也认 subject/heading/name/event/msg_type 等；
+  - dst 也认 to/email/target/recipient 等；
+  - 自动递归下探嵌套对象（如企业微信 {"text":{"content":...}}、飞书 {"content":{"text":...}}，最多 3 层）；
+  - POST 未命中任何内容字段时，把整个请求体序列化作为正文兜底，保证邮件内容不为空。
+  想增加识别的字段名：在下方 _TITLE_KEYS / _CONTENT_KEYS / _DST_KEYS 元组里追加即可。
+
 账号侧接口（需登录，供设置页展示/刷新 ID）：
 - GET  /api/callback/info    查询当前账号回调 ID（无则自动生成并落库）
 - POST /api/callback/refresh 重新随机生成并落库（旧 ID 立即作废）
 """
 
+import json
 import secrets
 from email.utils import parseaddr
 
@@ -65,6 +74,89 @@ def _callback_params(title: str, content: str) -> str:
     return f"参数标题：{t or '(空)'}；参数正文：{c or '(空)'}"
 
 
+# =====================================================================
+# 字段别名归一化（方案1）
+# ---------------------------------------------------------------------
+# 外部系统的字段名和本系统语义不一致（如正文用 body 而非 content），
+# 这里按【优先级顺序】认领别名：排在前面的字段名优先，取第一个非空值。
+#
+# 【想增加识别的字段名】→ 在下方对应元组里追加即可，例如：
+#   _CONTENT_KEYS = (... "msg_content", "notification_text", ...)
+# 追加后，外部系统用该字段名传参也会被识别为邮件正文/主题/收件人。
+# 注意：越靠前优先级越高；原标准字段（content/title/dst）永远最优先。
+# =====================================================================
+_TITLE_KEYS = (
+    "title",          # 标准字段
+    "subject", "heading", "header", "headline", "name",
+    "event", "event_type", "msgtype", "msg_type", "type",
+)
+_CONTENT_KEYS = (
+    "content",        # 标准字段
+    "body", "text", "message", "msg", "description",
+    "summary", "detail", "data", "payload", "remark", "notice",
+    "content_text", "content_plain", "plain",
+)
+_DST_KEYS = (
+    "dst",            # 标准字段
+    "to", "to_email", "email", "target", "recipient",
+    "send_to", "notify_email", "mail", "mail_to", "address",
+)
+# 嵌套对象最多下探层数（如 data.payload.content 这种三层包裹）
+_NEST_DEPTH = 3
+
+
+def _first_string(data, keys: tuple, depth: int = 0) -> str:
+    """按 keys 优先级取第一个非空值：先查当前层直接键，再按值顺序递归下探嵌套（最多 _NEST_DEPTH 层）。"""
+    if data is None or depth > _NEST_DEPTH:
+        return ""
+    if isinstance(data, dict):
+        for k in keys:
+            v = data.get(k)
+            if isinstance(v, str):
+                if v.strip():
+                    return v
+            elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                return str(v)
+        for v in data.values():
+            found = _first_string(v, keys, depth + 1)
+            if found:
+                return found
+    elif isinstance(data, list):
+        for item in data[:5]:
+            found = _first_string(item, keys, depth + 1)
+            if found:
+                return found
+    return ""
+
+
+def _payload_fallback(data) -> str:
+    """兜底（方案3）：未命中任何内容字段时，把整个请求体序列化为文本，保证邮件正文非空。"""
+    try:
+        text = json.dumps(data, ensure_ascii=False)
+    except Exception:
+        text = str(data)
+    return _clip(text, 1500)
+
+
+def _extract_callback_params(data, *, fallback_content: bool = True) -> tuple[str, str, str]:
+    """从请求体/查询参数中按别名提取 (title, content, dst)。
+
+    - 请求体本身是字符串（如 JSON 字符串 body）：直接当作正文；
+    - POST 默认开启兜底（方案3）：未命中 content 且请求体非空时，整个请求体序列化作为正文；
+    - GET 关闭兜底（查询参数不该整包进正文），仍支持别名提取。
+    """
+    if isinstance(data, str):
+        return "", data, ""
+    if not isinstance(data, dict):
+        return "", "", ""
+    title = _first_string(data, _TITLE_KEYS)
+    content = _first_string(data, _CONTENT_KEYS)
+    dst = _first_string(data, _DST_KEYS)
+    if fallback_content and not content and data:
+        content = _payload_fallback(data)
+    return title, content, dst
+
+
 def _gen_callback_id(conn) -> str:
     """生成全账号唯一的 10 位纯数字随机 ID（与既有任意账号冲突则重抽）。"""
     while True:
@@ -93,13 +185,16 @@ def _ensure_callback_id(conn, username: str) -> str:
     return cid
 
 
-async def _parse_post_body(request: Request) -> dict:
-    """POST 请求体解析：兼容 JSON body 与表单（application/x-www-form-urlencoded）。"""
+async def _parse_post_body(request: Request) -> "dict | str":
+    """POST 请求体解析：兼容 JSON body 与表单（application/x-www-form-urlencoded）。
+
+    JSON 顶层可能是对象、字符串（整包即正文）或其它标量，原样返回，交给 _extract_callback_params 归一化。
+    """
     ctype = (request.headers.get("content-type") or "").lower()
     try:
         if "application/json" in ctype:
             data = await request.json()
-            return data if isinstance(data, dict) else {}
+            return data if isinstance(data, (dict, str)) else {}
         form = await request.form()
         return {k: str(v) for k, v in form.items()}
     except Exception:
@@ -258,8 +353,15 @@ async def callback_get(
     content: str = Query(default=""),
     dst: str = Query(default=""),
 ):
-    """公开回调入口（GET）：?id=随机数&title=主题&content=正文&dst=可选收件邮箱"""
-    return await _handle_callback(request, "GET", "/api/callback", id, title, content, dst)
+    """公开回调入口（GET）：?id=随机数&title=主题&content=正文&dst=可选收件邮箱；
+    title/content/dst 支持常见别名（如 ?body=正文&subject=主题&to=收件邮箱）"""
+    # 读取全部查询参数（含未声明的别名键，如 body/subject/to），再按别名提取
+    params = dict(request.query_params)
+    params.setdefault("title", title)
+    params.setdefault("content", content)
+    params.setdefault("dst", dst)
+    t, c, d = _extract_callback_params(params, fallback_content=False)
+    return await _handle_callback(request, "GET", "/api/callback", id, t, c, d)
 
 
 @router.post("/callback")
@@ -267,16 +369,20 @@ async def callback_post(
     request: Request,
     id: str = Query(default=""),
 ):
-    """公开回调入口（POST）：id 可放 URL（?id=）或请求体（JSON/表单，URL 优先），title/content/dst 放请求体"""
+    """公开回调入口（POST）：id 可放 URL（?id=）或请求体（JSON/表单，URL 优先）；
+    title/content/dst 从请求体提取，支持常见字段别名（如 body/text/message/subject），
+    可自动下探嵌套对象；未命中内容字段时兜底为整个请求体文本（方案3）。"""
     data = await _parse_post_body(request)
+    body_id = str(data.get("id", "")) if isinstance(data, dict) else ""
+    title, content, dst = _extract_callback_params(data)
     return await _handle_callback(
         request,
         "POST",
         "/api/callback",
-        id or str(data.get("id", "")),
-        str(data.get("title", "")),
-        str(data.get("content", "")),
-        str(data.get("dst", "")),
+        id or body_id,
+        title,
+        content,
+        dst,
     )
 
 
