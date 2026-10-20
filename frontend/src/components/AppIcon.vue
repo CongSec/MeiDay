@@ -92,6 +92,8 @@ const ICONS: Record<string, string> = {
   'rotate-ccw': '<path d="M3 12a9 9 0 1 0 2.8-6.5"/><path d="M3 4v4.5h4.5"/>',
   chat: '<path d="M21 12a8.5 8.5 0 0 1-13 7.2L4 21l1.8-4.2A8.5 8.5 0 1 1 21 12z"/>',
   megaphone: '<path d="M4 9.5v5a1.5 1.5 0 0 0 1.5 1.5H7l-1 5h3l1.5-5h3l6.5 3.5v-15L13.5 8h-8A1.5 1.5 0 0 0 4 9.5z"/><path d="M20 9.5a3.5 3.5 0 0 1 0 5"/>',
+  // 子任务：分支/层级（主任务下挂着一组子项）
+  branch: '<path d="M6 3v9"/><circle cx="18" cy="6.5" r="2.4"/><circle cx="6" cy="17.5" r="2.4"/><path d="M18 8.9a9.2 9.2 0 0 1-9.2 9.2"/>',
 }
 
 const inner = computed(() => ICONS[props.name] ?? '')

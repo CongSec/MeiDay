@@ -257,12 +257,6 @@ async function onToggle(id: string) {
   ui.toast(completing ? '任务已完成，已同步到服务端' : '已取消完成，已同步到服务端')
 }
 
-function onAddSubtask(task: Task) {
-  subtaskParent.value = task
-  editingSubtask.value = null
-  modalOpen.value = true
-}
-
 function onEditSubtask(task: Task, sub: Subtask) {
   subtaskParent.value = task
   editingSubtask.value = sub
@@ -385,7 +379,6 @@ async function confirmDelete() {
               warm
               @edit="openEdit"
               @toggle="onToggle"
-              @add-subtask="onAddSubtask"
               @edit-subtask="onEditSubtask"
               @toggle-subtask="onToggleSubtask"
               @remove-subtask="onRemoveSubtask"
@@ -484,6 +477,7 @@ async function confirmDelete() {
         title="存入时间胶囊"
         message="确定将该任务存入时间胶囊吗？可在时间胶囊恢复。"
         confirm-text="存入时间胶囊"
+        confirm-icon="trash"
         @confirm="confirmDelete"
         @cancel="deleteTarget = null"
       />

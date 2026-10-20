@@ -1,10 +1,13 @@
 <script setup lang="ts">
+import AppIcon from './AppIcon.vue'
 withDefaults(
   defineProps<{
     open: boolean
     title: string
     message: string
     confirmText?: string
+    /** 确认键图标：非空时确认键渲染为纯图标按钮，原文字转为悬停提示 */
+    confirmIcon?: string
     danger?: boolean
     /** 确认/取消按钮禁用（异步保存进行中防重复提交） */
     disabled?: boolean
@@ -31,12 +34,17 @@ const emit = defineEmits<{ confirm: []; cancel: [] }>()
           取消
         </button>
         <button
-          class="px-4 py-2 rounded-lg text-sm text-white font-medium disabled:opacity-60"
-          :class="danger ? 'bg-red-500 hover:bg-red-600' : 'bg-brand hover:bg-brand-dark'"
+          class="rounded-lg text-sm text-white font-medium disabled:opacity-60"
+          :class="[
+            danger ? 'bg-red-500 hover:bg-red-600' : 'bg-brand hover:bg-brand-dark',
+            confirmIcon ? 'w-9 h-9 flex items-center justify-center' : 'px-4 py-2',
+          ]"
           :disabled="disabled"
+          :title="confirmIcon ? confirmText : undefined"
           @click="emit('confirm')"
         >
-          {{ confirmText }}
+          <AppIcon v-if="confirmIcon" :name="confirmIcon" :size="15" />
+          <template v-else>{{ confirmText }}</template>
         </button>
       </div>
     </div>

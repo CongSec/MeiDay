@@ -79,7 +79,7 @@ const projectId = ref('')
 const status = ref<'pending' | 'completed'>('pending')
 const err = ref('')
 
-/** 时间胶囊编辑：子任务本地编辑列表（新增/勾选/编辑/删除；保存时随主任务写回胶囊，不丢子任务附件） */
+/** 子任务本地编辑列表（新增/勾选/编辑/删除；保存时随主任务写回，普通编辑与时间胶囊编辑共用，不丢子任务附件） */
 const capsuleSubs = ref<Subtask[]>([])
 /** 正在编辑的子任务下标：-1 = 新增，null = 未在编辑 */
 const capsuleSubEditIndex = ref<number | null>(null)
@@ -136,6 +136,16 @@ watch(repeatEnabled, (v) => {
     if (orig) reminder.value = toLocalInput(orig)
   }
 })
+
+/** 用户勾选「重复任务」：清空开始/截止时间（重复任务周期由规则相位 rule.start 决定，开始/截止不参与）；
+ *  仅用户手动勾选时触发（@change），打开已是重复任务的编辑弹窗不会被清空；
+ *  输入框不锁定，用户仍可手动再填开始/截止时间 */
+function onRepeatToggle() {
+  if (repeatEnabled.value) {
+    start.value = ''
+    end.value = ''
+  }
+}
 
 
 /** 新建任务时提前生成 id，供附件 OSS 路径与最终任务共用 */
@@ -232,8 +242,8 @@ watch(
     attachments.value = [...(isSub ? (s?.attachments ?? []) : (t?.attachments ?? []))]
     originalIds.value = new Set(attachments.value.map((a) => a.id))
     removedAttachments.value = []
-    // 时间胶囊编辑：初始化子任务本地列表（副本，避免直接改胶囊数据）
-    capsuleSubs.value = props.capsuleEdit ? [...(t?.subtasks ?? [])].map((s) => ({ ...s })) : []
+    // 子任务本地编辑列表（普通编辑与时间胶囊编辑共用：副本，避免直接改任务数据）
+    capsuleSubs.value = isSub ? [] : [...(t?.subtasks ?? [])].map((s) => ({ ...s }))
     capsuleSubEditIndex.value = null
     savedFlag.value = false
     previewMeta.value = null
@@ -790,8 +800,8 @@ async function submit() {
     createdAt: props.task?.createdAt ?? now,
     // 时间胶囊编辑：保留完成/入舱时间不变（决定所在分片与排序，不能刷新为当前时间）
     updatedAt: props.capsuleEdit ? (props.task?.updatedAt ?? now) : now,
-    // 编辑主任务时原样保留已有子任务，避免保存时丢失
-    subtasks: props.capsuleEdit ? capsuleSubs.value : (props.task?.subtasks ?? []),
+    // 编辑主任务时原样保留已有子任务，避免保存时丢失；子任务面板里的新增/修改随保存写回
+    subtasks: capsuleSubs.value,
     attachments: attachments.value,
   }
   task.repeat = repeat
@@ -903,8 +913,6 @@ onUnmounted(() => {
           <div>
             <label class="text-xs text-slate-500 block mb-0.5">提醒时间</label>
             <input v-model="reminder" :type="isNewStyleRepeatTask ? 'time' : 'datetime-local'" class="w-full min-w-0 border rounded-lg px-2 py-1.5 text-sm" />
-            <!-- 快捷时长：点一下按「当前时刻 + 时长」自动填提醒时间（重复任务只填时分） -->
-            <QuickDurationChips :mode="isNewStyleRepeatTask ? 'time' : 'datetime'" @apply="reminder = $event" />
           </div>
           <div v-if="!subtaskMode">
             <label class="text-xs text-slate-500 block mb-0.5">所属项目</label>
@@ -915,15 +923,18 @@ onUnmounted(() => {
           <div v-else></div>
         </div>
 
+        <!-- 快捷时长整行：点一下按「当前时刻 + 时长」自动填提醒时间（重复任务只填时分） -->
+        <QuickDurationChips :mode="isNewStyleRepeatTask ? 'time' : 'datetime'" @apply="reminder = $event" />
+
         <!-- 重复任务（仅主任务）：完成后按周期自动生成下一任务，所有属性保持一致，仅日期顺延。
              点击目标收敛到勾选框本身：整行/文字/图标不再触发切换，避免误勾选 -->
         <div v-if="!subtaskMode" class="rounded-lg border border-slate-100 p-2.5">
           <div class="flex items-center gap-2 text-xs text-slate-600 select-none">
             <label class="inline-flex items-center cursor-pointer" title="勾选启用重复任务">
-              <input v-model="repeatEnabled" type="checkbox" class="accent-brand" />
+              <input v-model="repeatEnabled" type="checkbox" class="accent-brand" @change="onRepeatToggle" />
             </label>
             <AppIcon name="repeat" :size="14" class="text-brand shrink-0" />
-            <span>重复任务（到期当天自动显示；提醒邮件由服务器按时发送）</span>
+            <span>重复任务</span>
           </div>
           <div v-if="repeatEnabled" class="grid grid-cols-2 gap-2 pt-2">
             <div>
@@ -1036,8 +1047,8 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- 子任务（时间胶囊编辑）：可直接新增/勾选/编辑/删除，保存时随主任务写回胶囊 -->
-        <div v-if="capsuleEdit && !subtaskMode" class="rounded-lg border border-slate-100 p-2.5">
+        <!-- 子任务管理：普通编辑、重复任务/未来模板编辑、时间胶囊编辑共用（可直接新增/勾选/编辑/删除，保存时随主任务写回；子任务会随重复模板同步到后续出现） -->
+        <div v-if="!subtaskMode" class="rounded-lg border border-slate-100 p-2.5">
           <div class="flex items-center justify-between">
             <label class="text-xs text-slate-500">子任务</label>
             <button
@@ -1225,10 +1236,11 @@ onUnmounted(() => {
             </button>
             <button
               type="button"
-              class="px-3 py-1.5 rounded-lg text-xs text-red-500 border border-red-200 hover:bg-red-50"
+              class="shrink-0 w-8 h-8 flex items-center justify-center rounded-lg text-red-500 border border-red-200 hover:bg-red-50"
+              title="存入时间胶囊"
               @click="askDelete"
             >
-              存入时间胶囊
+              <AppIcon name="trash" :size="15" />
             </button>
           </div>
           <div class="flex justify-end gap-2 ml-auto">

@@ -165,12 +165,6 @@ async function onToggle(id: string) {
   ui.toast(completing ? '任务已完成，已同步到服务端' : '已取消完成，已同步到服务端')
 }
 
-function onAddSubtask(task: Task) {
-  subtaskParent.value = task
-  editingSubtask.value = null
-  taskModalOpen.value = true
-}
-
 function onEditSubtask(task: Task, sub: Subtask) {
   subtaskParent.value = task
   editingSubtask.value = sub
@@ -254,11 +248,11 @@ async function confirmDelete() {
             <AppIcon name="edit" :size="13" /> 编辑
           </button>
           <button
-            class="text-xs text-slate-400 hover:text-red-500 flex items-center gap-1 btn-press"
+            class="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 btn-press"
             title="存入时间胶囊：项目及其任务存入其中，可恢复整个项目"
             @click="askTrashProject"
           >
-            <AppIcon name="trash" :size="13" /> 存入时间胶囊
+            <AppIcon name="trash" :size="13" />
           </button>
         </div>
         <button
@@ -277,11 +271,11 @@ async function confirmDelete() {
           <AppIcon name="edit" :size="12" /> 编辑
         </button>
         <button
-          class="text-[11px] text-slate-400 hover:text-red-500 flex items-center gap-1"
+          class="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50"
           title="存入时间胶囊"
           @click="askTrashProject"
         >
-          <AppIcon name="trash" :size="12" /> 存入时间胶囊
+          <AppIcon name="trash" :size="13" />
         </button>
       </div>
 
@@ -294,7 +288,6 @@ async function confirmDelete() {
             :project="project"
             @edit="openEdit"
             @toggle="onToggle"
-            @add-subtask="onAddSubtask"
             @edit-subtask="onEditSubtask"
             @toggle-subtask="onToggleSubtask"
             @remove-subtask="onRemoveSubtask"
@@ -327,7 +320,6 @@ async function confirmDelete() {
               :project="project"
               @edit="openEdit"
               @toggle="onToggle"
-              @add-subtask="onAddSubtask"
               @edit-subtask="onEditSubtask"
               @toggle-subtask="onToggleSubtask"
               @remove-subtask="onRemoveSubtask"
@@ -357,6 +349,7 @@ async function confirmDelete() {
       title="存入时间胶囊"
       message="确定将该任务存入时间胶囊吗？可在时间胶囊恢复。"
       confirm-text="存入时间胶囊"
+      confirm-icon="trash"
       @confirm="confirmDelete"
       @cancel="deleteTarget = null"
     />
@@ -365,6 +358,7 @@ async function confirmDelete() {
       title="存入时间胶囊"
       message="项目及其下所有任务将存入时间胶囊，可在时间胶囊「恢复整个项目」。确定存入时间胶囊吗？"
       confirm-text="存入时间胶囊"
+      confirm-icon="trash"
       :danger="true"
       @confirm="confirmTrashProject"
       @cancel="trashProjectOpen = false"

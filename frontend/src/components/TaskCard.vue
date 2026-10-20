@@ -16,7 +16,6 @@ const emit = defineEmits<{
   edit: [Task]
   toggle: [string]
   delete: [string]
-  addSubtask: [Task]
   editSubtask: [Task, Subtask]
   toggleSubtask: [taskId: string, subId: string]
   removeSubtask: [taskId: string, subId: string]
@@ -51,6 +50,17 @@ const overdue = computed(() => {
 const warm = computed(() => !!props.warm)
 
 const hasSubtasks = computed(() => (props.task.subtasks?.length ?? 0) > 0)
+
+/** 右侧竖列是否显示：提醒/开始/截止时间、重复规则、附件任一存在时渲染（未来任务卡除外） */
+const rightMetaVisible = computed(() =>
+  !!(
+    props.task.reminderTime ||
+    props.task.startTime ||
+    props.task.endTime ||
+    props.task.repeat ||
+    (props.task.attachments?.length ?? 0) > 0
+  ),
+)
 
 /** 展开/折叠状态按 用户+任务 记忆到 localStorage（登出换账号互不干扰） */
 const expandedKey = computed(() => `st_subtask_open:${auth.username}:${props.task.id}`)
@@ -87,11 +97,6 @@ const futureDateLabel = computed(() => {
 /** 子任务是否已过提醒时间（未完成） */
 function subOverdue(s: Subtask) {
   return !s.completed && !!s.reminderTime && new Date(s.reminderTime).getTime() <= now.value
-}
-
-function onAddSubtask() {
-  expanded.value = true
-  emit('addSubtask', props.task)
 }
 
 /** 子任务本地排序副本：进入/新增/同步合并时按统一链「手动 sort > 提醒 > 开始 > 创建时间」排序；
@@ -147,7 +152,7 @@ function onSubDragEnd() {
 <template>
   <div
     ref="cardRoot"
-    class="task-card group bg-white rounded-xl shadow-card border border-line p-4 transition hover:shadow-lift"
+    class="task-card group bg-white rounded-xl shadow-card border border-line p-3 transition hover:shadow-lift"
     :data-task-id="task.id"
     :data-future="future ? '1' : '0'"
     :class="[
@@ -157,8 +162,8 @@ function onSubDragEnd() {
     ]"
     @click="emit('edit', task)"
   >
-    <div class="flex items-start gap-3">
-      <label class="pt-0.5 shrink-0 cursor-pointer select-none" :title="future ? '提前完成该任务' : '标记完成 / 取消完成'" @click.stop>
+    <div class="flex items-center gap-3 overflow-hidden">
+      <label class="shrink-0 cursor-pointer select-none" :title="future ? '提前完成该任务' : '标记完成 / 取消完成'" @click.stop>
         <input
           type="checkbox"
           class="sr-only"
@@ -175,7 +180,7 @@ function onSubDragEnd() {
         </span>
       </label>
       <div class="flex-1 min-w-0">
-        <div class="flex items-center gap-2">
+        <div class="flex items-center gap-2 min-w-0">
           <button
             v-if="hasSubtasks && !future"
             class="shrink-0 w-6 h-6 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-100 hover:text-slate-800 flex items-center justify-center text-base leading-none"
@@ -185,8 +190,9 @@ function onSubDragEnd() {
             <AppIcon :name="expanded ? 'chevron-down' : 'chevron-right'" :size="14" />
           </button>
           <span
-            class="font-medium text-sm"
+            class="font-medium text-sm truncate"
             :class="task.status === 'completed' ? 'line-through text-slate-400' : 'text-slate-800'"
+            :title="task.name"
           >
             {{ task.name || '未命名任务' }}
           </span>
@@ -197,21 +203,14 @@ function onSubDragEnd() {
           >
             未来
           </span>
-          <span v-if="overdue" class="text-red-500" title="已过提醒时间"><AppIcon name="bell" :size="15" /></span>
+          <span v-if="overdue" class="shrink-0 text-red-500" title="已过提醒时间"><AppIcon name="bell" :size="15" /></span>
         </div>
         <p v-if="task.description" class="mt-1 text-xs text-slate-500 clamp-2">{{ task.description }}</p>
-        <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1.5 text-[11px] text-slate-400">
+        <!-- 未来任务卡：保持原有 meta 行（下次出现时间 / 提醒 / 重复 / 附件） -->
+        <div v-if="future" class="mt-1 flex flex-wrap gap-x-4 gap-y-1.5 text-[11px] text-slate-400">
           <span v-if="futureDate" class="inline-flex items-center gap-1" :class="warm ? 'text-amber-600' : 'text-brand/90'" title="下一次出现时间">
             <AppIcon name="calendarFuture" :size="12" />下次 {{ futureDateLabel }}
           </span>
-          <template v-else>
-            <span v-if="task.startTime" class="inline-flex items-center gap-1">
-              <AppIcon name="calendar" :size="12" />{{ dateStr(task.startTime) }}
-            </span>
-            <span v-if="task.endTime" class="inline-flex items-center gap-1">
-              <AppIcon name="clock" :size="12" />{{ dateStr(task.endTime) }}
-            </span>
-          </template>
           <span v-if="task.reminderTime" class="inline-flex items-center gap-1">
             <AppIcon name="bell" :size="12" />{{ timeStr(task.reminderTime) }}
           </span>
@@ -228,44 +227,60 @@ function onSubDragEnd() {
             <AppIcon name="paperclip" :size="12" />{{ task.attachments.length }}
           </span>
         </div>
+        <!-- 子任务进度（无子任务时不显示）：分支图标 + 进度数字，进度条随内容区宽度 -->
+        <div v-if="subProgress" class="mt-1">
+          <div class="flex items-center gap-2 text-[11px] text-slate-400">
+            <span class="inline-flex items-center gap-1" :title="`子任务进度：${subProgress.done}/${subProgress.total}`">
+              <AppIcon name="branch" :size="12" />{{ subProgress.done }}/{{ subProgress.total }}
+            </span>
+          </div>
+          <div class="mt-1 h-1 rounded-full bg-slate-100 overflow-hidden">
+            <div
+              class="h-full rounded-full transition-all"
+              :class="subProgress.done === subProgress.total ? 'bg-emerald-500' : (warm ? 'bg-amber-500' : 'bg-brand')"
+              :style="{ width: `${(subProgress.done / subProgress.total) * 100}%` }"
+            />
+          </div>
+        </div>
       </div>
-      <button
-        v-if="!future"
-        class="shrink-0 w-7 h-7 flex items-center justify-center rounded-lg border btn-press"
-        :class="warm ? 'border-amber-300 text-amber-600 hover:bg-amber-500/5 hover:border-amber-400' : 'border-brand/30 text-brand hover:bg-brand/5 hover:border-brand/50'"
-        title="添加子任务"
-        @click.stop="onAddSubtask"
-      >
-        <AppIcon name="plus" :size="15" />
-      </button>
+      <!-- 最右侧竖列（高度由内容决定、项间无空隙紧凑排列）：提醒贴顶；右侧列为最高内容时末行自然贴底；开始/截止精确到时分；重复只显示图标 -->
+      <div v-if="!future && rightMetaVisible" class="shrink-0 self-stretch flex flex-col items-end min-w-0 text-[11px] text-slate-400">
+        <span v-if="task.reminderTime" class="inline-flex items-center gap-1" title="提醒时间">
+          <AppIcon name="bell" :size="12" />{{ timeStr(task.reminderTime) }}
+        </span>
+        <span v-if="task.startTime" class="inline-flex items-center gap-1" title="开始时间">
+          <AppIcon name="calendar" :size="12" />{{ timeStr(task.startTime) }}
+        </span>
+        <span v-if="task.endTime" class="inline-flex items-center gap-1" title="截止时间">
+          <AppIcon name="clock" :size="12" />{{ timeStr(task.endTime) }}
+        </span>
+        <span v-if="task.repeat || (task.attachments?.length ?? 0) > 0" class="inline-flex items-center gap-2">
+          <AppIcon
+            v-if="task.repeat"
+            name="repeat"
+            :size="12"
+            :class="warm ? 'text-amber-600' : 'text-brand/90'"
+            :title="`重复任务：${formatRepeat(task.repeat)}`"
+          />
+          <span
+            v-if="(task.attachments?.length ?? 0) > 0"
+            class="inline-flex items-center gap-1 cursor-pointer"
+            :class="warm ? 'text-amber-600' : 'text-brand/80'"
+            :title="`${task.attachments.length} 个附件，点击打开查看/预览`"
+            @click.stop="emit('edit', task)"
+          >
+            <AppIcon name="paperclip" :size="12" />{{ task.attachments.length }}
+          </span>
+        </span>
+      </div>
     </div>
 
-    <!-- 子任务进度条：与主任务框同宽对齐 -->
-    <div v-if="subProgress" class="mt-2">
-      <div class="flex items-center gap-2 text-[11px] text-slate-400">
-        <span class="inline-flex items-center gap-1"><AppIcon name="check-circle" :size="12" />子任务 {{ subProgress.done }}/{{ subProgress.total }}</span>
-      </div>
-      <div class="mt-1 h-1 rounded-full bg-slate-100 overflow-hidden">
-        <div
-          class="h-full rounded-full transition-all"
-          :class="subProgress.done === subProgress.total ? 'bg-emerald-500' : (warm ? 'bg-amber-500' : 'bg-brand')"
-          :style="{ width: `${(subProgress.done / subProgress.total) * 100}%` }"
-        />
-      </div>
-    </div>
-
-    <!-- 展开后显示子任务（全宽展示，新增/编辑走弹窗） -->
+    <!-- 展开后显示子任务（全宽展示；新增/编辑子任务请打开编辑任务弹窗） -->
     <div v-if="expanded && hasSubtasks && !future" class="mt-3 border-t border-slate-100 pt-2" @click.stop>
       <div class="flex items-center justify-between mb-2">
-        <span class="text-[11px] font-medium text-slate-400">子任务明细</span>
-        <button
-          class="text-[11px] px-2 py-0.5 rounded-md font-medium"
-          :class="warm ? 'text-amber-600 hover:bg-amber-500/5' : 'text-brand hover:bg-brand/5'"
-          title="添加子任务"
-          @click="onAddSubtask"
-        >
-          <span class="inline-flex items-center gap-1"><AppIcon name="plus" :size="11" />添加子任务</span>
-        </button>
+        <span class="text-[11px] font-medium text-slate-400 inline-flex items-center gap-1">
+          <AppIcon name="branch" :size="12" />明细
+        </span>
       </div>
       <VueDraggable v-model="subDragList" v-bind="subDragOptions" item-key="id" class="space-y-1.5" @start="onSubDragStart" @move="onSubDragMove" @end="onSubDragEnd">
         <div

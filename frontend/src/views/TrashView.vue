@@ -1375,7 +1375,7 @@ async function confirmCalendarDelete() {
                 v-for="t in mg.tasks"
                 :key="t.id"
                 v-memo="[t.id, t.name, t.status, t.updatedAt, t.projectId, searchQuery, timeField, statusCompleted, statusDeleted]"
-                class="cursor-pointer bg-white rounded-lg border border-slate-200 p-4 flex items-center gap-3 hover:bg-slate-50/60"
+                class="cursor-pointer bg-white rounded-lg border border-slate-200 p-4 flex flex-wrap items-center gap-3 hover:bg-slate-50/60"
                 title="点击编辑该任务"
                 @click="openEdit(t)"
               >
@@ -1405,26 +1405,29 @@ async function confirmCalendarDelete() {
                   <span v-if="hitHintOf(t)" class="text-brand/70">{{ hitHintOf(t) }}</span>
                 </div>
               </div>
-              <button
-                class="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs text-slate-600 border border-slate-200 hover:bg-slate-50 shrink-0"
-                title="编辑任务"
-                @click.stop="openEdit(t)"
-              >
-                <AppIcon name="edit" :size="13" class="shrink-0" />
-                编辑
-              </button>
-              <button
-                class="px-3 py-1.5 rounded-lg text-xs text-brand border border-brand/30 hover:bg-brand/5 shrink-0"
-                @click.stop="restore(t)"
-              >
-                恢复
-              </button>
-              <button
-                class="px-3 py-1.5 rounded-lg text-xs text-red-500 border border-red-200 hover:bg-red-50 shrink-0"
-                @click.stop="askDelete(t)"
-              >
-                永久删除
-              </button>
+              <!-- 操作按钮：窄屏换行到下一行并均分宽度，任务信息占满整行；宽屏保持右侧横排 -->
+              <div class="w-full sm:w-auto flex items-center gap-1.5">
+                <button
+                  class="inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg text-xs text-slate-600 border border-slate-200 hover:bg-slate-50 flex-1 sm:flex-none shrink-0"
+                  title="编辑任务"
+                  @click.stop="openEdit(t)"
+                >
+                  <AppIcon name="edit" :size="13" class="shrink-0" />
+                  编辑
+                </button>
+                <button
+                  class="px-3 py-1.5 rounded-lg text-xs text-brand border border-brand/30 hover:bg-brand/5 flex-1 sm:flex-none shrink-0"
+                  @click.stop="restore(t)"
+                >
+                  恢复
+                </button>
+                <button
+                  class="px-3 py-1.5 rounded-lg text-xs text-red-500 border border-red-200 hover:bg-red-50 flex-1 sm:flex-none shrink-0"
+                  @click.stop="askDelete(t)"
+                >
+                  永久删除
+                </button>
+              </div>
             </div>
             </div>
         </div>
@@ -1536,6 +1539,7 @@ async function confirmCalendarDelete() {
       title="存入时间胶囊"
       message="确定将该任务存入时间胶囊吗？将仅删除对应那一天的重复出现，可在时间胶囊恢复。"
       confirm-text="存入时间胶囊"
+      confirm-icon="trash"
       @confirm="confirmCalendarDelete"
       @cancel="capsuleTarget = null"
     />
