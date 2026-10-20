@@ -362,12 +362,15 @@ async function save() {
           </div>
           <div v-if="f.key === 'notifyEmail'" class="pt-1">
             <div v-if="callbackId" class="text-[11px] text-slate-400 leading-relaxed break-all">
-              消息通知回调：{{ callbackUrl }}&amp;title=邮件标题&amp;content=邮件正文&amp;dst=指定收件邮箱(可选)
+              消息通知回调（GET）：{{ callbackUrl }}&amp;title=邮件标题&amp;content=邮件正文&amp;dst=指定收件邮箱(可选)
               <span
                 class="cursor-pointer select-none text-brand whitespace-nowrap"
                 :class="{ 'opacity-60 pointer-events-none': callbackBusy }"
                 @click="refreshCallbackId"
               >刷新</span>
+            </div>
+            <div v-if="callbackId" class="text-[11px] text-slate-400 leading-relaxed break-all">
+              消息通知回调（POST）：{{ callbackUrl }}，请求体（JSON 或表单）传 title / content / dst
             </div>
             <button
               type="button"

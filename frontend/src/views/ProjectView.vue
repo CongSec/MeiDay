@@ -2,7 +2,7 @@
 import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { VueDraggable } from 'vue-draggable-plus'
-import { getDragOptions, setDragging, beginSubtaskDrop, updateSubtaskDrop, endSubtaskDrop } from '@/utils/drag'
+import { getDragOptions, setDragging, beginSubtaskDrop, updateSubtaskDrop, endSubtaskDrop, cancelSubtaskDrop } from '@/utils/drag'
 import { useProjectsStore } from '@/stores/projects'
 import { useTasksStore } from '@/stores/tasks'
 import { useUiStore } from '@/stores/ui'
@@ -71,24 +71,45 @@ function onDragStart(evt?: { oldIndex?: number; item?: HTMLElement | null }) {
   if (dragSourceId) beginSubtaskDrop(dragSourceId, evt?.item)
 }
 
-function onDragMove(evt: { related?: HTMLElement | null; originalEvent?: DragEvent | MouseEvent | TouchEvent | null }) {
-  updateSubtaskDrop(evt)
+function onDragMove(evt: { related?: HTMLElement | null; originalEvent?: DragEvent | MouseEvent | TouchEvent | null }): boolean {
+  // @move 即 Sortable onMove：永远返回 false → 关闭实时重排（列表静止，配合插入线 + 整卡落点）
+  return updateSubtaskDrop(evt)
 }
 
 function onDragEnd() {
   setDragging(false)
-  const targetId = endSubtaskDrop()
+  const { targetId, insertIndex } = endSubtaskDrop()
   const sourceId = dragSourceId
   dragSourceId = null
   // 落到另一张任务卡上 → 把被拖任务设为该任务的子任务
   if (sourceId && targetId && targetId !== sourceId) {
     const ok = tasks.convertTaskToSubtask(sourceId, targetId)
-    if (ok) ui.toast('已设为子任务')
+    if (ok) {
+      ui.toast('已设为子任务', 'ok', {
+        label: '撤销',
+        onClick: () => {
+          if (tasks.undoSubtaskConversion()) ui.toast('已撤销，任务已还原')
+        },
+      })
+    }
     return
   }
-  const full = tasks.tasks[projectId.value] ?? []
-  const done = full.filter((t) => t.status !== 'pending')
-  tasks.setOrder(projectId.value, [...dragList.value, ...done])
+  // 方向1：无实时重排，按插入线位置手动重排项目待办顺序（已完成任务保持在折叠区尾部）
+  if (sourceId && insertIndex >= 0) {
+    const srcIdx = dragList.value.findIndex((t) => t.id === sourceId)
+    if (srcIdx >= 0) {
+      const source = dragList.value[srcIdx]
+      let at = insertIndex
+      const arr = [...dragList.value]
+      arr.splice(srcIdx, 1)
+      if (at > srcIdx) at--
+      at = Math.max(0, Math.min(at, arr.length))
+      arr.splice(at, 0, source)
+      const full = tasks.tasks[projectId.value] ?? []
+      const done = full.filter((t) => t.status !== 'pending')
+      tasks.setOrder(projectId.value, [...arr, ...done])
+    }
+  }
 }
 
 /** 手机端头部「新建任务」由本页注册（随路由切换） */
@@ -106,6 +127,7 @@ onMounted(async () => {
 })
 onUnmounted(() => {
   setDragging(false)
+  cancelSubtaskDrop()
   tasks.unpinViewProject(projectId.value)
   if (mobileActions) {
     mobileActions.newTask = null
@@ -280,7 +302,7 @@ async function confirmDelete() {
       </div>
 
       <div class="mt-4">
-        <VueDraggable v-model="dragList" v-bind="dragOptions" item-key="id" class="space-y-2" @start="onDragStart" @move="onDragMove" @end="onDragEnd">
+        <VueDraggable v-model="dragList" v-bind="dragOptions" item-key="id" class="drag-list space-y-2" @start="onDragStart" @move="onDragMove" @end="onDragEnd">
           <TaskCard
             v-for="t in dragList"
             :key="t.id"

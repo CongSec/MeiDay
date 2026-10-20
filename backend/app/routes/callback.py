@@ -1,7 +1,8 @@
 """消息通知回调（Webhook）：外部系统调用本接口触发邮件通知。
 
 - GET  /api/callback?id=<10位随机数>&title=xxx&content=xxx&dst=xxx
-- POST /api/callback               （JSON body 或表单：id/title/content/dst）
+- POST /api/callback?id=<10位随机数>  （id 放 URL；title/content/dst 放请求体：JSON 或表单）
+- POST /api/callback                 （id/title/content/dst 全放请求体：JSON 或表单）
   公开接口，无需登录，凭 id 鉴权到对应账号；用该账号的 SMTP 配置发信。
   - title 作邮件主题、content 作邮件正文；
   - dst 可选：合法则发往 dst，缺省/留空发往账号配置的收件邮箱；
@@ -262,14 +263,17 @@ async def callback_get(
 
 
 @router.post("/callback")
-async def callback_post(request: Request):
-    """公开回调入口（POST）：JSON body 或表单，字段 id/title/content/dst"""
+async def callback_post(
+    request: Request,
+    id: str = Query(default=""),
+):
+    """公开回调入口（POST）：id 可放 URL（?id=）或请求体（JSON/表单，URL 优先），title/content/dst 放请求体"""
     data = await _parse_post_body(request)
     return await _handle_callback(
         request,
         "POST",
         "/api/callback",
-        str(data.get("id", "")),
+        id or str(data.get("id", "")),
         str(data.get("title", "")),
         str(data.get("content", "")),
         str(data.get("dst", "")),

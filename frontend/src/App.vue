@@ -60,6 +60,13 @@ onMounted(() => {
         <AppIcon :name="t.type === 'ok' ? 'check' : 'alert'" :size="12" :stroke-width="2.5" />
       </span>
       {{ t.text }}
+      <button
+        v-if="t.action"
+        class="ml-0.5 shrink-0 rounded-full bg-white/20 hover:bg-white/30 px-3 py-1 text-xs font-medium transition"
+        @click.stop="t.action!.onClick(); ui.dismiss(t.id)"
+      >
+        {{ t.action.label }}
+      </button>
     </div>
   </div>
 </template>

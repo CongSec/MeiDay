@@ -649,6 +649,24 @@ if (typeof window !== 'undefined') {
     }
   }, 60_000)
 }
+
+/** 「设为子任务」撤销快照：记录转换前的归属/顺序/状态，供 undoSubtaskConversion 还原 */
+interface SubtaskConversionSnapshot {
+  sourceId: string
+  targetId: string
+  srcPid: string
+  dstPid: string
+  srcIndex: number
+  srcSort: number | undefined
+  srcStatus: Task['status']
+  srcIsReminded: boolean
+  /** 在今日顺序表中的原位置（<0 表示不在表中） */
+  todayIndex: number
+}
+
+/** 最近一次“设为子任务”转换的快照（一次只会发生一个拖拽转换，单例足够） */
+let subtaskConversionSnapshot: SubtaskConversionSnapshot | null = null
+
 export const useTasksStore = defineStore('tasks', {
   state: () => ({
     tasks: {} as Record<string, Task[]>,
@@ -2927,6 +2945,20 @@ export const useTasksStore = defineStore('tasks', {
       const srcPid = source.projectId
       const dstPid = target.projectId
       const now = nowIso()
+      // 记录转换前快照（供撤销还原）：原位置/排序/状态/提醒标记/今日顺序
+      const srcList = this.tasks[srcPid] ?? []
+      const srcIndex = Math.max(0, srcList.findIndex((t) => t.id === sourceId))
+      subtaskConversionSnapshot = {
+        sourceId,
+        targetId,
+        srcPid,
+        dstPid,
+        srcIndex,
+        srcSort: source.sort,
+        srcStatus: source.status,
+        srcIsReminded: source.isReminded,
+        todayIndex: this.todayOrder.indexOf(sourceId),
+      }
       const sub: Subtask = {
         id: source.id,
         name: source.name,
@@ -2954,6 +2986,63 @@ export const useTasksStore = defineStore('tasks', {
       // 完成状态不保留：已完成任务转为未完成子任务，回退当日完成统计
       if (source.status === 'completed') void useStatsStore().addDelta(-1, source.id)
       logAudit('设为子任务', safeDetail(`任务ID：${sourceId}，项目ID：${srcPid} → 父任务ID：${targetId}，项目ID：${dstPid}`))
+      return true
+    },
+    /**
+     * 撤销「设为子任务」：按转换前快照把被拖任务从父任务子任务中移出、放回原项目/位置，
+     * 还原完成状态、今日顺序与当日统计；若期间任务已被改动（如已提升为顶层）则安全失败。
+     */
+    undoSubtaskConversion(): boolean {
+      const snap = subtaskConversionSnapshot
+      if (!snap) return false
+      subtaskConversionSnapshot = null
+      const target = this.all.find((t) => t.id === snap.targetId)
+      if (!target) return false
+      const subs = target.subtasks ?? []
+      const subIdx = subs.findIndex((s) => s.id === snap.sourceId)
+      if (subIdx < 0) {
+        useUiStore().toast('任务已被改动，无法撤销', 'error')
+        return false
+      }
+      const sub = subs[subIdx]
+      const now = nowIso()
+      // 1) 从父任务移除该子任务
+      target.subtasks = subs.filter((s) => s.id !== snap.sourceId)
+      target.updatedAt = now
+      // 2) 还原为顶层任务（还原原状态/提醒标记；附件/时间沿用子任务原值）
+      const task: Task = {
+        id: sub.id,
+        name: sub.name,
+        description: sub.description,
+        startTime: sub.startTime,
+        endTime: sub.endTime,
+        reminderTime: sub.reminderTime,
+        projectId: snap.srcPid,
+        status: snap.srcStatus,
+        isReminded: snap.srcIsReminded,
+        createdAt: sub.createdAt,
+        updatedAt: now,
+        sort: snap.srcSort ?? snap.srcIndex,
+        subtasks: [],
+        attachments: sub.attachments ?? [],
+      }
+      // 3) 按原位置放回源项目列表
+      const list = this.tasks[snap.srcPid] ?? []
+      const idx = Math.min(snap.srcIndex, list.length)
+      const next = [...list]
+      next.splice(idx, 0, task)
+      this.tasks[snap.srcPid] = next
+      this._persist(snap.srcPid)
+      if (snap.srcPid !== snap.dstPid) this._persist(snap.dstPid)
+      // 4) 今日视图顺序：转换时已从 todayOrder 移除，撤销后按原位置放回
+      if (snap.todayIndex >= 0 && !this.todayOrder.includes(snap.sourceId)) {
+        const to = [...this.todayOrder]
+        to.splice(Math.min(snap.todayIndex, to.length), 0, snap.sourceId)
+        this.setTodayOrder(to, { audit: false })
+      }
+      // 5) 完成状态回退当日统计（转换时已完成→未完成扣 1，撤销加回）
+      if (snap.srcStatus === 'completed') void useStatsStore().addDelta(1, snap.sourceId)
+      logAudit('撤销设为子任务', safeDetail(`任务ID：${snap.sourceId}，项目ID：${snap.srcPid} ← 父任务ID：${snap.targetId}`))
       return true
     },
     /**

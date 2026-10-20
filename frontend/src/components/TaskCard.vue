@@ -154,6 +154,7 @@ function onSubDragEnd() {
     ref="cardRoot"
     class="task-card group bg-white rounded-xl shadow-card border border-line p-3 transition hover:shadow-lift"
     :data-task-id="task.id"
+    :data-task-name="task.name || ''"
     :data-future="future ? '1' : '0'"
     :class="[
       warm ? 'hover:border-amber-300' : 'hover:border-slate-200',

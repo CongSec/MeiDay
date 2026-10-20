@@ -13,10 +13,17 @@ export interface OssErrorInfo {
   endpoint: string
 }
 
+export interface ToastAction {
+  label: string
+  onClick: () => void
+}
+
 export interface Toast {
   id: number
   text: string
   type: 'ok' | 'error'
+  /** 可选操作按钮（如“已设为子任务”的撤销）：带 action 的 toast 停留时间更长 */
+  action?: ToastAction
 }
 
 /** 全局提示去重窗口（毫秒）：相同文案在此窗口内只显示一次，避免多端冲突类提示反复刷屏 */
@@ -62,17 +69,19 @@ export const useUiStore = defineStore('ui', {
     closeOssError() {
       this.ossError = null
     },
-    toast(text: string, type: 'ok' | 'error' = 'ok') {
+    toast(text: string, type: 'ok' | 'error' = 'ok', action?: ToastAction) {
       const now = Date.now()
       const lastShownAt = lastToastShownAt.get(text) ?? 0
       // 全局提示去重：相同文案 5 秒内只显示一次，避免多端冲突类提示反复刷屏
       if (now - lastShownAt < TOAST_DEDUP_MS) return
       lastToastShownAt.set(text, now)
       const id = now + Math.random()
-      this.toasts.push({ id, text, type })
+      this.toasts.push({ id, text, type, action })
+      // 带操作按钮的 toast 停留更久，给用户留出点击时间
+      const dismissMs = action ? 6000 : 2600
       window.setTimeout(() => {
         this.toasts = this.toasts.filter((t) => t.id !== id)
-      }, 2600)
+      }, dismissMs)
     },
     dismiss(id: number) {
       this.toasts = this.toasts.filter((t) => t.id !== id)

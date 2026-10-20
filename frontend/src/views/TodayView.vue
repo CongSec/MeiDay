@@ -2,7 +2,7 @@
 import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { VueDraggable } from 'vue-draggable-plus'
-import { getDragOptions, setDragging, beginSubtaskDrop, updateSubtaskDrop, endSubtaskDrop } from '@/utils/drag'
+import { getDragOptions, setDragging, beginSubtaskDrop, updateSubtaskDrop, endSubtaskDrop, cancelSubtaskDrop } from '@/utils/drag'
 import { useAuthStore } from '@/stores/auth'
 import { useProjectsStore } from '@/stores/projects'
 import { useTasksStore } from '@/stores/tasks'
@@ -66,6 +66,7 @@ onMounted(async () => {
 onUnmounted(() => {
   document.removeEventListener('pointerdown', onDocPointerdown)
   setDragging(false)
+  cancelSubtaskDrop()
   if (mobileActions) {
     mobileActions.newTask = null
     if (mobileActions.title === MOBILE_TITLE) mobileActions.title = ''
@@ -181,25 +182,45 @@ function onDragStart(evt?: { oldIndex?: number; item?: HTMLElement | null }) {
   if (dragSourceId) beginSubtaskDrop(dragSourceId, evt?.item)
 }
 
-function onDragMove(evt: { related?: HTMLElement | null; originalEvent?: DragEvent | MouseEvent | TouchEvent | null }) {
-  updateSubtaskDrop(evt)
+function onDragMove(evt: { related?: HTMLElement | null; originalEvent?: DragEvent | MouseEvent | TouchEvent | null }): boolean {
+  // @move 即 Sortable onMove：永远返回 false → 关闭实时重排（列表静止，配合插入线 + 整卡落点）
+  return updateSubtaskDrop(evt)
 }
 
 function onDragEnd() {
   setDragging(false)
-  const targetId = endSubtaskDrop()
+  const { targetId, insertIndex } = endSubtaskDrop()
   const sourceId = dragSourceId
   dragSourceId = null
   // 落到另一张任务卡上 → 把被拖任务设为该任务的子任务（可能跨项目，归父任务项目）
   if (sourceId && targetId && targetId !== sourceId) {
     const ok = tasks.convertTaskToSubtask(sourceId, targetId)
-    if (ok) ui.toast('已设为子任务')
+    if (ok) {
+      ui.toast('已设为子任务', 'ok', {
+        label: '撤销',
+        onClick: () => {
+          if (tasks.undoSubtaskConversion()) ui.toast('已撤销，任务已还原')
+        },
+      })
+    }
     return
   }
-  // 今日拖拽与项目排序彻底解耦：只写全局 todayOrder（今日页自己的手动顺序），
-  // 不再回写各项目的 sort，项目页顺序不受今日拖拽影响。
-  const visibleIds = dragList.value.map((t) => t.id)
-  if (visibleIds.join('|') !== tasks.todayOrder.join('|')) tasks.setTodayOrder(visibleIds)
+  // 方向1：无实时重排，按插入线位置手动重排 todayOrder（今日页只写全局 todayOrder，
+  // 不回写各项目 sort，项目页顺序不受今日拖拽影响）
+  if (sourceId && insertIndex >= 0) {
+    const srcIdx = dragList.value.findIndex((t) => t.id === sourceId)
+    if (srcIdx >= 0) {
+      const source = dragList.value[srcIdx]
+      let at = insertIndex
+      const arr = [...dragList.value]
+      arr.splice(srcIdx, 1)
+      if (at > srcIdx) at--
+      at = Math.max(0, Math.min(at, arr.length))
+      arr.splice(at, 0, source)
+      const visibleIds = arr.map((t) => t.id)
+      if (visibleIds.join('|') !== tasks.todayOrder.join('|')) tasks.setTodayOrder(visibleIds)
+    }
+  }
 }
 
 const projectOf = (id: string) => (id ? projects.byId(id) : undefined)
@@ -370,7 +391,7 @@ async function confirmDelete() {
         </div>
   
         <div class="mt-4">
-          <VueDraggable v-model="dragList" v-bind="dragOptions" item-key="id" class="space-y-2" @start="onDragStart" @move="onDragMove" @end="onDragEnd">
+          <VueDraggable v-model="dragList" v-bind="dragOptions" item-key="id" class="drag-list space-y-2" @start="onDragStart" @move="onDragMove" @end="onDragEnd">
             <TaskCard
               v-for="t in dragList"
               :key="t.id"
