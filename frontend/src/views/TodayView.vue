@@ -62,6 +62,9 @@ onMounted(async () => {
   const todayIds = tasks.todayRelevantProjectIds(allIds)
   const toLoad = fullyCached ? [...new Set([...todayIds])] : allIds
   await tasks.loadAllProgressive(toLoad)
+  // 今日相关项目已全部加载：统一对账，确保今日可见任务都已按时间登记进今日顺序表
+  // （覆盖物化/批量导入/跨设备新任务/未来任务首次可见；并清理死 id 与已完成任务残留）
+  tasks.reconcileTodayOrder()
 })
 onUnmounted(() => {
   document.removeEventListener('pointerdown', onDocPointerdown)

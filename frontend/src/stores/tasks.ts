@@ -694,6 +694,8 @@ if (typeof window !== 'undefined') {
       lastDay = d
       void useTasksStore().sweepCompleted()
       void useTasksStore().materializeRepeats()
+      // 跨天统一对账：未来日期任务在今天首次可见 → 按时间登记进今日顺序表
+      void useTasksStore().reconcileTodayOrder()
     }
   }, 60_000)
 }
@@ -2482,8 +2484,8 @@ export const useTasksStore = defineStore('tasks', {
             for (const task of toAdd) {
               if (next.some((t) => t.id === task.id)) continue
               next.push(task)
-              // 物化出的重复任务不注册 todayOrder：进今日页时走「未注册组」按统一链
-              // （提醒 > 开始 > 创建时间）时间就位，用户拖过后才登记手动顺序。
+              // 物化出的重复任务（当日可见的待办）由 reconcileTodayOrder 统一按时间登记进 todayOrder；
+              // 完成/删除时对账会把它从顺序表移除，不会无限累积。
               logAudit('生成重复任务', safeDetail(`任务ID：${task.id}，项目ID：${pid}，周期：${task.repeat?.type ?? ''}`))
             }
             // 自愈去重兜底：即便极端情况下出现 id 不同的同链同日重复（旧随机 id 数据/竞态），
@@ -2498,6 +2500,8 @@ export const useTasksStore = defineStore('tasks', {
           console.warn('重复任务物化失败（跳过，等待下次同步）', pid, e)
         }
       }
+      // 物化完成后统一对账：把刚物化的当日实例按时间登记进今日顺序表
+      this.reconcileTodayOrder()
     },
     /** 自愈去重（重复任务 Bug 兜底）：对某项目的活跃任务列表执行重复收敛，
      *  规则 A 的墓碑写入回收站、规则 B 的模板写回 repeats，返回收敛后的活跃列表。
@@ -2945,8 +2949,9 @@ export const useTasksStore = defineStore('tasks', {
         }
       } else {
         // 新建/跨项目移入：不继承旧项目的 sort；按统一时间链（提醒 > 开始 > 创建）把新任务
-        // 插到最后一个「时间不晚于它」的任务之后——落点只看时间，不受其它任务手动拖拽位置影响；
-        // 其它任务相对顺序保持不变。再整体重排 sort 序号，使新顺序在加载/同步合并后依然保持。
+        // 插到第一个「时间比它更晚」的任务之前（整段无更晚任务则插到段尾）——落点只看时间，
+        // 不受其它任务手动拖拽位置影响；其它任务相对顺序保持不变。再整体重排 sort 序号，
+        // 使新顺序在加载/同步合并后依然保持。
         const pendingEnd = list.findIndex((t) => t.status !== 'pending')
         const bound = pendingEnd === -1 ? list.length : pendingEnd
         const at = timeInsertIndex(list, task, 0, bound)
@@ -2954,9 +2959,13 @@ export const useTasksStore = defineStore('tasks', {
         list.forEach((t, i) => {
           t.sort = i
         })
+        // 新建任务同样按时间在今日视图就位（与编辑归位同一套语义）：把新任务按时间链插入
+        // todayOrder 正确位置（今日不可见——如未来日期——的任务不登记）。跨项目移入的任务若
+        // 今日可见也一并按时间归位；已登记的只挪位置，未登记的连同当屏可见任务整体落表。
+        this.repositionTodayOrder(task)
       }
-      // 新建/移入任务不自动登记 todayOrder：进今日页时走「未注册组」按统一链
-      // （提醒 > 开始 > 创建时间）时间就位（与物化任务一致），用户拖过后才登记手动顺序。
+      // 新建/移入任务已按时间登记进 todayOrder（见上），进今日页直接按登记顺序就位；
+      // 用户拖过后手动顺序优先。
       this.tasks[target] = list
       this._persist(target)
       // 编辑源任务后同步重复模板（与时间胶囊 / 未来任务编辑同一套统一逻辑）：
@@ -3246,17 +3255,60 @@ export const useTasksStore = defineStore('tasks', {
         renderedBefore = ids.join('|')
         ids = ids.filter((id) => id !== task.id)
       }
-      // 与项目页新建/编辑的落点语义一致：从段首起步，逐项推进到最后一个「时间不晚于 task」的
-      // 可见任务之后——task 永远不会显示在时间更早任务的上方（不受手动拖拽位置影响），
-      // 无更早锚点时即最前（与 timeInsertIndex 一致）
-      let at = 0
+      // 与项目页新建/编辑的落点语义一致：从段首起步，遇到第一个「时间比 task 更晚」的可见任务
+      // 即停，插在它前面；整段没有更晚任务时插到段尾（不受手动拖拽位置影响，与 timeInsertIndex 一致）
+      let at = ids.length
       for (let i = 0; i < ids.length; i++) {
         const r = anchorRank(ids[i])
         if (r === null) continue
-        if (r <= 0) at = i + 1
+        if (r > 0) {
+          at = i
+          break
+        }
       }
       ids.splice(at, 0, task.id)
       if (ids.join('|') === (renderedBefore ?? this.todayOrder.join('|'))) return
+      this.setTodayOrder(ids, { audit: false })
+    },
+    /**
+     * 统一对账：让今日顺序表收敛为「当前今日可见的待办任务」（按时间就位，手动顺序保留）。
+     * 触发点：今日视图加载 / 跨天定时器 / 物化 / 批量导入 / 完成·删除·恢复之后。
+     *  - 清理：剔除已删除、已完成、今日不可见、或已不存在（死 id，删除后残留）的任务 id，
+     *    防止顺序表随物化/导入/删除无限膨胀；
+     *  - 补登记：今日可见但未登记的待办任务，按「第一更晚即停」插入（与 timeInsertIndex 同语义，
+     *    不受其它任务手动拖拽位置影响）——覆盖物化任务、批量导入、未来日期任务首次可见、
+     *    跨设备同步来的新任务；
+     *  - 已登记的相对顺序保持不变（拖拽手动顺序优先）；
+     *  - 顺序无变化时不写盘，避免无谓的 CAS 写与跨端广播。
+     */
+    reconcileTodayOrder() {
+      const today = todayKey()
+      const byId = new Map(this.all.map((t) => [t.id, t]))
+      // ① 清理：仅保留「存在、未删除、未完成、今日可见」的任务 id
+      const ids = this.todayOrder.filter((id) => {
+        const t = byId.get(id)
+        if (!t) return false
+        if (t.status === 'deleted' || t.status === 'completed') return false
+        return isTaskVisibleToday(t, today)
+      })
+      // ② 补登记：今日可见待办中未登记的按「第一更晚即停」插入（组内先按时间排，保证插入稳定）
+      const orderSet = new Set(ids)
+      const toInsert = this.all
+        .filter((t) => t.status === 'pending' && isTaskVisibleToday(t, today) && !orderSet.has(t.id))
+        .sort(compareTasksByTime)
+      for (const task of toInsert) {
+        let at = ids.length
+        for (let i = 0; i < ids.length; i++) {
+          const other = byId.get(ids[i])
+          if (!other || !isTaskVisibleToday(other, today)) continue
+          if (compareTasksByTime(other, task) > 0) {
+            at = i
+            break
+          }
+        }
+        ids.splice(at, 0, task.id)
+      }
+      if (ids.join('|') === this.todayOrder.join('|')) return
       this.setTodayOrder(ids, { audit: false })
     },
     /** 立即把今日顺序表落盘 OSS（CAS + 冲突合并：本地顺序优先，远端新增 id 追加到末尾） */
@@ -3398,6 +3450,8 @@ export const useTasksStore = defineStore('tasks', {
         const okRepeats = repeatsChanged ? await this.saveRepeatsNow(pid) : true
         if (okTasks && okRepeats) {
           await useStatsStore().addDelta(completing ? 1 : -1, task.id)
+          // 完成/取消完成统一对账：完成后从今日顺序表移除该 id，取消完成后按时间重新登记
+          this.reconcileTodayOrder()
           return true
         }
         // 失败回滚：恢复任务与重复模板（内存 + IDB），避免缓存残留未保存的改动
@@ -3430,6 +3484,8 @@ export const useTasksStore = defineStore('tasks', {
       // keepRepeatMaster=true（已完成重复任务入舱）时保留模板：只归档该完成记录，后续未完成出现不受影响
       if (!opts?.keepRepeatMaster) this._deleteMasterForTask(task.id)
       logAudit('删除任务', safeDetail(`任务ID：${task.id}，项目ID：${task.projectId}`))
+      // 删除后统一对账：把该任务 id 从今日顺序表移除（防死 id 残留）
+      this.reconcileTodayOrder()
     },
     restore(id: string, toProjectId?: string) {
       let task: Task | undefined
@@ -3539,6 +3595,8 @@ export const useTasksStore = defineStore('tasks', {
       // 已完成恢复（历史完成记录）保留重复模板，后续未完成出现继续保留（入舱/恢复都不打断重复链）
       if (!completing) this._deleteMasterForTask(task.id)
       logAudit('恢复任务', safeDetail(`任务ID：${task.id}，项目ID：${task.projectId}`))
+      // 恢复后统一对账：恢复的待办若今日可见，按时间重新登记进今日顺序表
+      this.reconcileTodayOrder()
     },
     /** 批量新增任务（Markdown 导入用）：整批合并落盘，避免逐条防抖写 OSS */
     bulkAdd(list: Task[]) {
@@ -3558,8 +3616,9 @@ export const useTasksStore = defineStore('tasks', {
         this.tasks[pid] = sortActiveList(this.tasks[pid])
         this._persist(pid)
       }
-      // 批量导入的新任务不自动登记 todayOrder：与手动新建/物化任务一致，
-      // 进今日页走「未注册组」按统一链时间就位，用户拖过后才登记手动顺序。
+      // 批量导入的今日可见任务由 reconcileTodayOrder 统一按时间登记进 todayOrder；
+      // 未来日期导入任务在首次成为今日可见时（跨天对账）自动登记。
+      this.reconcileTodayOrder()
       logAudit('批量导入任务', safeDetail(`共导入 ${list.length} 个任务（涉及 ${touched.size} 个项目）`))
     },
     /** 切换子任务完成状态 */
