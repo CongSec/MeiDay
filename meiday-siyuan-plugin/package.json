@@ -1,0 +1,29 @@
+{
+  "name": "siyuan-plugin-meiday",
+  "version": "1.9.3",
+  "description": "SiYuan plugin that embeds the MeiDay task manager, connecting to your backend at https://task.congsec.cn",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "webpack --config webpack.config.js --mode development",
+    "build": "webpack --config webpack.config.js --mode production"
+  },
+  "keywords": [
+    "siyuan",
+    "plugin",
+    "meiday",
+    "task"
+  ],
+  "author": "congsec",
+  "license": "MIT",
+  "devDependencies": {
+    "copy-webpack-plugin": "^14.0.0",
+    "css-loader": "^7.1.4",
+    "esbuild-loader": "^4.4.3",
+    "mini-css-extract-plugin": "^2.10.2",
+    "siyuan": "1.2.4",
+    "typescript": "^5.8.2",
+    "webpack": "^5.107.2",
+    "webpack-cli": "^7.0.3",
+    "zip-webpack-plugin": "^4.0.3"
+  }
+}

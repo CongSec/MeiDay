@@ -1,7 +1,6 @@
 {
   "repos": {
-    "meiday": "https://github.com/CongSec/MeiDay.git",
-    "plugin": "https://github.com/CongSec/meiday-siyuan-plugin.git"
+    "meiday": "https://github.com/CongSec/MeiDay.git"
   },
   "paths": {
     "meiday_dir": "",

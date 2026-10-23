@@ -42,7 +42,7 @@ jobs:
             echo "version=${OVERRIDE}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          latest=$(git tag -l 'v*' --sort=-v:refname | head -n1 | sed 's/^v//')
+          latest=$(git tag -l '[vV]*' --sort=-v:refname | head -n1 | sed 's/^[vV]//')
           if [[ -z "$latest" ]]; then
             version="1.6.0"
           else
@@ -137,9 +137,10 @@ jobs:
           path: MeiDay.exe
           if-no-files-found: error
 
-  # ---------- 思源插件 package.zip ----------
+  # ---------- 思源插件 package.zip（插件已并入本仓库，随主仓库发版）----------
   build-plugin:
     runs-on: ubuntu-latest
+    needs: [compute-version]
     steps:
       - uses: actions/checkout@v4
 
@@ -155,14 +156,19 @@ jobs:
           npm install
           npm run build:plugin
 
-      - name: Clone plugin shell repo
-        run: git clone --depth 1 https://github.com/CongSec/siyuan-plugin-meiday.git plugin-shell
-
       - name: Embed built app into plugin shell
-        run: cp frontend/dist-plugin/index.html plugin-shell/src/assets/app.html
+        run: cp frontend/dist-plugin/index.html meiday-siyuan-plugin/src/assets/app.html
+
+      - name: Sync plugin version to release tag
+        working-directory: meiday-siyuan-plugin
+        env:
+          PLUGIN_VERSION: ${{ needs.compute-version.outputs.version }}
+        run: |
+          node -e "const fs=require('fs');const v=process.env.PLUGIN_VERSION;for(const f of ['plugin.json','package.json']){const p=JSON.parse(fs.readFileSync(f,'utf8'));p.version=v;fs.writeFileSync(f,JSON.stringify(p,null,2)+'\n');}"
+          echo "插件版本号已同步为: $PLUGIN_VERSION"
 
       - name: Build plugin package
-        working-directory: plugin-shell
+        working-directory: meiday-siyuan-plugin
         run: |
           npm install
           npm run build
@@ -170,7 +176,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: plugin
-          path: plugin-shell/package.zip
+          path: meiday-siyuan-plugin/package.zip
           if-no-files-found: error
 
   # ---------- 发版 ----------

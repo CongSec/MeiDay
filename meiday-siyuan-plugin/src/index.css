@@ -1,0 +1,274 @@
+/* ===== MeiDay 弹窗遮罩（高级版）=====
+   自管全屏遮罩：玻璃拟态 scrim + 悬浮面板 + 常驻 iframe。
+   显示/隐藏只切 .meiday-overlay--open，iframe 永不重建，直到插件卸载。
+   设计要点：
+   - 明暗主题：跟随思源 body.theme--dark 自动切换（CSS 变量）
+   - 玻璃拟态遮罩：品牌色渐变 + backdrop blur（不支持 blur 时有纯色兜底）
+   - 平滑开合动画：scrim 淡入 + 面板 缩放上浮（spring 曲线）
+   - 顶部标题栏：品牌 logo + 名称 + 最大化/关闭控件，可拖拽移动
+   - 加载态：iframe 就绪前显示轻量 spinner */
+
+/* ===== 主题变量 ===== */
+.meiday-overlay {
+  --md-bg: #ffffff;
+  --md-bg-soft: #f7f8fb;
+  --md-bg-soft-2: #eef0f5;
+  --md-border: rgba(23, 31, 56, 0.10);
+  --md-text: #1b1f27;
+  --md-text-soft: #5c6570;
+  --md-text-faint: #98a1ac;
+  --md-scrim-a: rgba(13, 18, 38, 0.62);
+  --md-scrim-b: rgba(24, 18, 58, 0.55);
+  --md-scrim-glow: rgba(69, 87, 201, 0.20);
+  --md-shadow: 0 32px 90px rgba(9, 13, 30, 0.42), 0 8px 28px rgba(9, 13, 30, 0.22);
+  --md-accent: #4557c9;
+  --md-accent-2: #6a5bd6;
+  --md-accent-glow: rgba(69, 87, 201, 0.35);
+  --md-danger: #e5484d;
+  --md-blur: 14px;
+  --md-scrim-solid: rgba(16, 20, 42, 0.88);
+}
+body.theme--dark .meiday-overlay {
+  --md-bg: #1e2230;
+  --md-bg-soft: #262b3b;
+  --md-bg-soft-2: #303649;
+  --md-border: rgba(255, 255, 255, 0.09);
+  --md-text: #e6e9f2;
+  --md-text-soft: #a6afc4;
+  --md-text-faint: #6f7a92;
+  --md-scrim-a: rgba(5, 8, 18, 0.68);
+  --md-scrim-b: rgba(10, 8, 30, 0.6);
+  --md-scrim-glow: rgba(106, 91, 214, 0.18);
+  --md-shadow: 0 34px 100px rgba(0, 0, 0, 0.62), 0 10px 30px rgba(0, 0, 0, 0.45);
+  --md-accent-glow: rgba(106, 91, 214, 0.45);
+}
+
+/* ===== 遮罩容器：淡入淡出 + 显隐 ===== */
+.meiday-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000; /* 高于思源所有弹窗/面板 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.26s ease, visibility 0s linear 0.26s;
+}
+.meiday-overlay--open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition: opacity 0.26s ease;
+}
+
+/* ===== 玻璃拟态 scrim（渐变 + 模糊，不支持 blur 时走纯色兜底） ===== */
+.meiday-overlay__scrim {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(160deg, var(--md-scrim-a), var(--md-scrim-b));
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  .meiday-overlay__scrim {
+    background:
+      radial-gradient(130% 120% at 50% 0%, var(--md-scrim-glow), transparent 55%),
+      linear-gradient(160deg, var(--md-scrim-a), var(--md-scrim-b));
+    -webkit-backdrop-filter: blur(var(--md-blur)) saturate(150%);
+    backdrop-filter: blur(var(--md-blur)) saturate(150%);
+  }
+}
+@supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  .meiday-overlay__scrim {
+    background: var(--md-scrim-solid);
+  }
+}
+.meiday-overlay--open .meiday-overlay__scrim {
+  opacity: 1;
+}
+
+/* ===== 面板：圆角 + 细边框 + 顶部高光线 + 多层级阴影 ===== */
+.meiday-overlay__panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: var(--md-bg);
+  border: 1px solid var(--md-border);
+  border-radius: 18px;
+  box-shadow: var(--md-shadow);
+  overflow: hidden;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  transform: translateY(18px) scale(0.955);
+  opacity: 0;
+  transition: transform 0.34s cubic-bezier(0.22, 1.1, 0.36, 1), opacity 0.24s ease;
+}
+.meiday-overlay--open .meiday-overlay__panel {
+  transform: translateY(0) scale(1);
+  opacity: 1;
+}
+/* 面板顶部内侧高光线：增强“悬浮”质感 */
+.meiday-overlay__panel::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent);
+  z-index: 40;
+  pointer-events: none;
+}
+body.theme--dark .meiday-overlay__panel::before {
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.18), transparent);
+}
+/* 最大化：近全屏 */
+.meiday-overlay--maximized .meiday-overlay__panel {
+  width: calc(100vw - 24px) !important;
+  height: calc(100vh - 24px) !important;
+  max-width: none;
+  max-height: none;
+  border-radius: 16px;
+}
+
+/* ===== 顶部标题栏 ===== */
+.meiday-overlay__bar {
+  position: relative;
+  z-index: 35;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  background: linear-gradient(180deg, var(--md-bg-soft), var(--md-bg));
+  border-bottom: 1px solid var(--md-border);
+  user-select: none;
+  cursor: grab;
+  flex-shrink: 0;
+}
+.meiday-overlay__brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  pointer-events: none;
+}
+.meiday-overlay__logo {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, var(--md-accent), var(--md-accent-2));
+  color: #fff;
+  box-shadow: 0 2px 8px var(--md-accent-glow), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  flex-shrink: 0;
+}
+.meiday-overlay__logo svg {
+  width: 14px;
+  height: 14px;
+}
+.meiday-overlay__titles {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+  min-width: 0;
+}
+.meiday-overlay__title {
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.2px;
+  color: var(--md-text);
+}
+.meiday-overlay__subtitle {
+  font-size: 11px;
+  color: var(--md-text-faint);
+  white-space: nowrap;
+}
+.meiday-overlay__spacer {
+  flex: 1;
+}
+
+/* ===== 窗口控件（最大化 / 关闭） ===== */
+.meiday-overlay__controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.meiday-overlay__btn {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--md-border);
+  border-radius: 9px;
+  background: var(--md-bg);
+  color: var(--md-text-soft);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease,
+    transform 0.15s ease, box-shadow 0.15s ease;
+}
+.meiday-overlay__btn:hover {
+  background: var(--md-bg-soft-2);
+  color: var(--md-text);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(9, 13, 30, 0.12);
+}
+.meiday-overlay__btn:active {
+  transform: translateY(0);
+  box-shadow: none;
+}
+.meiday-overlay__btn svg {
+  width: 15px;
+  height: 15px;
+}
+.meiday-overlay__close:hover {
+  background: var(--md-danger);
+  border-color: var(--md-danger);
+  color: #fff;
+}
+
+/* ===== 加载态 ===== */
+.meiday-overlay__loading {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--md-bg);
+  transition: opacity 0.3s ease, visibility 0s linear 0.3s;
+}
+.meiday-overlay__loading--hidden {
+  opacity: 0;
+  visibility: hidden;
+}
+.meiday-overlay__spinner {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 3px solid var(--md-bg-soft-2);
+  border-top-color: var(--md-accent);
+  animation: meiday-spin 0.8s linear infinite;
+}
+@keyframes meiday-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ===== iframe ===== */
+.meiday-overlay__iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+  flex: 1;
+  background: var(--md-bg);
+}
+
+.meiday-overlay__bar:active {
+  cursor: grabbing;
+}
+

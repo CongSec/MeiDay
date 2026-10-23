@@ -1,0 +1,7 @@
+node_modules/
+dist/
+package.zip
+*.log
+
+# ===== 构建生成物(由主仓库 frontend build:plugin 现生成,不提交) =====
+src/assets/app.html

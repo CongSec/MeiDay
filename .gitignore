@@ -139,3 +139,9 @@ verify_real.py
 output/
 
 backend/update.txt
+
+# ===== 思源插件(已合并入本仓库)=====
+meiday-siyuan-plugin/node_modules/
+meiday-siyuan-plugin/dist/
+meiday-siyuan-plugin/package.zip
+meiday-siyuan-plugin/src/assets/app.html

@@ -224,23 +224,23 @@ VITE_API_BASE_URL=https://task.congsec.cn
 
 #### 思源插件构建教程
 
-将[https://github.com/CongSec/MeiDay](https://github.com/CongSec/MeiDay)这个项目clone下来,在`frontend`​文件夹中构建`npm install`​和`npm run build:plugin`
+插件已并入本仓库(`meiday-siyuan-plugin/` 目录),构建分两步:
 
-将[https://github.com/CongSec/meiday-siyuan-plugin](https://github.com/CongSec/meiday-siyuan-plugin)项目clone下来
+1. 在 `frontend` 目录构建插件专用单文件前端:`npm install` 与 `npm run build:plugin`(产物为 `frontend/dist-plugin/index.html`)。
+2. 把产物拷进插件外壳并打包:
 
 ![image](https://b3logfile.com/file/2026/08/siyuan/1714493573033/assets/image-20260828201841-obn97ww.png)
 
-然后将以下内容构建并复制到对应文件中
-
 ```python
-# ① 第一步的产物拷进外壳
+# ① 把单文件前端拷进插件外壳
 Copy-Item ".\frontend\dist-plugin\index.html" `
           ".\meiday-siyuan-plugin\src\assets\app.html" -Force
 
-# ② 构建外壳(插件文件夹)
+# ② 构建插件包(版本号自动跟随主仓库最新 v* 标签)
 cd .\meiday-siyuan-plugin
 npm install
 npm run build
+# 产物: .\meiday-siyuan-plugin\package.zip
 
 # ③ 复制进思源笔记插件的文件夹中
 Copy-Item ".\meiday-siyuan-plugin\dist\*" `
@@ -249,8 +249,11 @@ Copy-Item ".\meiday-siyuan-plugin\dist\*" `
 # ④ 完全退出思源再打开 ← 必须重启，思源不热加载
 ```
 
+> 提示:直接运行 `python build.py` 会自动完成上述全部步骤,输出 `output/package.zip`。
+
 ## Docker 部署（后端）
 
 支持docker一键部署启动后端,直接使用`docker run -d --name meiday --restart unless-stopped -p 8001:8000 -e FRONTEND_ORIGINS="http://localhost:5173,http://localhost,https://task.congsec.cn" -v meiday_data:/data crpi-8r9w3eevpt68aj3u.cn-hangzhou.personal.cr.aliyuncs.com/congsec/meiday:latest`命令即可
 
 ‍
+

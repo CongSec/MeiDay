@@ -1,0 +1,108 @@
+const path = require("path");
+const fs = require("fs");
+const webpack = require("webpack");
+const MiniCssExtractPlugin = require("mini-css-extract-plugin");
+const CopyPlugin = require("copy-webpack-plugin");
+const ZipPlugin = require("zip-webpack-plugin");
+
+module.exports = (env, argv) => {
+    const production = argv.mode === "production";
+    const plugins = [
+        new MiniCssExtractPlugin({
+            filename: production ? "dist/index.css" : "index.css",
+        }),
+    ];
+    if (production) {
+        plugins.push(
+            new webpack.BannerPlugin({
+                banner: () => {
+                    return fs.readFileSync("LICENSE").toString();
+                },
+            }),
+        );
+        plugins.push(
+            new CopyPlugin({
+                patterns: [
+                    {from: "preview.png", to: "./dist/"},
+                    {from: "icon.png", to: "./dist/"},
+                    {from: "README*.md", to: "./dist/"},
+                    {from: "plugin.json", to: "./dist/"},
+                    {from: "src/i18n/", to: "./dist/i18n/"},
+                ],
+            }),
+        );
+        plugins.push(
+            new ZipPlugin({
+                filename: "package.zip",
+                algorithm: "gzip",
+                include: [/dist/],
+                pathMapper: (assetPath) => {
+                    return assetPath.replace("dist/", "");
+                },
+            }),
+        );
+    } else {
+        plugins.push(
+            new CopyPlugin({
+                patterns: [
+                    {from: "src/i18n/", to: "./i18n/"},
+                ],
+            }),
+        );
+    }
+    return {
+        mode: argv.mode || "development",
+        watch: !production,
+        devtool: production ? false : "eval-source-map",
+        output: {
+            filename: "[name].js",
+            path: path.resolve(__dirname),
+            libraryTarget: "commonjs2",
+            library: {
+                type: "commonjs2",
+            },
+        },
+        externals: {
+            siyuan: "siyuan",
+        },
+        entry: {
+            [production ? "dist/index" : "index"]: "./src/index.ts",
+        },
+        optimization: { minimize: production },
+        resolve: {
+            extensions: [".ts", ".js", ".json"],
+        },
+        module: {
+            rules: [
+                {
+                    test: /\.ts(x?)$/,
+                    include: [path.resolve(__dirname, "src")],
+                    use: [
+                        {
+                            loader: "esbuild-loader",
+                            options: {
+                                target: "es6",
+                            },
+                        },
+                    ],
+                },
+                {
+                    test: /\.css$/,
+                    include: [path.resolve(__dirname, "src")],
+                    use: [
+                        MiniCssExtractPlugin.loader,
+                        "css-loader",
+                    ],
+                },
+                {
+                    // 单文件构建出的 app.html 以字符串形式内联进 index.js
+                    test: /\.html$/,
+                    include: [path.resolve(__dirname, "src")],
+                    type: "asset/source",
+                },
+            ],
+        },
+        plugins,
+    };
+};
+

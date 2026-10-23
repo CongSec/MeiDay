@@ -1,0 +1,41 @@
+{
+  "name": "siyuan-plugin-meiday",
+  "author": "congsec",
+  "url": "https://github.com/CongSec/MeiDay",
+  "version": "1.9.3",
+  "minAppVersion": "3.0.0",
+  "backends": [
+    "all"
+  ],
+  "frontends": [
+    "all"
+  ],
+  "disabledInPublish": false,
+  "displayName": {
+    "default": "MeiDay",
+    "zh-CN": "MeiDay（每日任务日记管理）"
+  },
+  "description": {
+    "default": "MeiDay is a cross-platform (Web, App) task and diary manager that delivers a smoother experience and stronger security.",
+    "zh-CN": "MeiDay 是一款跨端（Web、App）任务与日记管理工具，让记录更流畅，让数据更安全。"
+  },
+  "readme": {
+    "default": "README.md",
+    "zh-CN": "README.md",
+    "en-US": "README.EN.md"
+  },
+  "funding": {
+    "github": "congsec"
+  },
+  "keywords": [
+    "任务管理",
+    "待办",
+    "在线",
+    "todo",
+    "task",
+    "meiday",
+    "日记",
+    "加密",
+    "隐私"
+  ]
+}

@@ -11,12 +11,14 @@ MeiDay 一键构建脚本 (Windows)
 设计约定（按需求确认）:
     1. Windows 专用，但换电脑/换目录都能构建：所有路径相对脚本目录解析，
        可在 build.config.json 中覆盖；路径留空则自动探测。
-    2. 仓库不存在时自动 git clone（地址在 build.config.json 中，可改）。
+    2. 仅主仓库 MeiDay 需要 clone（地址在 build.config.json 中，可改）；
+       思源插件 meiday-siyuan-plugin 已合并进本仓库，不再单独 clone。
     3. 构建环境只检测不自动安装：缺失时打印缺失清单 + 安装指引并停止。
     4. 依赖已存在则跳过安装：node_modules 存在跳过 npm install；
        pip 所需包齐全则跳过 pip install（默认官方源）。
-    5. 思源插件版本号：构建前交互提示当前版本，询问是否修改；
-       确认修改则同步写 meiday-siyuan-plugin 的 plugin.json 与 package.json。
+    5. 思源插件版本号：自动跟随主仓库最近一个 v* 标签（如 v1.7.0 -> 1.7.0），
+       同步写 meiday-siyuan-plugin 的 plugin.json 与 package.json；
+       无标签时保持当前版本。不再交互询问。
     6. 只产出 output 文件夹，不自动部署到思源。
 用法:
     python build.py           # 完整一键构建
@@ -39,12 +41,11 @@ from pathlib import Path
 DEFAULT_CONFIG = {
     "repos": {
         "meiday": "https://github.com/CongSec/MeiDay.git",
-        "plugin": "https://github.com/CongSec/meiday-siyuan-plugin.git",
     },
     "paths": {
         # 留空 = 自动探测：
         #   meiday_dir   默认脚本所在目录（即 EasyTask/MeiDay 仓库本身）
-        #   plugin_dir   依次探测 <脚本目录>/meiday-siyuan-plugin、<脚本目录>/../meiday-siyuan-plugin
+        #   plugin_dir   默认 <脚本目录>/meiday-siyuan-plugin（已并入本仓库）
         #   output_dir   默认 <脚本目录>/output
         "meiday_dir": "",
         "plugin_dir": "",
@@ -145,9 +146,7 @@ def resolve_plugin_dir(root: Path, cfg_path_val: str) -> Path:
     if cfg_path_val.strip():
         p = Path(cfg_path_val.strip())
         return p if p.is_absolute() else (root / p).resolve()
-    for cand in (root / "meiday-siyuan-plugin", root.parent / "meiday-siyuan-plugin"):
-        if (cand / "plugin.json").is_file():
-            return cand
+    # 插件已合并进本仓库,默认 <脚本目录>/meiday-siyuan-plugin
     return root / "meiday-siyuan-plugin"
 
 
@@ -236,20 +235,15 @@ def ensure_meiday_repo(meiday_dir: Path, url: str) -> None:
     run(["git", "clone", url, str(meiday_dir)], cwd=meiday_dir.parent)
 
 
-def ensure_plugin_repo(plugin_dir: Path, url: str) -> None:
-    log("==> [2/4] 检查 meiday-siyuan-plugin 插件仓库")
-    marker = (plugin_dir / "plugin.json").is_file()
-    if marker:
+def ensure_plugin_dir(plugin_dir: Path) -> None:
+    log("==> [2/4] 检查 meiday-siyuan-plugin 插件目录（已并入本仓库）")
+    if (plugin_dir / "plugin.json").is_file():
         log(f"  [OK] 已存在: {plugin_dir}")
         return
-    if plugin_dir.exists() and any(plugin_dir.iterdir()):
-        log(f"[失败] {plugin_dir} 不是 meiday-siyuan-plugin 仓库（缺少 plugin.json），"
-            f"且目录非空，无法自动 clone。\n"
-            f"请将该目录清空，或在 {CONFIG_NAME} 的 paths.plugin_dir 指定正确位置。")
-        sys.exit(1)
-    log(f"  [clone] {url} -> {plugin_dir}")
-    plugin_dir.mkdir(parents=True, exist_ok=True)
-    run(["git", "clone", url, str(plugin_dir)], cwd=plugin_dir.parent)
+    log(f"[失败] {plugin_dir} 缺少 plugin.json，"
+        f"插件目录应随本仓库一起检出。\n"
+        f"若目录确实缺失，请在 {CONFIG_NAME} 的 paths.plugin_dir 指定正确位置。")
+    sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -324,49 +318,23 @@ def build_apk(frontend_dir: Path, output_dir: Path) -> None:
     log(f"  [OK] APK -> {target}  ({apks[0].name})")
 
 
-def ask_plugin_version(plugin_dir: Path) -> None:
-    plugin_json = plugin_dir / "plugin.json"
-    pkg_json = plugin_dir / "package.json"
-    try:
-        pj = json.loads(plugin_json.read_text(encoding="utf-8"))
-        pjv = pj.get("version", "")
-    except Exception:
-        pjv = "?"
-    try:
-        pk = json.loads(pkg_json.read_text(encoding="utf-8"))
-        pkv = pk.get("version", "")
-    except Exception:
-        pkv = "?"
-    log(f"\n  当前插件版本：plugin.json = {pjv}，package.json = {pkv}")
-    try:
-        sys.stdout.write("  是否修改版本号？输入 y 修改，直接回车跳过 [y/N]: ")
-        sys.stdout.flush()
-        answer = sys.stdin.readline().strip().lower()
-        if not answer and not sys.stdin.isatty():
-            log("  [提示] 非交互环境，跳过版本号修改（保持原版本）。")
-            return
-    except (EOFError, KeyboardInterrupt):
-        log("  [提示] 无法读取输入，跳过版本号修改（保持原版本）。")
+def sync_plugin_version(plugin_dir: Path, meiday_dir: Path) -> None:
+    """插件版本号自动跟随主仓库最近一个 v* 标签（如 v1.7.0 -> 1.7.0）。
+    无标签时保持当前版本；同步写 plugin.json 与 package.json。"""
+    tag = try_get_output(["git", "-C", str(meiday_dir), "describe", "--tags", "--abbrev=0"])
+    if not tag:
+        log("  [版本] 未找到 v* 标签，保持当前插件版本不变。")
         return
-    if answer not in ("y", "yes"):
-        log("  保持原版本号不变。")
-        return
-    try:
-        sys.stdout.write("  请输入新版本号（例如 1.2.1，直接回车则放弃修改）: ")
-        sys.stdout.flush()
-        new_ver = sys.stdin.readline().strip()
-    except (EOFError, KeyboardInterrupt):
-        new_ver = ""
-    if not new_ver:
-        log("  未输入版本号，保持原版本号不变。")
-        return
-    for path, data, key in ((plugin_json, pj, "version"), (pkg_json, pk, "version")):
-        data[key] = new_ver
+    ver = tag.lstrip("vV")
+    for name in ("plugin.json", "package.json"):
+        path = plugin_dir / name
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["version"] = ver
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        log(f"  [版本] {path.name} version -> {new_ver}")
+        log(f"  [版本] {name} version -> {ver} (来自主仓库标签 {tag})")
 
 
-def build_plugin(frontend_dir: Path, plugin_dir: Path, output_dir: Path) -> None:
+def build_plugin(frontend_dir: Path, plugin_dir: Path, output_dir: Path, meiday_dir: Path) -> None:
     log("==> [3/4] 构建思源插件 (frontend build:plugin -> meiday-siyuan-plugin)")
     log("  [前端] npm run build:plugin ...")
     run([npm_cmd(), "run", "build:plugin"], cwd=frontend_dir)
@@ -379,7 +347,7 @@ def build_plugin(frontend_dir: Path, plugin_dir: Path, output_dir: Path) -> None
     shutil.copy2(src, dst)
     log(f"  [拷贝] {src.name} -> {dst}")
 
-    ask_plugin_version(plugin_dir)
+    sync_plugin_version(plugin_dir, meiday_dir)
 
     ensure_npm_deps(plugin_dir, "meiday-siyuan-plugin")
     log("  [webpack] npm run build ...")
@@ -437,9 +405,9 @@ def main() -> None:
     if not check_env():
         sys.exit(1)
 
-    # 2. 仓库就绪
+    # 2. 仓库/目录就绪（插件目录已并入主仓库，不再单独 clone）
     ensure_meiday_repo(meiday_dir, cfg["repos"]["meiday"])
-    ensure_plugin_repo(plugin_dir, cfg["repos"]["plugin"])
+    ensure_plugin_dir(plugin_dir)
 
     frontend_dir = meiday_dir / "frontend"
     widget_dir = meiday_dir / "widget"
@@ -457,7 +425,7 @@ def main() -> None:
     # 3. 依赖 + 构建
     ensure_npm_deps(frontend_dir, "frontend")
     build_apk(frontend_dir, output_dir)
-    build_plugin(frontend_dir, plugin_dir, output_dir)
+    build_plugin(frontend_dir, plugin_dir, output_dir, meiday_dir)
     build_widget(widget_dir, output_dir)
 
     # 4. 汇总
