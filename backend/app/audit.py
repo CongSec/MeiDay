@@ -39,7 +39,8 @@ ACTION_LABELS = {
     ("GET", "/api/callback"): "外部回调触发",
     ("POST", "/api/callback"): "外部回调触发",
     ("GET", "/api/callback/info"): "查询回调设置",
-    ("POST", "/api/callback/refresh"): "更新回调设置",
+    ("POST", "/api/callback/open"): "开启消息通知回调",
+    ("POST", "/api/callback/close"): "关闭消息通知回调",
 }
 
 # 后台邮件操作的行为名（非 HTTP 请求，由 reminder worker 写入）

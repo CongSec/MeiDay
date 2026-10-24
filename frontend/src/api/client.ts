@@ -390,13 +390,17 @@ export const api = {
   getSyncState(since = 0) {
     return request<SyncState>('GET', `/api/sync/state?since=${since}`)
   },
-  /** 消息通知回调：查询当前账号回调 ID（无则自动生成） */
+  /** 消息通知回调：查询当前账号开关状态与回调 ID（关闭时不返回 ID） */
   getCallbackInfo() {
     return request<CallbackInfo>('GET', '/api/callback/info')
   },
-  /** 消息通知回调：重新随机生成回调 ID（旧 ID 立即作废） */
-  refreshCallbackId() {
-    return request<CallbackInfo>('POST', '/api/callback/refresh')
+  /** 消息通知回调：开启并随机生成全新回调 ID（旧 ID 立即作废） */
+  openCallback() {
+    return request<CallbackInfo>('POST', '/api/callback/open')
+  },
+  /** 消息通知回调：关闭并清空回调 ID（旧 ID 立即失效） */
+  closeCallback() {
+    return request<CallbackInfo>('POST', '/api/callback/close')
   },
   /** 中心公告：一次性拉取未读公告列表（id 升序，旧→新）。
    *  注意：同步轮询已把未读公告合并进 /api/sync/state 的 announcements 字段，
@@ -418,9 +422,10 @@ export interface AnnouncementItem {
   created_at: string
 }
 
-/** 消息通知回调信息 */
+/** 消息通知回调信息：enabled 为开关状态；关闭（未开启）时 id 为 null */
 export interface CallbackInfo {
-  id: string
+  enabled: boolean
+  id: string | null
 }
 
 /** 同步协调中心：客户端可上报的资源类型（与各 store 一一对应） */

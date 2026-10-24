@@ -57,29 +57,48 @@ async function setNotifyPref(key: 'login_success' | 'login_failed', val: boolean
   }
 }
 
-/** 消息通知回调：收件邮箱下方一行提示内展示真实回调地址，点「刷新」换新 ID（旧 ID 作废） */
+/** 消息通知回调：默认关闭；「开启」生成全新回调 ID 并展示地址，「关闭」清空 ID 立即失效 */
+const callbackEnabled = ref(false)
 const callbackId = ref('')
 const callbackBusy = ref(false)
 
-async function loadCallbackId() {
+async function loadCallbackState() {
   try {
     const r = await api.getCallbackInfo()
-    callbackId.value = r.id
+    callbackEnabled.value = r.enabled
+    callbackId.value = r.id || ''
   } catch {
-    // 加载失败不阻塞设置页，回调提示行不展示
+    // 加载失败不阻塞设置页，保持默认关闭态
   }
 }
 
-async function refreshCallbackId() {
+async function openCallback() {
   if (callbackBusy.value) return
   callbackBusy.value = true
   try {
-    const r = await api.refreshCallbackId()
-    callbackId.value = r.id
-    ui.toast('已生成新的回调 ID，旧 ID 已作废')
-    logAudit('修改设置', safeDetail('刷新消息通知回调 ID'))
+    const r = await api.openCallback()
+    callbackEnabled.value = true
+    callbackId.value = r.id || ''
+    ui.toast('已开启消息回调，新回调地址已生成')
+    logAudit('修改设置', safeDetail('开启消息通知回调'))
   } catch (e) {
-    ui.toast((e as Error).message || '刷新失败', 'error')
+    ui.toast((e as Error).message || '开启失败', 'error')
+  } finally {
+    callbackBusy.value = false
+  }
+}
+
+async function closeCallback() {
+  if (callbackBusy.value) return
+  callbackBusy.value = true
+  try {
+    await api.closeCallback()
+    callbackEnabled.value = false
+    callbackId.value = ''
+    ui.toast('已关闭消息回调，旧地址已失效')
+    logAudit('修改设置', safeDetail('关闭消息通知回调'))
+  } catch (e) {
+    ui.toast((e as Error).message || '关闭失败', 'error')
   } finally {
     callbackBusy.value = false
   }
@@ -156,7 +175,7 @@ onMounted(() => {
   if (mobileActions) mobileActions.title = MOBILE_TITLE
   logAudit('打开设置')
   void loadNotifyPrefs()
-  void loadCallbackId()
+  void loadCallbackState()
   // 从 OSS 加载用户统计（使用天数 / 累计完成数）；失败不阻塞设置页
   void statsStore.load().catch(() => {})
 })
@@ -361,13 +380,21 @@ async function save() {
             </button>
           </div>
           <div v-if="f.key === 'notifyEmail'" class="pt-1">
-            <div v-if="callbackId" class="text-[11px] text-slate-400 leading-relaxed break-all">
+            <div v-if="callbackEnabled" class="text-[11px] text-slate-400 leading-relaxed break-all">
               消息通知回调：{{ callbackUrl }}，支持 GET 与 POST。GET 通过 URL 参数传 title（邮件标题）、content（邮件正文）、dst（收件邮箱，可选）；POST 通过请求体（JSON 或表单）传同名字段，自动识别嵌套字段，未命中时正文兜底为完整请求体
               <span
                 class="cursor-pointer select-none text-brand whitespace-nowrap"
                 :class="{ 'opacity-60 pointer-events-none': callbackBusy }"
-                @click="refreshCallbackId"
-              >刷新</span>
+                @click="closeCallback"
+              >关闭</span>
+            </div>
+            <div v-else class="text-[11px] text-slate-400 leading-relaxed">
+              消息通知回调已关闭，开启后将生成全新回调地址
+              <span
+                class="cursor-pointer select-none text-brand whitespace-nowrap"
+                :class="{ 'opacity-60 pointer-events-none': callbackBusy }"
+                @click="openCallback"
+              >开启</span>
             </div>
             <button
               type="button"

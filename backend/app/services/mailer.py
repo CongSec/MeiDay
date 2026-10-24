@@ -99,7 +99,7 @@ ERROR_ECHO_TEMPLATE = """<!DOCTYPE html>
     <tr><td style="padding:6px 0;color:#666;">时间</td><td style="padding:6px 0;font-weight:600;">{time}</td></tr>
     <tr><td style="padding:6px 0;color:#666;">来源 IP</td><td style="padding:6px 0;font-weight:600;font-family:monospace;">{ip}</td></tr>
   </table>
-  <p style="color:#999;font-size:12px;margin-top:24px;">如非本人操作，请及时在设置页点击「刷新」更换回调 ID。本邮件由 MeiDay 自动发送，请勿回复。</p>
+  <p style="color:#999;font-size:12px;margin-top:24px;">如非本人操作，请在设置页关闭并重新开启「消息通知回调」，将生成全新回调地址。本邮件由 MeiDay 自动发送，请勿回复。</p>
 </body>
 </html>"""
 
@@ -147,7 +147,7 @@ async def send_callback_error_email(
         f"外部系统调用你的「消息通知回调」时发送失败：{reason}\n\n"
         f"邮件标题：{(title or '').strip() or '-'}\n正文预览：{preview}\n"
         f"目标收件：{target or '-'}\n时间：{now}\n来源 IP：{ip or '未知IP'}\n\n"
-        "如非本人操作，请及时在设置页点击「刷新」更换回调 ID。"
+        "如非本人操作，请在设置页关闭并重新开启「消息通知回调」，将生成全新回调地址。"
     )
     msg.set_content(text)
     msg.add_alternative(

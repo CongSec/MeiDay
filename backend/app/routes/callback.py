@@ -17,9 +17,10 @@
   - POST 未命中任何内容字段时，把整个请求体序列化作为正文兜底，保证邮件内容不为空。
   想增加识别的字段名：在下方 _TITLE_KEYS / _CONTENT_KEYS / _DST_KEYS 元组里追加即可。
 
-账号侧接口（需登录，供设置页展示/刷新 ID）：
-- GET  /api/callback/info    查询当前账号回调 ID（无则自动生成并落库）
-- POST /api/callback/refresh 重新随机生成并落库（旧 ID 立即作废）
+账号侧接口（需登录，供设置页展示/开关消息通知回调）：
+- GET  /api/callback/info    查询当前账号回调开关状态与 ID（关闭时不生成 ID）
+- POST /api/callback/open    开启：随机生成全新 ID 并落库（旧 ID 立即作废）
+- POST /api/callback/close   关闭：清空 ID（旧 ID 立即失效）
 """
 
 import json
@@ -166,23 +167,6 @@ def _gen_callback_id(conn) -> str:
         ).fetchone()
         if not row:
             return candidate
-
-
-def _ensure_callback_id(conn, username: str) -> str:
-    """返回该账号的回调 ID，不存在则生成并落库（smtp 字段保持原值）。"""
-    row = conn.execute(
-        "SELECT callback_id FROM smtp_creds WHERE username=?", (username,)
-    ).fetchone()
-    if row and row["callback_id"]:
-        return row["callback_id"]
-    cid = _gen_callback_id(conn)
-    conn.execute(
-        """INSERT INTO smtp_creds (username, smtp_user, smtp_pass, notify_email, callback_id)
-           VALUES (?, '', '', '', ?)
-           ON CONFLICT(username) DO UPDATE SET callback_id=excluded.callback_id""",
-        (username, cid),
-    )
-    return cid
 
 
 async def _parse_post_body(request: Request) -> "dict | str":
@@ -388,16 +372,19 @@ async def callback_post(
 
 @router.get("/callback/info")
 def get_callback_info(response: Response, username: str = Depends(get_username)):
-    """查询当前账号回调 ID（无则自动生成并落库）；敏感配置，禁止缓存。"""
+    """查询当前账号回调开关状态与 ID；敏感配置，禁止缓存。关闭（无 ID）时不自动生成。"""
     response.headers["Cache-Control"] = "no-store"
     with get_conn() as conn:
-        cid = _ensure_callback_id(conn, username)
-    return {"id": cid}
+        row = conn.execute(
+            "SELECT callback_id FROM smtp_creds WHERE username=?", (username,)
+        ).fetchone()
+        cid = row["callback_id"] if row else ""
+    return {"enabled": bool(cid), "id": cid or None}
 
 
-@router.post("/callback/refresh")
-def refresh_callback(response: Response, username: str = Depends(get_username)):
-    """重新随机生成回调 ID 并落库：旧 ID 立即作废。"""
+@router.post("/callback/open")
+def open_callback(response: Response, username: str = Depends(get_username)):
+    """开启消息通知回调：随机生成全新 ID 并落库（旧 ID 立即作废）。"""
     response.headers["Cache-Control"] = "no-store"
     with get_conn() as conn:
         cid = _gen_callback_id(conn)
@@ -407,5 +394,17 @@ def refresh_callback(response: Response, username: str = Depends(get_username)):
                ON CONFLICT(username) DO UPDATE SET callback_id=excluded.callback_id""",
             (username, cid),
         )
-    log_action("更新回调设置", username=username, method="POST", path="/api/callback/refresh", status=200)
-    return {"id": cid}
+    log_action("开启消息通知回调", username=username, method="POST", path="/api/callback/open", status=200)
+    return {"enabled": True, "id": cid}
+
+
+@router.post("/callback/close")
+def close_callback(response: Response, username: str = Depends(get_username)):
+    """关闭消息通知回调：清空回调 ID，旧 ID 立即失效，外部调用无法命中任何账号。"""
+    response.headers["Cache-Control"] = "no-store"
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE smtp_creds SET callback_id=NULL WHERE username=?", (username,)
+        )
+    log_action("关闭消息通知回调", username=username, method="POST", path="/api/callback/close", status=200)
+    return {"enabled": False, "id": None}

@@ -281,7 +281,7 @@ def _migrate_notify_prefs_diary(conn: sqlite3.Connection) -> None:
 def _migrate_smtp_callback_id(conn: sqlite3.Connection) -> None:
     """旧库 smtp_creds 表没有 callback_id 列，启动时补齐（消息通知回调的 10 位随机 ID）。
 
-    该列可空：账号首次查看回调设置时按需生成并落库，无需强制存量行补齐。
+    该列可空：消息通知回调默认关闭（callback_id 为空），账号在设置页点「开启」时才生成。
     """
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(smtp_creds)").fetchall()]
     if "callback_id" not in cols:
@@ -327,6 +327,12 @@ def init_db() -> None:
         _migrate_notify_prefs_diary(conn)
         _migrate_smtp_callback_id(conn)
         _migrate_users_last_seen(conn)
+        # 消息通知回调默认关闭：升级后清空存量账号已生成的回调 ID（幂等，二次启动为 no-op）。
+        # 外部凭旧 ID 的调用将全部失效，需用户在设置页手动「开启」重新生成新 ID。
+        conn.execute(
+            "UPDATE smtp_creds SET callback_id=NULL "
+            "WHERE callback_id IS NOT NULL AND callback_id != ''"
+        )
         # 登录成功通知默认开启、查看密钥通知不可关闭：强制存量行也置为开启
         conn.execute("UPDATE notify_prefs SET login_success=1, key_view=1")
         # 清理已删除用户遗留的孤儿提醒数据（可能来自外键关闭时期写入的旧库），
