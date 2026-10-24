@@ -2,7 +2,7 @@
   "name": "siyuan-plugin-meiday",
   "author": "congsec",
   "url": "https://github.com/CongSec/MeiDay",
-  "version": "1.9.3",
+  "version": "1.9.4",
   "minAppVersion": "3.0.0",
   "backends": [
     "all"
