@@ -5,6 +5,7 @@ import ProjectModal from '@/components/ProjectModal.vue'
 import UploadIndicator from '@/components/UploadIndicator.vue'
 import ImportModal from '@/components/ImportModal.vue'
 import AppIcon from '@/components/AppIcon.vue'
+import CloudStatus from '@/components/CloudStatus.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useProjectsStore } from '@/stores/projects'
 import { useTasksStore } from '@/stores/tasks'
@@ -255,7 +256,18 @@ onMounted(async () => {
         if (needsUnlock.value) return
       }
     } catch {
-      return
+      // 区分两类失败:
+      // - 401(会话失效/被挤下线):request() 已清 token 并触发 st:unauthorized → 走登出/跳登录,
+      //   此时 auth.token 已为空,不能拿陈旧凭证离线解锁;
+      // - 服务器不可达(超时/断连/拒绝):token 仍在,尝试本地离线解锁(记住的密码 + 缓存凭证密文)。
+      //   成功则照常 bootstrap(离线模式:轮询失败退避、云朵显示感叹号,恢复后自动重登);
+      //   失败(无缓存/记住的密码过期)则弹解锁框,输入密码后仍可先尝试本地离线解锁。
+      if (!auth.token) return
+      const offline = await auth.tryOfflineUnlock()
+      if (!offline) {
+        needsUnlock.value = true
+        return
+      }
     }
   }
   await bootstrap()
@@ -325,7 +337,12 @@ async function onUnlock() {
   unlocking.value = true
   unlockErr.value = ''
   try {
-    await auth.login(auth.username, unlockPw.value, rememberPw.value)
+    // 先尝试本地离线解锁（服务器不可达/记住的密码过期时,只要本地有缓存凭证,
+    // 输入正确密码即可离线解密出 OSS 凭证进入系统）;失败再回退服务器登录。
+    const offline = await auth.tryOfflineUnlock(unlockPw.value)
+    if (!offline) {
+      await auth.login(auth.username, unlockPw.value, rememberPw.value)
+    }
     unlockPw.value = ''
     needsUnlock.value = false
     await bootstrap()
@@ -368,14 +385,7 @@ async function onImported(list: Task[]) {
         <button class="w-8 h-8 sm:w-9 sm:h-9 flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100" @click="ui.openDrawer()"><AppIcon name="menu" :size="20" /></button>
         <span class="font-semibold text-sm sm:text-base min-w-0 truncate">{{ mobileActions.title || 'MeiDay' }}</span>
         <div class="ml-auto flex items-center gap-1 sm:gap-1.5">
-          <button
-            class="w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 active:bg-slate-200 disabled:opacity-50"
-            title="同步刷新"
-            :disabled="syncing"
-            @click="syncNow"
-          >
-            <AppIcon name="refresh" :size="16" :class="syncing ? 'animate-spin' : ''" />
-          </button>
+          <CloudStatus />
         </div>
       </header>
       <!-- main 必须是定位上下文：任务卡里 sr-only 复选输入框是 position:absolute，

@@ -291,10 +291,11 @@ def logout(username: str = Depends(get_username), authorization: str = Header(..
 @router.get("/me", response_model=MeResponse)
 def me(username: str = Depends(get_username)):
     with get_conn() as conn:
-        row = conn.execute("SELECT username, encrypted_creds FROM users WHERE username=?", (username,)).fetchone()
+        row = conn.execute("SELECT username, encrypted_creds, creds_updated_at FROM users WHERE username=?", (username,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="用户不存在")
     return MeResponse(
         username=row["username"],
         hasCreds=bool(row["encrypted_creds"]),
+        creds_updated_at=row["creds_updated_at"],
     )

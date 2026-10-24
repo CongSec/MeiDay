@@ -13,8 +13,8 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { todayKey } from '@/utils/time'
 import { isRepeatTaskActiveOn } from '@/utils/todayFilter'
 import AppIcon from '@/components/AppIcon.vue'
+import CloudStatus from '@/components/CloudStatus.vue'
 import type { Subtask, Task } from '@/types'
-import { useSync } from '@/composables/useSync'
 import { taskCompleteFeedback, vibrateSubtaskComplete } from '@/utils/taskFeedback'
 
 const route = useRoute()
@@ -22,7 +22,6 @@ const router = useRouter()
 const projects = useProjectsStore()
 const tasks = useTasksStore()
 const ui = useUiStore()
-const { syncing, syncNow } = useSync()
 
 const taskModalOpen = ref(false)
 const projectModalOpen = ref(false)
@@ -277,14 +276,7 @@ async function confirmDelete() {
             <AppIcon name="trash" :size="13" />
           </button>
         </div>
-        <button
-          class="w-9 h-9 flex items-center justify-center rounded-lg border border-line bg-white text-slate-500 hover:bg-surface-2 active:bg-slate-200 disabled:opacity-50 btn-press"
-          title="同步刷新"
-          :disabled="syncing"
-          @click="syncNow"
-        >
-          <AppIcon name="refresh" :size="16" :class="syncing ? 'animate-spin' : ''" />
-        </button>
+        <CloudStatus />
       </div>
 
       <!-- 手机端紧凑行：编辑 / 移入回收站（项目名已上移到头部显示） -->

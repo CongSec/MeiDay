@@ -1,6 +1,10 @@
 import { getApiBase } from '@/utils/serverConfig'
+import { markServerFail, markServerOk } from '@/utils/serverStatus'
 const TOKEN_KEY = 'st_token'
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000
+/** 业务请求超时（毫秒）：服务器「半死」（可连接但不响应）时快速失败,
+ *  避免登出/解锁/轮询等流程无限挂起;超时按网络层失败处理（云朵显示感叹号）。 */
+const REQUEST_TIMEOUT_MS = 10_000
 
 
 export function getToken(): string {
@@ -177,11 +181,26 @@ async function request<T>(
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   const token = tokenOverride ?? getToken()
   if (token) headers.Authorization = `Bearer ${token}`
-  const res = await fetch(`${getApiBase()}${path}`, {
-    method,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  })
+  // 统一超时：服务器「半死」（TCP 可连但不响应）时快速失败，避免登出/解锁/轮询
+  // 无限挂起；拿到响应即视为「服务器可达」（任意状态码，含 4xx/5xx/401）。
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS)
+  let res: Response
+  try {
+    res = await fetch(`${getApiBase()}${path}`, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: ctrl.signal,
+    })
+    markServerOk()
+  } catch {
+    // 网络层失败（超时/断连/拒绝/DNS）：驱动云朵感叹号
+    markServerFail()
+    throw new ApiError(0, '网络请求失败，请检查服务器是否可达')
+  } finally {
+    clearTimeout(timer)
+  }
   if (!res.ok) {
     let msg = res.statusText
     try {
@@ -214,6 +233,8 @@ export interface SmtpPlain {
 export interface MeResponse {
   username: string
   hasCreds: boolean
+  /** OSS 凭证最近更新时刻（ISO 时间戳）：本地缓存凭证密文的新鲜度校验依据 */
+  creds_updated_at?: string | null
 }
 
 export interface NotifyPrefs {

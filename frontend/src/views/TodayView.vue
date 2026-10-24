@@ -11,11 +11,11 @@ import TaskCard from '@/components/TaskCard.vue'
 import TaskModal from '@/components/TaskModal.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import AppIcon from '@/components/AppIcon.vue'
+import CloudStatus from '@/components/CloudStatus.vue'
 import { dateKeyOf, nowIso, toLocalInput, addMonthsKey } from '@/utils/time'
 import { collectFutureVisibleTasks, isTaskVisibleToday } from '@/utils/todayFilter'
 import { compareTasksByTime } from '@/utils/task'
 import type { Subtask, Task } from '@/types'
-import { useSync } from '@/composables/useSync'
 import { useNow } from '@/composables/useNow'
 import { taskCompleteFeedback, vibrateSubtaskComplete } from '@/utils/taskFeedback'
 
@@ -24,7 +24,6 @@ const projects = useProjectsStore()
 const tasks = useTasksStore()
 const ui = useUiStore()
 const router = useRouter()
-const { syncing, syncNow } = useSync()
 
 const modalOpen = ref(false)
 const editing = ref<Task | null>(null)
@@ -374,14 +373,7 @@ async function confirmDelete() {
               <div class="text-xs text-slate-400 mt-0.5">{{ today }}</div>
             </div>
           </div>
-          <button
-            class="w-9 h-9 flex items-center justify-center rounded-lg border border-line bg-white text-slate-500 hover:bg-surface-2 active:bg-slate-200 disabled:opacity-50 btn-press"
-            title="同步刷新"
-            :disabled="syncing"
-            @click="syncNow"
-          >
-            <AppIcon name="refresh" :size="16" :class="syncing ? 'animate-spin' : ''" />
-          </button>
+          <CloudStatus />
         </div>
   
         <!-- 今日任务进度条：完成 / 未完成百分比 -->

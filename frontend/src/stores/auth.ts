@@ -2,11 +2,34 @@ import { defineStore } from 'pinia'
 import { api } from '@/api/client'
 import { clearSavedPassword, clearSavedUsername, clearToken, getSavedPassword, getSavedUsername, getToken, savePassword, saveUsername, setToken, setUnauthorizedRestoreHook } from '@/api/client'
 import type { SmtpPlain } from '@/api/client'
-import { idbClearUserCache } from '@/utils/idb'
+import { idbClearUserCache, idbGet, idbPut } from '@/utils/idb'
 import { flushPendingSyncReports } from '@/utils/syncReport'
 import { useUiStore } from './ui'
 import { decryptCreds, deriveUserKey, encryptCreds, passwordVerifier } from '@/utils/crypto'
 import type { CredFields } from '@/types'
+
+/** ---- 本地凭证密文缓存（离线解锁的前提） ----
+ *  encrypted_creds 只由服务器下发，刷新后若服务器不可达就取不到；
+ *  userKey 可由「记住的密码 + 用户名」离线派生（确定性 PBKDF2）。因此把
+ *  服务器下发的密文在登录/更新凭证/改密成功后缓存到 IDB（按用户名隔离），
+ *  服务器挂掉时即可用记住的密码离线解密出 OSS 凭证，继续读写用户自己的 OSS 数据。
+ *  密文与服务器存的是同一份，不新增明文暴露面；登出/401 由 idbClearUserCache 清除。
+ *  updatedAt 记录该密文对应的服务器 creds_updated_at，用于在线时的新鲜度校验。 */
+const CREDS_CACHE_PREFIX = 'creds:'
+interface CredsCacheEntry {
+  encrypted: string | null
+  updatedAt: string | null
+}
+
+async function saveCredsCache(username: string, encrypted: string | null, updatedAt: string | null): Promise<void> {
+  if (!username) return
+  await idbPut('kv', `${CREDS_CACHE_PREFIX}${username}`, { encrypted, updatedAt })
+}
+
+async function loadCredsCache(username: string): Promise<CredsCacheEntry | null> {
+  if (!username) return null
+  return (await idbGet<CredsCacheEntry>('kv', `${CREDS_CACHE_PREFIX}${username}`)) ?? null
+}
 
 export const useAuthStore = defineStore('auth', {
   state: () => ({
@@ -15,6 +38,8 @@ export const useAuthStore = defineStore('auth', {
     hasCreds: false,
     userKey: null as CryptoKey | null,
     creds: null as CredFields | null,
+    /** 服务器记录的 OSS 凭证最近更新时刻（/api/me 下发，本地缓存新鲜度校验用） */
+    credsUpdatedAt: null as string | null,
     /** 登录时 OSS 凭证解密失败的提示（不阻断登录，仅提示重新配置） */
     credError: '',
   }),
@@ -48,6 +73,8 @@ export const useAuthStore = defineStore('auth', {
         this.creds = null
       }
       await this.fetchMe()
+      // 缓存服务器下发的凭证密文 + 更新时间，供服务器不可达时离线解锁
+      await saveCredsCache(this.username, r.encrypted_creds, this.credsUpdatedAt)
       saveUsername(this.username)
       if (remember) savePassword(password)
       else clearSavedPassword()
@@ -66,12 +93,14 @@ export const useAuthStore = defineStore('auth', {
       await this.login(body.username, body.password, remember)
     },
     /** 刷新后自动解锁：用浏览器保存的密码（7 天内）重新派生 userKey。
+     *  force=true 时跳过「已在内存解锁」短路，强制向服务器重登并刷新内存凭证与缓存
+     *  （用于改密前的凭证新鲜度校验：内存凭证可能已在他端被更新过）。
      *  网络/后端临时不可达导致失败时不销毁保存的密码（避免反复要求重新输入）；
      *  仅当密码本身错误（登录返回 401，会触发 st:unauthorized 重置）时才清除。 */
-    async tryAutoUnlock(): Promise<boolean> {
+    async tryAutoUnlock(force = false): Promise<boolean> {
       // 已在内存解锁（比如 401 自动恢复刚用记住的密码重登过），直接视为解锁成功，
-      // 避免每次刷新/重启都重复重登挤占服务端会话
-      if (this.userKey && this.username) return true
+      // 避免每次刷新/重启都重复重登挤占服务端会话（除非 force 强制刷新）
+      if (!force && this.userKey && this.username) return true
       if (!this.username) this.username = getSavedUsername()
       if (!this.username) return false
       const pw = getSavedPassword()
@@ -87,6 +116,8 @@ export const useAuthStore = defineStore('auth', {
         this.creds = r.encrypted_creds ? await decryptCreds(this.userKey, r.encrypted_creds) : null
         saveUsername(this.username)
         savePassword(pw)
+        // 刷新本地凭证密文缓存（同步最新密文 + 已知的更新时间）
+        await saveCredsCache(this.username, r.encrypted_creds, this.credsUpdatedAt)
         return true
       } catch {
         return false
@@ -96,6 +127,7 @@ export const useAuthStore = defineStore('auth', {
       const me = await api.me()
       this.username = me.username
       this.hasCreds = me.hasCreds
+      this.credsUpdatedAt = me.creds_updated_at ?? null
       return me
     },
     async saveCredentials(fields: CredFields) {
@@ -114,6 +146,9 @@ export const useAuthStore = defineStore('auth', {
           notify_email: fields.notifyEmail,
         },
       })
+      // 同步服务器记录的更新时间并刷新本地密文缓存（离线解锁时用最新密文）
+      await this.fetchMe()
+      await saveCredsCache(this.username, encrypted, this.credsUpdatedAt)
       this.creds = fields
       this.hasCreds = true
       // 凭证变化后必须重新从 OSS 加载（尤其是新注册后首次配置），并清空旧内存态。
@@ -141,6 +176,26 @@ export const useAuthStore = defineStore('auth', {
       if (!this.creds && this.hasCreds) {
         throw new Error("当前无法解密已保存的 OSS 凭证，请先在「设置」重新配置并保存凭证后，再修改密码")
       }
+      // 凭证新鲜度守卫：他端刚改过凭证/密码时，内存里可能是旧凭证，直接用它重新加密
+      // 会把旧配置写回服务器覆盖新配置。发现服务器版本更新则用记住的密码静默重登刷新，
+      // 重登失败（记住的密码已失效等）则拒绝改密，避免覆盖（旧凭证回写）风险。
+      try {
+        const me = await api.me()
+        const serverUpdatedAt = me.creds_updated_at ?? null
+        if (serverUpdatedAt && serverUpdatedAt !== this.credsUpdatedAt) {
+          this.credsUpdatedAt = serverUpdatedAt
+          // force 重登：确保把服务器端最新密文拉回来解密，而不是跳过（内存凭证可能已过期）
+          const relogged = await this.tryAutoUnlock(true)
+          if (!relogged) {
+            throw new Error('OSS 凭证已在他端变更，请重新登录后再修改密码')
+          }
+        } else {
+          this.credsUpdatedAt = serverUpdatedAt
+        }
+      } catch (e) {
+        // me() 网络失败（离线）时放行：改密请求本身会因服务器不可达而失败，交由下游报错
+        if (e instanceof Error && e.message.includes('已在他端变更')) throw e
+      }
       // 先用新密码派生密钥把 OSS 凭证重新加密，与改密在同一请求/事务内原子提交，
       // 避免“密码已改但凭证未加密”导致修改密码后无法解密
       const newEncryptedCreds =
@@ -152,6 +207,32 @@ export const useAuthStore = defineStore('auth', {
       })
       this.userKey = newKey
       if (getSavedPassword()) savePassword(newPassword)
+      // 改密后同步服务器更新时间并刷新本地密文缓存（旧缓存用旧密钥加密，已无法解密）
+      await this.fetchMe()
+      await saveCredsCache(this.username, newEncryptedCreds, this.credsUpdatedAt)
+    },
+    /** 离线解锁：服务器不可达时，用「记住的密码（或手动输入的密码）」+ 本地缓存的
+     *  凭证密文离线派生 userKey 并解密出 OSS 凭证。成功返回 true，失败返回 false。 */
+    async tryOfflineUnlock(password?: string): Promise<boolean> {
+      if (this.userKey && this.creds) return true
+      const username = this.username || getSavedUsername()
+      if (!username) return false
+      const pw = password || getSavedPassword()
+      if (!pw) return false
+      const cached = await loadCredsCache(username)
+      if (!cached || !cached.encrypted) return false
+      try {
+        const key = await deriveUserKey(pw, username)
+        const fields = await decryptCreds(key, cached.encrypted)
+        this.userKey = key
+        this.creds = fields
+        this.hasCreds = true
+        this.username = username
+        this.credsUpdatedAt = cached.updatedAt ?? null
+        return true
+      } catch {
+        return false
+      }
     },
     async logout() {
       const username = this.username
@@ -207,6 +288,7 @@ export const useAuthStore = defineStore('auth', {
       this.hasCreds = false
       this.userKey = null
       this.creds = null
+      this.credsUpdatedAt = null
       this.credError = ''
     },
   },

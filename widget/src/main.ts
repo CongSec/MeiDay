@@ -68,6 +68,12 @@ async function bootstrap() {
     // 否则冷启动时 tasks 为空，今日视图永远空白（自动登录路径之前漏了这步）。
     await bootstrapLoad().catch(() => {})
     startSyncPoll()
+  } else if (auth.isLoggedIn && (await auth.tryOfflineUnlock())) {
+    // 服务器不可达（token 仍在）但本地缓存凭证可用：离线解锁进入（轮询会失败退避，
+    // 连接状态显示失败，服务器恢复后自动重登回到在线）。
+    // 注意:401（会话失效）时 request() 已清 token,isLoggedIn 为 false,不会走这条路径。
+    await bootstrapLoad().catch(() => {})
+    startSyncPoll()
   } else {
     // 自动解锁失败：打开设置让用户重新登录。若仍持有本地凭据（保存的密码未过期），
     // 则进入“待网络恢复”自动重试（如开机时还没网）——监听 online + 指数退避，

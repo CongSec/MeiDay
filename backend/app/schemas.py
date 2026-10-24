@@ -122,6 +122,10 @@ class ChangePasswordRequest(BaseModel):
 class MeResponse(BaseModel):
     username: str
     hasCreds: bool
+    # OSS 凭证最近更新时刻（ISO 时间戳，未配置过凭证时为 None）。
+    # 客户端据此判断本地缓存的凭证密文是否过期（他端改密/更新凭证后需重新拉取），
+    # 是「本地缓存 encrypted_creds 离线解锁」方案的新鲜度校验依据。
+    creds_updated_at: Optional[str] = None
 
 
 class SmtpPlain(BaseModel):
