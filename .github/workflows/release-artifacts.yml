@@ -158,7 +158,9 @@ jobs:
           npm run build:plugin
 
       - name: Embed built app into plugin shell
-        run: cp frontend/dist-plugin/index.html meiday-siyuan-plugin/src/assets/app.html
+        # 全新 clone 时 src/assets 目录不存在(app.html 已被 gitignore,目录无其它文件),
+        # 必须先建目录再拷贝
+        run: mkdir -p meiday-siyuan-plugin/src/assets && cp frontend/dist-plugin/index.html meiday-siyuan-plugin/src/assets/app.html
 
       - name: Build plugin package
         working-directory: meiday-siyuan-plugin
