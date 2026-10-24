@@ -4,6 +4,7 @@ import { useAuthStore } from '@/stores/auth'
 import { downloadAttachment, formatSize, ossFileName, previewKind } from '@/utils/attachments'
 import type { AttachmentMeta } from '@/types'
 import AppIcon from '@/components/AppIcon.vue'
+import ZoomableImage from '@/components/ZoomableImage.vue'
 
 const props = defineProps<{ meta: AttachmentMeta | null }>()
 const emit = defineEmits<{ close: [] }>()
@@ -90,7 +91,13 @@ function download() {
         <div v-if="loading" class="text-sm text-slate-500">正在解密加载…</div>
         <div v-else-if="error" class="text-sm text-red-500">{{ error }}</div>
         <template v-else-if="url && kind">
-          <img v-if="kind === 'image'" :src="url" alt="预览" class="max-w-full max-h-[70vh] rounded-lg object-contain" />
+          <!-- 图片：点击即可像教程图片一样放大查看（滚轮/双指缩放、拖动平移、双击、Esc 关闭） -->
+          <ZoomableImage
+            v-if="kind === 'image'"
+            :src="url"
+            alt="预览"
+            thumbnail-class="max-w-full max-h-[70vh] rounded-lg object-contain cursor-zoom-in"
+          />
           <!-- sandbox（空值=最强隔离）：阻止 iframe 内任何脚本执行与同源访问，
               即使文件内容是伪装成 PDF 的 HTML，也无法执行 XSS / 读取本应用数据 -->
           <iframe v-else :src="url" sandbox="" class="w-full h-[70vh] rounded-lg border border-slate-200 bg-white" title="PDF 预览" />

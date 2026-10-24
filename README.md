@@ -220,7 +220,7 @@ VITE_API_BASE_URL=https://task.congsec.cn
 
 #### 桌面组件构建教程
 
-直接一键运行`python `
+直接在widget目录一键运行`python run.py`
 
 #### 思源插件构建教程
 

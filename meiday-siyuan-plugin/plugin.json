@@ -10,7 +10,7 @@
   "frontends": [
     "all"
   ],
-  "disabledInPublish": false,
+  "disabledInPublish": true,
   "displayName": {
     "default": "MeiDay",
     "zh-CN": "MeiDay（每日任务日记管理）"
