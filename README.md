@@ -236,7 +236,7 @@ VITE_API_BASE_URL=https://task.congsec.cn
 Copy-Item ".\frontend\dist-plugin\index.html" `
           ".\meiday-siyuan-plugin\src\assets\app.html" -Force
 
-# ② 构建插件包(版本号自动跟随主仓库最新 v* 标签)
+# ② 构建插件包(版本号以 plugin.json/package.json 为准,发版前先手动修改 version 字段)
 cd .\meiday-siyuan-plugin
 npm install
 npm run build

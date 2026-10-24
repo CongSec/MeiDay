@@ -16,9 +16,8 @@ MeiDay 一键构建脚本 (Windows)
     3. 构建环境只检测不自动安装：缺失时打印缺失清单 + 安装指引并停止。
     4. 依赖已存在则跳过安装：node_modules 存在跳过 npm install；
        pip 所需包齐全则跳过 pip install（默认官方源）。
-    5. 思源插件版本号：自动跟随主仓库最近一个 v* 标签（如 v1.7.0 -> 1.7.0），
-       同步写 meiday-siyuan-plugin 的 plugin.json 与 package.json；
-       无标签时保持当前版本。不再交互询问。
+    5. 思源插件版本号：以 meiday-siyuan-plugin 的 plugin.json（及 package.json）
+       为准，构建时不再自动覆盖；发新版前请手动修改这两个文件的 version 字段。
     6. 只产出 output 文件夹，不自动部署到思源。
 用法:
     python build.py           # 完整一键构建
@@ -318,23 +317,7 @@ def build_apk(frontend_dir: Path, output_dir: Path) -> None:
     log(f"  [OK] APK -> {target}  ({apks[0].name})")
 
 
-def sync_plugin_version(plugin_dir: Path, meiday_dir: Path) -> None:
-    """插件版本号自动跟随主仓库最近一个 v* 标签（如 v1.7.0 -> 1.7.0）。
-    无标签时保持当前版本；同步写 plugin.json 与 package.json。"""
-    tag = try_get_output(["git", "-C", str(meiday_dir), "describe", "--tags", "--abbrev=0"])
-    if not tag:
-        log("  [版本] 未找到 v* 标签，保持当前插件版本不变。")
-        return
-    ver = tag.lstrip("vV")
-    for name in ("plugin.json", "package.json"):
-        path = plugin_dir / name
-        data = json.loads(path.read_text(encoding="utf-8"))
-        data["version"] = ver
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        log(f"  [版本] {name} version -> {ver} (来自主仓库标签 {tag})")
-
-
-def build_plugin(frontend_dir: Path, plugin_dir: Path, output_dir: Path, meiday_dir: Path) -> None:
+def build_plugin(frontend_dir: Path, plugin_dir: Path, output_dir: Path) -> None:
     log("==> [3/4] 构建思源插件 (frontend build:plugin -> meiday-siyuan-plugin)")
     log("  [前端] npm run build:plugin ...")
     run([npm_cmd(), "run", "build:plugin"], cwd=frontend_dir)
@@ -347,7 +330,13 @@ def build_plugin(frontend_dir: Path, plugin_dir: Path, output_dir: Path, meiday_
     shutil.copy2(src, dst)
     log(f"  [拷贝] {src.name} -> {dst}")
 
-    sync_plugin_version(plugin_dir, meiday_dir)
+    # 版本号以 plugin.json / package.json 提交值为准,构建时不再自动覆盖;
+    # 发新版前请手动修改这两个文件的 version 字段(两者需保持一致)
+    plugin_ver = json.loads((plugin_dir / "plugin.json").read_text(encoding="utf-8")).get("version", "?")
+    pkg_ver = json.loads((plugin_dir / "package.json").read_text(encoding="utf-8")).get("version", "?")
+    if plugin_ver != pkg_ver:
+        log("  [提示] plugin.json 与 package.json 的 version 不一致,请保持两者一致")
+    log(f"  [版本] 本次将打包 plugin.json 的版本号: {plugin_ver}")
 
     ensure_npm_deps(plugin_dir, "meiday-siyuan-plugin")
     log("  [webpack] npm run build ...")
@@ -425,7 +414,7 @@ def main() -> None:
     # 3. 依赖 + 构建
     ensure_npm_deps(frontend_dir, "frontend")
     build_apk(frontend_dir, output_dir)
-    build_plugin(frontend_dir, plugin_dir, output_dir, meiday_dir)
+    build_plugin(frontend_dir, plugin_dir, output_dir)
     build_widget(widget_dir, output_dir)
 
     # 4. 汇总

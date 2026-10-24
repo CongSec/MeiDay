@@ -138,9 +138,10 @@ jobs:
           if-no-files-found: error
 
   # ---------- 思源插件 package.zip（插件已并入本仓库，随主仓库发版）----------
+  # 插件版本号以 meiday-siyuan-plugin/plugin.json（及 package.json）提交值为准，
+  # 发版前请手动修改这两个文件的 version 字段。
   build-plugin:
     runs-on: ubuntu-latest
-    needs: [compute-version]
     steps:
       - uses: actions/checkout@v4
 
@@ -158,14 +159,6 @@ jobs:
 
       - name: Embed built app into plugin shell
         run: cp frontend/dist-plugin/index.html meiday-siyuan-plugin/src/assets/app.html
-
-      - name: Sync plugin version to release tag
-        working-directory: meiday-siyuan-plugin
-        env:
-          PLUGIN_VERSION: ${{ needs.compute-version.outputs.version }}
-        run: |
-          node -e "const fs=require('fs');const v=process.env.PLUGIN_VERSION;for(const f of ['plugin.json','package.json']){const p=JSON.parse(fs.readFileSync(f,'utf8'));p.version=v;fs.writeFileSync(f,JSON.stringify(p,null,2)+'\n');}"
-          echo "插件版本号已同步为: $PLUGIN_VERSION"
 
       - name: Build plugin package
         working-directory: meiday-siyuan-plugin
