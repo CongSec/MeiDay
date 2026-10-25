@@ -1,6 +1,6 @@
 import type { RepeatMaster, RepeatRule, Subtask, Task } from '@/types'
 import { addDaysKey, addMonthsKey, dateKeyOf, diffDaysKey } from './time'
-import { isNewStyleRepeat, isRepeatDay } from './repeat'
+import { isNewStyleRepeat } from './repeat'
 import { compareTasksByTime } from './task'
 
 /** 今日/未来某天可见判断所需的公共字段（主任务与子任务共用同一套核心逻辑） */
@@ -17,8 +17,8 @@ interface TodayCandidate {
 
 /** 某天可见核心逻辑（主任务与子任务共用，避免两处逻辑分叉）：
  *  - 已完成：仅「当天完成」显示；
- *  - 新模型重复任务：只在「匹配重复规则的那一天」显示（不再以提醒时间/起止时间为准），
- *    未到首次出现日或已过结束日期都不显示；
+ *  - 新模型重复任务：未完成时自首次出现日起一直显示（滞留：不再按重复日/结束日期过滤），
+ *    直到完成/删除/去掉重复逻辑；未到首次出现日（date < start）不显示；
  *  - 普通任务：date 落在开始~截止范围，或提醒时间命中 date，即显示；
  *  - 没有任何开始/截止时间约束的待办：仅当提醒时间命中 date 才显示；
  *    未定日期任务属于所属项目，不自动进入今日视图（项目新建任务默认开始时间为空）。 */
@@ -28,8 +28,8 @@ function isCandidateVisibleOn(c: TodayCandidate, date: string): boolean {
   if (c.repeatProcessed?.[date]) return false
   const rule = c.repeat
   if (rule && isNewStyleRepeat(rule) && rule.start) {
-    if (rule.endAfter && date > rule.endAfter) return false
-    return date >= rule.start && isRepeatDay(rule, rule.start, date)
+    // 未完成（completed 已被上方分支拦截）：首次出现日起一直显示，滞留直到完成/删除/去掉重复
+    return date >= rule.start
   }
   const startDay = c.startTime ? dateKeyOf(c.startTime) : null
   const endDay = c.endTime ? dateKeyOf(c.endTime) : null
@@ -153,13 +153,12 @@ export function collectFutureVisibleTasks(
     .sort(compareFutureSort)
 }
 
-/** 重复任务在 date 当天是否「活跃」（首次出现日已到且当天是重复日）：
- *  项目视图用它过滤——未到首次出现日 / 非重复日的重复任务不在项目列表显示，
- *  只进今日视图的「未来任务」区；普通任务与老模型重复任务（无 rule.start）恒为 true。 */
+/** 重复任务在 date 当天是否「活跃」（未完成的重复任务自首次出现日起一直活跃）：
+ *  项目视图用它过滤——未到首次出现日的重复任务不在项目列表显示，只进今日视图的
+ *  「未来任务」区；普通任务与老模型重复任务（无 rule.start）恒为 true。 */
 export function isRepeatTaskActiveOn(t: Task, date: string): boolean {
   const rule = t.repeat
   if (!rule || !isNewStyleRepeat(rule) || !rule.start) return true
-  if (rule.endAfter && date > rule.endAfter) return false
   if (t.repeatProcessed?.[date]) return false
-  return date >= rule.start && isRepeatDay(rule, rule.start, date)
+  return date >= rule.start
 }

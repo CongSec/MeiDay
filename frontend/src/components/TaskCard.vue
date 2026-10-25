@@ -3,7 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { useNow } from '@/composables/useNow'
 import { dateKeyOf, formatTodayTitle, todayKey } from '@/utils/time'
-import { formatRepeat, isNewStyleRepeat, isRepeatDay } from '@/utils/repeat'
+import { formatRepeat, isNewStyleRepeat } from '@/utils/repeat'
 import type { Project, Subtask, Task } from '@/types'
 import { VueDraggable } from 'vue-draggable-plus'
 import { getDragOptions, setDragging, startPointerTrack, stopPointerTrack, trackDropPointer, lastDropPointer } from '@/utils/drag'
@@ -35,12 +35,10 @@ const { now } = useNow()
 const overdue = computed(() => {
   if (props.task.status !== 'pending' || !props.task.reminderTime) return false
   const rule = props.task.repeat
-  // 新模型重复任务：仅在「重复日」当天且已过提醒时刻才提示“已过提醒时间”；
-  // 非重复日不提示，避免与“任务只在重复日当天出现/提醒”的语义冲突。
+  // 新模型重复任务：首次出现日前不提示（任务还未出现）；首次出现日后（含滞留期间）
+  // 只要提醒时间已过就提示“已过提醒时间”，与普通任务逾期提示一致。
   if (rule && isNewStyleRepeat(rule) && rule.start) {
-    const today = todayKey()
-    if (rule.endAfter && today > rule.endAfter) return false
-    if (!(today >= rule.start && isRepeatDay(rule, rule.start, today))) return false
+    if (todayKey() < rule.start) return false
   }
   return new Date(props.task.reminderTime).getTime() <= now.value
 })
