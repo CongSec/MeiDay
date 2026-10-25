@@ -265,8 +265,12 @@ async function confirmDelete() {
         <div class="flex items-center gap-3">
           <span class="w-2.5 h-2.5 rounded-full shrink-0" :style="{ backgroundColor: project.color }" />
           <h1 class="text-xl font-bold text-slate-800">{{ project.name }}</h1>
-          <button class="text-xs text-slate-400 hover:text-brand flex items-center gap-1 btn-press" @click="projectModalOpen = true">
-            <AppIcon name="edit" :size="13" /> 编辑
+          <button
+            class="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-brand btn-press"
+            title="编辑项目"
+            @click="projectModalOpen = true"
+          >
+            <AppIcon name="edit" :size="13" />
           </button>
           <button
             class="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 btn-press"
@@ -281,8 +285,12 @@ async function confirmDelete() {
 
       <!-- 手机端紧凑行：编辑 / 移入回收站（项目名已上移到头部显示） -->
       <div class="mt-1 flex items-center gap-2 lg:hidden">
-        <button class="text-[11px] text-slate-400 hover:text-brand flex items-center gap-1" @click="projectModalOpen = true">
-          <AppIcon name="edit" :size="12" /> 编辑
+        <button
+          class="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-brand"
+          title="编辑项目"
+          @click="projectModalOpen = true"
+        >
+          <AppIcon name="edit" :size="13" />
         </button>
         <button
           class="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50"

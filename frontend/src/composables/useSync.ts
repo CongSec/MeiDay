@@ -3,6 +3,7 @@ import { useProjectsStore } from '@/stores/projects'
 import { useTasksStore } from '@/stores/tasks'
 import { useStatsStore } from '@/stores/stats'
 import { useUiStore } from '@/stores/ui'
+import { serverStatus } from '@/utils/serverStatus'
 
 /** 全局唯一同步锁：刷新按钮、下拉刷新同时触发时只执行一次 */
 const syncing = ref(false)
@@ -48,11 +49,17 @@ export function useSync() {
       // tasks/trash/repeats 数据包（OSS 请求风暴 + 内存膨胀）。
       const cachedIds = await tasks.loadFromIdb(projectIds)
       const fullyCached = projectIds.every((id) => cachedIds.includes(id))
+      // 服务器不可达时（云朵为叹号），2s 轮询的变更事件通道失效——本端无法得知
+      // 其它设备改了哪些项目，「今日相关子集」（基于本地已加载任务的旧知识）会漏掉
+      // 刚在别端新增今日任务的项目，导致今日视图缺任务。此时手动同步必须全量同步
+      // 全部项目兜底（条件 GET，未变化项目 304 零下载）；服务器正常时保留子集优化，
+      // 漏掉的项目 2s 内会被轮询的变更事件补上。
+      const serverDown = serverStatus.value === 'fail'
       const todayIds = tasks.todayRelevantProjectIds(projectIds)
       const viewIds = tasks.viewPinnedProjectIds
-      const target = fullyCached
-        ? [...new Set([...todayIds, ...viewIds])]
-        : projectIds
+      const target = serverDown || !fullyCached
+        ? projectIds
+        : [...new Set([...todayIds, ...viewIds])]
       const failed = await tasks.syncAll(target)
       if (failed > 0) {
         ui.toast(`同步完成，${failed} 个项目同步失败`, 'error')
