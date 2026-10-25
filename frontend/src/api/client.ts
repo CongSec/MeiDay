@@ -159,6 +159,11 @@ interface RequestOpts {
   /** 是否允许触发 401 自动恢复：登录请求本身 401 是“登录失败”，
    *  不应触发恢复（否则会拿记住的密码再登一次，重复计数异常导致锁定） */
   restoreOn401?: boolean
+  /** 该请求不驱动云朵连接状态：用于轮询周期内的非「可达性探测」请求
+   *  （如待发上报），保证一个轮询周期只由主探测请求（getSyncState）定状态，周期内不翻转 */
+  silent?: boolean
+  /** 覆盖默认超时（毫秒）：探测类请求用更短超时，半死服务器下更快反映连接状态 */
+  timeoutMs?: number
 }
 async function request<T>(
   method: string,
@@ -167,7 +172,7 @@ async function request<T>(
   tokenOverride?: string,
   opts?: RequestOpts,
 ): Promise<T> {
-  const { retried = false, restoreOn401 = true } = opts ?? {}
+  const { retried = false, restoreOn401 = true, silent = false, timeoutMs = REQUEST_TIMEOUT_MS } = opts ?? {}
   // 本地会话过期（7 天未活动）：直接视为未认证，清理本地态并跳登录。
   // 让 isTokenExpiredLocal/tokenAgeMs 真正生效，避免“本地已过期仍发请求”（BUG-36）。
   // tokenOverride 是内部重登（login 携带旧 token 判定“后台静默重登”），
@@ -182,9 +187,15 @@ async function request<T>(
   const token = tokenOverride ?? getToken()
   if (token) headers.Authorization = `Bearer ${token}`
   // 统一超时：服务器「半死」（TCP 可连但不响应）时快速失败，避免登出/解锁/轮询
-  // 无限挂起；拿到响应即视为「服务器可达」（任意状态码，含 4xx/5xx/401）。
+  // 无限挂起。状态语义（方案 B 瞬时反馈）：
+  // - 网络层失败（超时/断连/拒绝）→ 失败；
+  // - 2xx/3xx/4xx（含 401：服务器活着、在应答）→ 可达；
+  // - 5xx（500/502/503/504）：后端自身故障或「前置代理/网关应答但后端不可达」
+  //   （vite dev 代理、/__api/ 桥接、nginx 反代在后端死掉时都会返回 502）→ 失败，
+  //   否则服务器挂掉时云朵会一直被 502「误判为可达」。
+  // silent 请求（如轮询内的待发上报）不驱动云朵状态，避免一个轮询周期内反复翻转。
   const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS)
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
   let res: Response
   try {
     res = await fetch(`${getApiBase()}${path}`, {
@@ -193,10 +204,13 @@ async function request<T>(
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: ctrl.signal,
     })
-    markServerOk()
+    if (!silent) {
+      if (res.status >= 500) markServerFail()
+      else markServerOk()
+    }
   } catch {
     // 网络层失败（超时/断连/拒绝/DNS）：驱动云朵感叹号
-    markServerFail()
+    if (!silent) markServerFail()
     throw new ApiError(0, '网络请求失败，请检查服务器是否可达')
   } finally {
     clearTimeout(timer)
@@ -403,13 +417,15 @@ export const api = {
     return request<{ ok: true; days: number }>('PUT', '/api/settings/log-retention', { days })
   },
   /** 同步协调中心：OSS 写入成功后上报变更事件（报告给中心服务器，由它通知其它设备）。
-   *  ids = 本次新插入的事件 id，供轮询精确排除「自己刚上报的事件」（避免跳过别端变更）。 */
+   *  ids = 本次新插入的事件 id，供轮询精确排除「自己刚上报的事件」（避免跳过别端变更）。
+   *  silent：上报是数据同步、非可达性探测，不驱动云朵状态（避免轮询周期内反复翻转）。 */
   reportSyncChanges(events: SyncChangeItem[]) {
-    return request<{ ok: true; version: number; ids: number[] }>('POST', '/api/sync/report', { events })
+    return request<{ ok: true; version: number; ids: number[] }>('POST', '/api/sync/report', { events }, undefined, { silent: true })
   },
-  /** 同步协调中心：轮询获取总版本号与 since 之后的变更列表，判断是否有数据需要拉取 */
+  /** 同步协调中心：轮询获取总版本号与 since 之后的变更列表，判断是否有数据需要拉取。
+   *  轮询的主「可达性探测」请求：用更短超时（5s），半死服务器下更快反映连接状态。 */
   getSyncState(since = 0) {
-    return request<SyncState>('GET', `/api/sync/state?since=${since}`)
+    return request<SyncState>('GET', `/api/sync/state?since=${since}`, undefined, undefined, { timeoutMs: 5000 })
   },
   /** 消息通知回调：查询当前账号开关状态与回调 ID（关闭时不返回 ID） */
   getCallbackInfo() {

@@ -136,6 +136,11 @@ async function attemptRestore(): Promise<boolean> {
 interface RequestOpts {
   retried?: boolean
   restoreOn401?: boolean
+  /** 不驱动连接状态：轮询周期内的非「可达性探测」请求（如待发上报），
+   *  保证一个轮询周期只由主探测请求（getSyncState）定状态 */
+  silent?: boolean
+  /** 覆盖默认超时（毫秒）：探测类请求用更短超时，更快反映连接状态 */
+  timeoutMs?: number
 }
 async function request<T>(
   method: string,
@@ -144,7 +149,7 @@ async function request<T>(
   tokenOverride?: string,
   opts?: RequestOpts,
 ): Promise<T> {
-  const { retried = false, restoreOn401 = true } = opts ?? {}
+  const { retried = false, restoreOn401 = true, silent = false, timeoutMs = REQUEST_TIMEOUT_MS } = opts ?? {}
   if (!tokenOverride && isTokenExpiredLocal()) {
     clearToken()
     clearSavedPassword()
@@ -154,10 +159,11 @@ async function request<T>(
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   const token = tokenOverride ?? getToken()
   if (token) headers.Authorization = `Bearer ${token}`
-  // 统一超时：服务器「半死」（TCP 可连但不响应）时快速失败，避免启动/解锁/轮询无限挂起；
-  // 拿到响应即视为「服务器可达」（任意状态码，含 4xx/5xx/401）。
+  // 统一超时：服务器「半死」（TCP 可连但不响应）时快速失败，避免启动/解锁/轮询无限挂起。
+  // 状态语义：网络层失败（超时/断连/拒绝）→ 失败；2xx/3xx/4xx（含 401）→ 可达；
+  // 5xx（500/502/503/504，含前置代理/网关在后端死掉时返回的 502）→ 失败。
   const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS)
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
   let res: Response
   try {
     res = await fetch(`${getApiBase()}${path}`, {
@@ -166,10 +172,13 @@ async function request<T>(
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: ctrl.signal,
     })
-    markServerOk()
+    if (!silent) {
+      if (res.status >= 500) markServerFail()
+      else markServerOk()
+    }
   } catch {
     // 网络层失败（超时/断连/拒绝/DNS）
-    markServerFail()
+    if (!silent) markServerFail()
     throw new ApiError(0, '网络请求失败，请检查服务器是否可达')
   } finally {
     clearTimeout(timer)
@@ -249,10 +258,10 @@ export const api = {
     return request<OssCheckResult>('POST', '/api/credentials/oss-check', body)
   },
   reportSyncChanges(events: SyncChangeItem[]) {
-    return request<{ ok: true; version: number; ids: number[] }>('POST', '/api/sync/report', { events })
+    return request<{ ok: true; version: number; ids: number[] }>('POST', '/api/sync/report', { events }, undefined, { silent: true })
   },
   getSyncState(since = 0) {
-    return request<SyncState>('GET', `/api/sync/state?since=${since}`)
+    return request<SyncState>('GET', `/api/sync/state?since=${since}`, undefined, undefined, { timeoutMs: 5000 })
   },
 }
 
