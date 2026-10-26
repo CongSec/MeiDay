@@ -687,6 +687,95 @@ const exportBusy = ref(false)
 const clearBusy = ref(false)
 const clearOpen = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
+/** 项目图「导出CSV」进行中：禁用按钮防重复点击 */
+const csvBusy = ref(false)
+
+/** CSV 单元格转义（RFC 4180）：含逗号/引号/换行时加双引号包裹，内部引号翻倍 */
+function csvCell(v: unknown): string {
+  const s = v == null ? '' : String(v)
+  return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s
+}
+/** 时间字段格式化：YYYY-MM-DD HH:MM（与任务卡片口径一致），缺失留空 */
+function fmtTime(iso?: string | null): string {
+  return (iso || '').slice(0, 16).replace('T', ' ')
+}
+
+/** 导出项目图当前筛选/搜索结果（CSV，UTF-8 BOM）：
+ *  未筛选时导出所选年份全部胶囊任务；筛选/搜索时导出当前条件全部命中项（跨所有项目与月份，不受分页限制）。
+ *  数据源与统计行「筛选出 N 个项目 / M 条记录」一致（projectGroups 的 monthGroups）。 */
+async function exportCsv() {
+  if (csvBusy.value) return
+  csvBusy.value = true
+  try {
+    const rows: { label: string; task: Task }[] = []
+    for (const g of projectGroups.value) {
+      for (const mg of g.monthGroups) {
+        for (const t of mg.tasks) rows.push({ label: g.label, task: t })
+      }
+    }
+    if (!rows.length) {
+      ui.toast('没有符合条件的数据可导出', 'error')
+      return
+    }
+    const header = [
+      '项目名',
+      '任务名',
+      '状态',
+      '创建时间',
+      '开始时间',
+      '提醒时间',
+      '截止时间',
+      '完成/入舱时间',
+      '耗时',
+      '子任务摘要',
+      '附件名',
+    ]
+    const lines: string[] = [header.map(csvCell).join(',')]
+    for (const { label, task: t } of rows) {
+      // 子任务摘要：子任务名[✓/✗]，分号拼接（旧数据可能缺失 subtasks，统一补空）
+      const subtaskSummary = (t.subtasks ?? [])
+        .map((sb) => `${sb.name || '未命名子任务'}[${sb.completed ? '✓' : '✗'}]`)
+        .join('；')
+      // 附件名：主任务 + 子任务附件去重后分号拼接
+      const attNames = [
+        ...(t.attachments ?? []),
+        ...(t.subtasks ?? []).flatMap((sb) => sb.attachments ?? []),
+      ]
+        .map((a) => a.name)
+        .filter(Boolean)
+      const line = [
+        label,
+        t.name || '未命名任务',
+        t.status === 'deleted' ? '已删除' : '已完成',
+        fmtTime(t.createdAt),
+        fmtTime(t.startTime),
+        fmtTime(t.reminderTime),
+        fmtTime(t.endTime),
+        fmtTime(t.updatedAt),
+        durationText(t),
+        subtaskSummary,
+        [...new Set(attNames)].join('；'),
+      ]
+      lines.push(line.map(csvCell).join(','))
+    }
+    // \uFEFF（BOM）保证 Excel/WPS 正确识别 UTF-8 中文；\r\n 为 CSV 标准换行
+    const blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `时间胶囊-项目图导出-${viewYear.value}-${todayKey()}.csv`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+    ui.toast(`已导出 ${rows.length} 条筛选结果`)
+    logAudit('导出项目图筛选结果', `${rows.length} 条，年份 ${viewYear.value}`)
+  } catch (e) {
+    ui.toast((e as Error).message || '导出 CSV 失败', 'error')
+  } finally {
+    csvBusy.value = false
+  }
+}
 
 /** 收集回收站失败项：pid + 失败原因（load-error=项目文件加载失败；shard-error=更早分片拉取失败；capped=超过 600 个月上限） */
 interface TrashCollectFailure {
@@ -1309,15 +1398,26 @@ async function confirmCalendarDelete() {
             title="结束日期（含当天 23:59）"
           />
         </template>
-        <button
-          v-if="anyCondition"
-          class="ml-auto inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-500 hover:bg-slate-50"
-          title="清空关键词与全部筛选条件"
-          @click="resetFilters"
-        >
-          <AppIcon name="close" :size="12" />
-          重置
-        </button>
+        <div class="ml-auto flex items-center gap-1.5">
+          <button
+            class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-60"
+            title="导出当前筛选/搜索结果（未筛选时导出所选年份全部胶囊任务）为 CSV"
+            :disabled="csvBusy"
+            @click="exportCsv"
+          >
+            <AppIcon name="download" :size="12" class="text-slate-500" />
+            {{ csvBusy ? '导出中…' : '导出CSV' }}
+          </button>
+          <button
+            v-if="anyCondition"
+            class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-500 hover:bg-slate-50"
+            title="清空关键词与全部筛选条件"
+            @click="resetFilters"
+          >
+            <AppIcon name="close" :size="12" />
+            重置
+          </button>
+        </div>
       </div>
 
       <!-- 结果统计 / 口径提示 -->

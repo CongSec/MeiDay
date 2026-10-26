@@ -181,6 +181,7 @@ SECURITY_SUBJECTS = {
     "capsule_export": "【MeiDay 安全通知】时间胶囊备份被导出",
     "capsule_import": "【MeiDay 安全通知】时间胶囊备份被导入",
     "capsule_clear": "【MeiDay 安全通知】时间胶囊被清空",
+    "capsule_filter_export": "【MeiDay 安全通知】时间胶囊项目图导出",
 }
 
 SECURITY_BODIES = {
@@ -197,6 +198,7 @@ SECURITY_BODIES = {
     "capsule_export": "[{ip}] 导出了你的时间胶囊备份",
     "capsule_import": "[{ip}] 导入了你的时间胶囊备份",
     "capsule_clear": "[{ip}] 清空了你的时间胶囊",
+    "capsule_filter_export": "[{ip}] 导出了你的时间胶囊项目图数据",
 }
 
 SECURITY_TEMPLATE = """<!DOCTYPE html>

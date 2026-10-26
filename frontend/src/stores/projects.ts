@@ -343,8 +343,29 @@ export const useProjectsStore = defineStore('projects', {
         { id: p.id, name: p.name, color: p.color, icon: p.icon, deletedAt: nowIso() },
       ]
       tasks.markAllDeleted(id)
-      // 墓碑先落：整项目删除必须先让墓碑日志写盘，再写 tasks（防复活写顺序约束）
-      await tasks.saveTombstonesNow(id)
+      // 墓碑先落：整项目删除必须先让墓碑日志写盘，再写 tasks（防复活写顺序约束）。
+      // 墓碑写盘失败 ⇒ 删除证据未上云：此时其余文件尚未写盘，直接回滚并明确报错，
+      // 避免其它设备把整个项目的任务并集写回复活（与 softDeleteConfirmed 同族 BUG）。
+      const okTombstone = await tasks.saveTombstonesNow(id)
+      if (!okTombstone) {
+        this.projects = projectsSnap
+        this.deletedProjects = deletedSnap
+        await tasks.rollbackProject(id, {
+          tasks: tasksSnap,
+          trash: trashSnap,
+          repeats: repeatsSnap,
+          tombstones: tombstonesSnap,
+        })
+        if (auth.username) {
+          await idbPut('profile', auth.username, {
+            projects: applyDeletedProjectTombstones([...projectsSnap], deletedSnap),
+            deletedProjects: [...deletedSnap],
+            updated_at: nowIso(),
+          })
+        }
+        useUiStore().toast('删除项目失败：删除记录同步未完成，请重试', 'error')
+        return false
+      }
       // 立即写盘：profile + 任务 + 回收站 + 重复模板
       const [okProfile, okTasks, okTrash, okRepeats] = await Promise.all([
         this.saveNow(),
