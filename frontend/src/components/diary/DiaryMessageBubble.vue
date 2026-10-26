@@ -75,11 +75,11 @@
           </div>
           <div class="relative">
             <a
-              :href="url || undefined"
-              :download="message.file?.name"
-              target="_blank"
-              rel="noopener"
-              class="flex items-center gap-3 rounded-2xl rounded-tr-sm bg-white shadow px-3.5 py-3 hover:bg-slate-50"
+              role="button"
+              tabindex="0"
+              class="flex items-center gap-3 rounded-2xl rounded-tr-sm bg-white shadow px-3.5 py-3 hover:bg-slate-50 cursor-pointer select-none"
+              @click="saveFile"
+              @keydown.enter="saveFile"
             >
               <span class="w-9 h-9 rounded-lg bg-green-400/20 text-green-600 flex items-center justify-center shrink-0">
                 <AppIcon name="document" :size="18" />
@@ -129,6 +129,8 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import AppIcon from '@/components/AppIcon.vue'
 import DiaryDeleteButton from './DiaryDeleteButton.vue'
 import { useDiaryStore } from '@/stores/diary'
+import { useUiStore } from '@/stores/ui'
+import { saveBlobToDevice } from '@/utils/saveBlob'
 import { formatDiaryMsgTime } from '@/utils/time'
 import type { DiaryMessage } from '@/types'
 import logo from '@/assets/logo.png'
@@ -137,6 +139,7 @@ const props = defineProps<{ message: DiaryMessage; readonly?: boolean }>()
 const emit = defineEmits<{ delete: [id: string] }>()
 
 const diary = useDiaryStore()
+const ui = useUiStore()
 const elRef = ref<HTMLElement | null>(null)
 const url = ref('')
 let observer: IntersectionObserver | null = null
@@ -165,6 +168,25 @@ async function loadFileUrl(): Promise<void> {
     url.value = await diary.fileUrl(file.fileId, file.mime)
   } catch {
     /* 解密/下载失败：保持空，不阻塞聊天 */
+  }
+}
+
+/** 文件卡片：保存到设备（原生端落盘到系统下载目录并提示路径；Web 端浏览器下载） */
+async function saveFile(): Promise<void> {
+  const file = props.message.file
+  if (!file) return
+  if (!url.value) await loadFileUrl()
+  if (!url.value) {
+    ui.toast('文件加载失败', 'error')
+    return
+  }
+  try {
+    const blob = await fetch(url.value).then((r) => r.blob())
+    const save = await saveBlobToDevice(blob, file.name, file.mime)
+    // 原生端：文件已落盘到系统下载目录，明确告知路径；Web 端浏览器自带下载栏，无需提示
+    if (save.mode === 'native' && save.path) ui.toast(`已保存到 ${save.path}`)
+  } catch (e) {
+    ui.toast((e as Error).message || '保存失败', 'error')
   }
 }
 

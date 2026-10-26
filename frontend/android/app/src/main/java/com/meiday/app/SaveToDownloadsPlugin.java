@@ -36,7 +36,9 @@ import java.io.OutputStream;
 @CapacitorPlugin(
         name = "SaveToDownloads",
         permissions = {
-                @Permission(strings = { android.Manifest.permission.WRITE_EXTERNAL_STORAGE }, alias = "legacyStorage", maxSdkVersion = 28)
+                // maxSdkVersion 由 AndroidManifest 里的 WRITE_EXTERNAL_STORAGE 声明控制（本注解不支持该属性，
+                // 与 RecentImagesPlugin 的 READ_EXTERNAL_STORAGE 同款写法）；插件内仅在 Android 9- 时才请求该权限
+                @Permission(strings = { android.Manifest.permission.WRITE_EXTERNAL_STORAGE }, alias = "legacyStorage")
         }
 )
 public class SaveToDownloadsPlugin extends Plugin {
