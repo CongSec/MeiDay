@@ -808,7 +808,7 @@ async function exportCsv() {
     const header = [
       // —— 常用字段（任务界面可视）——
       '项目名', '任务名', '状态', '任务描述', '创建时间', '开始时间', '提醒时间', '截止时间',
-      '完成/入舱时间', '耗时', '是否已提醒', '重复规则', '子任务', '附件',
+      '完成/入舱时间', '耗时', '重复规则', '子任务', '附件', '是否已提醒',
       // —— 完整/内部字段 ——
       '任务ID', '项目ID', '排序', '重复根任务ID', '单日已处理', '单日记录标记', '附件Key',
       '子任务原始数据', '重复规则原始数据',
@@ -826,10 +826,10 @@ async function exportCsv() {
         fmtTime(t.endTime),                               // 截止时间
         fmtTime(t.updatedAt),                             // 完成/入舱时间
         durationText(t),                                  // 耗时
-        t.isReminded ? '是' : '否',                       // 是否已提醒
         humanRepeat(t.repeat),                            // 重复规则（可读）
         subtaskSummaryOf(t),                              // 子任务（可读）
         attachmentSummaryOf(t),                           // 附件（可读）
+        t.isReminded ? '是' : '否',                       // 是否已提醒
         t.id,                                             // 任务ID
         t.projectId || '',                                // 项目ID
         typeof t.sort === 'number' ? String(t.sort) : '', // 排序
