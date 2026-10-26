@@ -269,6 +269,7 @@ import { todayKey } from '@/utils/time'
 import { describeDiaryError, peekDiaryZipHasDek } from '@/utils/diaryStorage'
 import { api } from '@/api/client'
 import { logAudit, safeDetail } from '@/utils/audit'
+import { saveToastText } from '@/utils/saveBlob'
 
 const diary = useDiaryStore()
 const ui = useUiStore()
@@ -389,7 +390,7 @@ async function doExport(): Promise<void> {
   }
   try {
     const r = await diary.exportPeriod(exportYear.value, exportMonth.value ?? undefined, pw)
-    ui.toast(`已导出 ${r.count} 个加密文件`)
+    ui.toast(saveToastText(r.save, `已导出 ${r.count} 个加密文件`))
     exportOpen.value = false
     exportPw.value = ''
     exportPw2.value = ''

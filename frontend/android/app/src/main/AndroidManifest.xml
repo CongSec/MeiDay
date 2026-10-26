@@ -71,4 +71,6 @@
     <!-- 读取相册最近截图（方案 A）：Android 13+ 用 READ_MEDIA_IMAGES，旧版本用 READ_EXTERNAL_STORAGE -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <!-- 导出/下载保存到系统下载目录：仅 Android 9 及以下需要（Android 10+ 走 MediaStore 无需权限） -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
 </manifest>

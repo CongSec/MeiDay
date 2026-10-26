@@ -17,6 +17,7 @@ import { nowIso, todayKey } from '@/utils/time'
 import type { DiaryBatch, DiaryMessage } from '@/types'
 import { logAudit, safeDetail } from '@/utils/audit'
 import { maybeCompressImage } from '@/utils/diaryImageCompress'
+import { saveBlobToDevice, type SaveResult } from '@/utils/saveBlob'
 
 /** 后台上传中的单个文件（用于界面并行展示进度，不阻塞其它发送） */
 export interface DiaryUploadState {
@@ -463,7 +464,7 @@ export const useDiaryStore = defineStore('diary', {
     },
 
     /** 按月或按年导出（zip，保留 OSS 原始结构，全密文；导出密码用于包装源 DEK 供跨账号导入） */
-    async exportPeriod(y: number, m: number | undefined, exportPassword: string): Promise<{ count: number; name: string }> {
+    async exportPeriod(y: number, m: number | undefined, exportPassword: string): Promise<{ count: number; name: string; save: SaveResult }> {
       if (!ossClient || !this.username || !getDiaryDek()) throw new Error('日记会话已锁定')
       this.exporting = true
       try {
@@ -475,14 +476,9 @@ export const useDiaryStore = defineStore('diary', {
           m !== undefined ? String(m) : undefined,
           exportPassword,
         )
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = name
-        a.click()
-        window.setTimeout(() => URL.revokeObjectURL(url), 5000)
+        const save = await saveBlobToDevice(blob, name, 'application/zip')
         logAudit('日记-导出', safeDetail(`共 ${count} 个加密文件`))
-        return { count, name }
+        return { count, name, save }
       } finally {
         this.exporting = false
       }

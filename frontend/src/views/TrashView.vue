@@ -12,11 +12,12 @@ import TimeCapsuleHeatmap from '@/components/TimeCapsuleHeatmap.vue'
 import TimeCapsuleTrend from '@/components/TimeCapsuleTrend.vue'
 import TimeCapsuleResources from '@/components/TimeCapsuleResources.vue'
 import type JSZip from 'jszip'
-import { deleteAttachments, downloadAttachment } from '@/utils/attachments'
+import { deleteAttachments, downloadAttachment, formatSize } from '@/utils/attachments'
+import { saveBlobToDevice, saveToastText } from '@/utils/saveBlob'
 import { createOssClient } from '@/utils/oss'
 import { dateKeyOf, formatTodayTitle, nowIso, todayKey } from '@/utils/time'
 import { logAudit, logAttachmentDeletion, type AttachmentDeletionFile } from '@/utils/audit'
-import { UNCATEGORIZED, type AttachmentMeta, type DeletedProject, type Project, type Task } from '@/types'
+import { UNCATEGORIZED, type AttachmentMeta, type DeletedProject, type Project, type RepeatRule, type Task } from '@/types'
 
 const auth = useAuthStore()
 const projects = useProjectsStore()
@@ -700,9 +701,96 @@ function fmtTime(iso?: string | null): string {
   return (iso || '').slice(0, 16).replace('T', ' ')
 }
 
+/* ---- 导出字段构造辅助：覆盖 Task / Subtask / AttachmentMeta / RepeatRule 全部字段 ---- */
+
+/** 重复规则人类可读文本（覆盖 RepeatRule 全部子字段：type/interval/weekdays/monthDay/yearMonth/endAfter/dates/start） */
+function humanRepeat(rule?: RepeatRule): string {
+  if (!rule) return ''
+  const typeLabel: Record<string, string> = {
+    daily: '每天',
+    weekly: '每周',
+    workday: '每个工作日',
+    monthly: '每月',
+    legalWorkday: '法定工作日',
+    yearly: '每年',
+    dates: '指定日期',
+  }
+  const unit: Record<string, string> = { daily: '天', weekly: '周', monthly: '月', yearly: '年' }
+  const parts: string[] = [typeLabel[rule.type] ?? rule.type]
+  if (rule.interval && rule.interval > 1) parts.push(`间隔${rule.interval}${unit[rule.type] ?? '周期'}`)
+  if (rule.weekdays?.length) {
+    const wd = ['日', '一', '二', '三', '四', '五', '六']
+    parts.push(rule.weekdays.map((w) => '周' + (wd[w] ?? w)).join('、'))
+  }
+  if (rule.monthDay) parts.push(`每月${rule.monthDay}日`)
+  if (rule.yearMonth) parts.push(`${rule.yearMonth}月`)
+  if (rule.dates?.length) parts.push(rule.dates.join('、'))
+  if (rule.endAfter) parts.push(`至${rule.endAfter}止`)
+  if (rule.start) parts.push(`首日${rule.start}`)
+  return parts.join('，')
+}
+
+/** 子任务人类可读摘要（名+完成状态+描述+各时间+排序；旧数据可能缺失 subtasks，统一补空） */
+function subtaskSummaryOf(t: Task): string {
+  return (t.subtasks ?? [])
+    .map((sb) => {
+      const parts: string[] = [`${sb.name || '未命名子任务'}[${sb.completed ? '✓' : '✗'}]`]
+      if (sb.description) parts.push(sb.description)
+      if (sb.startTime) parts.push(`开始${fmtTime(sb.startTime)}`)
+      if (sb.endTime) parts.push(`截止${fmtTime(sb.endTime)}`)
+      if (sb.reminderTime) parts.push(`提醒${fmtTime(sb.reminderTime)}`)
+      if (sb.createdAt) parts.push(`创建${fmtTime(sb.createdAt)}`)
+      if (sb.updatedAt) parts.push(`更新${fmtTime(sb.updatedAt)}`)
+      if (typeof sb.sort === 'number') parts.push(`排序${sb.sort}`)
+      return parts.join('｜')
+    })
+    .join('；')
+}
+
+/** 单个附件可读详情：文件名（大小，类型，上传时间） */
+function attachmentDetailOf(a: AttachmentMeta): string {
+  const parts: string[] = [a.name || '未命名附件']
+  if (typeof a.size === 'number') parts.push(formatSize(a.size))
+  if (a.type) parts.push(a.type)
+  if (a.uploadedAt) parts.push(`上传${fmtTime(a.uploadedAt)}`)
+  return parts.join('，')
+}
+
+/** 全部附件可读详情（主任务 + 子任务附件） */
+function attachmentSummaryOf(t: Task): string {
+  return [...(t.attachments ?? []), ...(t.subtasks ?? []).flatMap((sb) => sb.attachments ?? [])]
+    .map(attachmentDetailOf)
+    .join('；')
+}
+
+/** 全部附件 OSS key（主任务 + 子任务附件，分号拼接） */
+function attachmentKeysOf(t: Task): string {
+  return [...(t.attachments ?? []), ...(t.subtasks ?? []).flatMap((sb) => sb.attachments ?? [])]
+    .map((a) => a.key)
+    .filter(Boolean)
+    .join('；')
+}
+
+/** 单日已处理映射：日期:完成/删除，按日期升序 */
+function repeatProcessedText(t: Task): string {
+  if (!t.repeatProcessed) return ''
+  return Object.entries(t.repeatProcessed)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([day, kind]) => `${day}:${kind === 'completed' ? '完成' : '删除'}`)
+    .join('；')
+}
+
+/** 单日记录标记：rootId|日期|完成/删除 */
+function repeatOccurrenceText(t: Task): string {
+  if (!t.repeatOccurrence) return ''
+  const { rootId, date, kind } = t.repeatOccurrence
+  return `${rootId}|${date}|${kind === 'completed' ? '完成' : '删除'}`
+}
+
 /** 导出项目图当前筛选/搜索结果（CSV，UTF-8 BOM）：
  *  未筛选时导出所选年份全部胶囊任务；筛选/搜索时导出当前条件全部命中项（跨所有项目与月份，不受分页限制）。
- *  数据源与统计行「筛选出 N 个项目 / M 条记录」一致（projectGroups 的 monthGroups）。 */
+ *  数据源与统计行「筛选出 N 个项目 / M 条记录」一致（projectGroups 的 monthGroups）。
+ *  字段全量：前 14 列为任务界面可视的常用字段，后 9 列为 ID/排序/单日处理等内部完整字段（含 JSON 保真列）。 */
 async function exportCsv() {
   if (csvBusy.value) return
   csvBusy.value = true
@@ -718,57 +806,46 @@ async function exportCsv() {
       return
     }
     const header = [
-      '项目名',
-      '任务名',
-      '状态',
-      '创建时间',
-      '开始时间',
-      '提醒时间',
-      '截止时间',
-      '完成/入舱时间',
-      '耗时',
-      '子任务摘要',
-      '附件名',
+      // —— 常用字段（任务界面可视）——
+      '项目名', '任务名', '状态', '任务描述', '创建时间', '开始时间', '提醒时间', '截止时间',
+      '完成/入舱时间', '耗时', '是否已提醒', '重复规则', '子任务', '附件',
+      // —— 完整/内部字段 ——
+      '任务ID', '项目ID', '排序', '重复根任务ID', '单日已处理', '单日记录标记', '附件Key',
+      '子任务原始数据', '重复规则原始数据',
     ]
     const lines: string[] = [header.map(csvCell).join(',')]
     for (const { label, task: t } of rows) {
-      // 子任务摘要：子任务名[✓/✗]，分号拼接（旧数据可能缺失 subtasks，统一补空）
-      const subtaskSummary = (t.subtasks ?? [])
-        .map((sb) => `${sb.name || '未命名子任务'}[${sb.completed ? '✓' : '✗'}]`)
-        .join('；')
-      // 附件名：主任务 + 子任务附件去重后分号拼接
-      const attNames = [
-        ...(t.attachments ?? []),
-        ...(t.subtasks ?? []).flatMap((sb) => sb.attachments ?? []),
-      ]
-        .map((a) => a.name)
-        .filter(Boolean)
       const line = [
-        label,
-        t.name || '未命名任务',
-        t.status === 'deleted' ? '已删除' : '已完成',
-        fmtTime(t.createdAt),
-        fmtTime(t.startTime),
-        fmtTime(t.reminderTime),
-        fmtTime(t.endTime),
-        fmtTime(t.updatedAt),
-        durationText(t),
-        subtaskSummary,
-        [...new Set(attNames)].join('；'),
+        label,                                            // 项目名
+        t.name || '未命名任务',                           // 任务名
+        t.status === 'deleted' ? '已删除' : '已完成',      // 状态
+        t.description || '',                              // 任务描述
+        fmtTime(t.createdAt),                             // 创建时间
+        fmtTime(t.startTime),                             // 开始时间
+        fmtTime(t.reminderTime),                          // 提醒时间
+        fmtTime(t.endTime),                               // 截止时间
+        fmtTime(t.updatedAt),                             // 完成/入舱时间
+        durationText(t),                                  // 耗时
+        t.isReminded ? '是' : '否',                       // 是否已提醒
+        humanRepeat(t.repeat),                            // 重复规则（可读）
+        subtaskSummaryOf(t),                              // 子任务（可读）
+        attachmentSummaryOf(t),                           // 附件（可读）
+        t.id,                                             // 任务ID
+        t.projectId || '',                                // 项目ID
+        typeof t.sort === 'number' ? String(t.sort) : '', // 排序
+        t.repeatRootId || '',                             // 重复根任务ID
+        repeatProcessedText(t),                           // 单日已处理
+        repeatOccurrenceText(t),                          // 单日记录标记
+        attachmentKeysOf(t),                              // 附件Key
+        t.subtasks?.length ? JSON.stringify(t.subtasks) : '', // 子任务原始数据（保真）
+        t.repeat ? JSON.stringify(t.repeat) : '',              // 重复规则原始数据（保真）
       ]
       lines.push(line.map(csvCell).join(','))
     }
     // \uFEFF（BOM）保证 Excel/WPS 正确识别 UTF-8 中文；\r\n 为 CSV 标准换行
     const blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `时间胶囊-项目图导出-${viewYear.value}-${todayKey()}.csv`
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    URL.revokeObjectURL(url)
-    ui.toast(`已导出 ${rows.length} 条筛选结果`)
+    const save = await saveBlobToDevice(blob, `时间胶囊-项目图导出-${viewYear.value}-${todayKey()}.csv`, 'text/csv')
+    ui.toast(saveToastText(save, `已导出 ${rows.length} 条筛选结果`))
     logAudit('导出项目图筛选结果', `${rows.length} 条，年份 ${viewYear.value}`)
   } catch (e) {
     ui.toast((e as Error).message || '导出 CSV 失败', 'error')
@@ -901,23 +978,19 @@ async function exportTrash() {
       }
     }
     const blob = await zip.generateAsync({ type: 'blob' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `时间胶囊备份-${todayKey()}.zip`
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    URL.revokeObjectURL(url)
+    const save = await saveBlobToDevice(blob, `时间胶囊备份-${todayKey()}.zip`, 'application/zip')
     const count = projectsData.reduce((n, p) => n + p.tasks.length, 0)
     // 有项目/分片加载失败：仍导出已有数据，但明确警告备份可能不完整（不再静默）
     const loadWarn = failed.length
       ? `；${failed.length} 个项目/分片加载失败（${failed.map((f) => f.pid.slice(0, 8)).slice(0, 5).join('、')}${failed.length > 5 ? ' 等' : ''}），备份可能不完整`
       : ''
     ui.toast(
-      failedAtts
-        ? `已导出 ${count} 条时间胶囊记录${loadWarn}（${failedAtts} 个附件下载失败）`
-        : `已导出 ${count} 条时间胶囊记录及 ${allAtts.length} 个附件${loadWarn}`,
+      saveToastText(
+        save,
+        failedAtts
+          ? `已导出 ${count} 条时间胶囊记录${loadWarn}（${failedAtts} 个附件下载失败）`
+          : `已导出 ${count} 条时间胶囊记录及 ${allAtts.length} 个附件${loadWarn}`,
+      ),
     )
     logAudit(
       '导出时间胶囊备份',

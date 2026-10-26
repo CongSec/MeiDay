@@ -13,6 +13,8 @@ public class MainActivity extends BridgeActivity {
         // 今日任务快照：桌面小组件 + 常驻通知（写入快照 / 通知权限 / 启动跳转标记）
         registerPlugin(TaskSnapshotPlugin.class);
         registerPlugin(DeviceIdPlugin.class);
+        // 导出/下载保存到系统下载目录（MediaStore Downloads，Android 10+ 无权限要求）
+        registerPlugin(SaveToDownloadsPlugin.class);
         // 从小组件/通知点进来时记录「打开今日任务页」标记
         LaunchIntentHelper.handleIntent(getIntent());
         super.onCreate(savedInstanceState);

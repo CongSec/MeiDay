@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
+import { useUiStore } from '@/stores/ui'
 import { downloadAttachment, formatSize, ossFileName, previewKind } from '@/utils/attachments'
+import { saveBlobToDevice } from '@/utils/saveBlob'
 import type { AttachmentMeta } from '@/types'
 import AppIcon from '@/components/AppIcon.vue'
 import ZoomableImage from '@/components/ZoomableImage.vue'
@@ -10,10 +12,13 @@ const props = defineProps<{ meta: AttachmentMeta | null }>()
 const emit = defineEmits<{ close: [] }>()
 
 const auth = useAuthStore()
+const ui = useUiStore()
 
 const loading = ref(false)
 const error = ref('')
 const url = ref('')
+/** 已解密的原始 Blob（供「下载」在原生端落盘；仅预览时也会保留引用，关闭时随 url 一并释放） */
+const blobRef = ref<Blob | null>(null)
 /** 预览方式：'image'（<img> 内联）| 'pdf'（sandbox <iframe>）| null（不支持/不安全，仅下载） */
 const kind = ref<'image' | 'pdf' | null>(null)
 
@@ -21,6 +26,7 @@ watch(
   () => props.meta,
   async (m) => {
     revokeUrl()
+    blobRef.value = null
     if (!m) {
       error.value = ''
       loading.value = false
@@ -32,6 +38,7 @@ watch(
     try {
       if (!auth.creds || !auth.username) throw new Error('缺少会话信息，请重新登录')
       const blob = await downloadAttachment(auth.creds, m)
+      blobRef.value = blob
       // 安全关键：PDF 预览强制使用明确的 application/pdf MIME，交给浏览器 PDF 查看器，
       // 绝不沿用用户声明的 type（可能是 application/octet-stream 或伪造类型），
       // 否则浏览器会内容嗅探，把伪装成 PDF 的 HTML/脚本当作页面渲染执行（存储型 XSS）。
@@ -55,11 +62,15 @@ function revokeUrl() {
 }
 
 function download() {
-  if (!url.value) return
-  const a = document.createElement('a')
-  a.href = url.value
-  a.download = props.meta?.name || 'attachment'
-  a.click()
+  if (!blobRef.value) return
+  saveBlobToDevice(blobRef.value, props.meta?.name || 'attachment', props.meta?.type)
+    .then((save) => {
+      // 原生端：文件已落盘到系统下载目录，明确告知路径；Web 端浏览器自带下载栏，无需提示
+      if (save.mode === 'native' && save.path) ui.toast(`已保存到 ${save.path}`)
+    })
+    .catch((e) => {
+      ui.toast((e as Error).message || '下载失败', 'error')
+    })
 }
 </script>
 

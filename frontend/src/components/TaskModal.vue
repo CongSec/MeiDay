@@ -11,6 +11,7 @@ import { cancelSessionUploads, cancelUploadByMetaId, commitUploads, enqueueUploa
 import AttachmentPreviewModal from './AttachmentPreviewModal.vue'
 import QuickDurationChips from './QuickDurationChips.vue'
 import { logAttachmentDeletion } from '@/utils/audit'
+import { saveBlobToDevice } from '@/utils/saveBlob'
 import { ensureLegalCalendar } from '@/utils/legalWorkday'
 import { currentOrNextOccurrence, firstOccurrenceDate, isNewStyleRepeat, isRepeatDay, repeatShapeEquals } from '@/utils/repeat'
 import { REPEAT_TYPES } from '@/types'
@@ -546,12 +547,9 @@ async function download(a: AttachmentMeta) {
   try {
     if (!auth.creds || !auth.username) throw new Error('缺少会话信息，请重新登录')
     const blob = await downloadAttachment(auth.creds, a)
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = a.name
-    link.click()
-    setTimeout(() => URL.revokeObjectURL(url), 10000)
+    const save = await saveBlobToDevice(blob, a.name, a.type)
+    // 原生端：文件已落盘到系统下载目录，明确告知路径；Web 端浏览器自带下载栏，无需提示
+    if (save.mode === 'native' && save.path) ui.toast(`已保存到 ${save.path}`)
   } catch (err) {
     uploadErr.value = (err as Error).message || '下载失败'
   }
