@@ -283,7 +283,7 @@ function pushView() {
       // 未登录保持旧语义；已登录但还没成功拉取过数据时显示“正在同步…”，避免误报“今日没有待办任务”
       ready: !auth.isLoggedIn || isSynced(),
       date: monthDay.value,
-      tasks: sorted.value.map((t) => t.name),
+      tasks: sorted.value.map((t) => t.name || '未命名任务'),
     })
   } catch {
     /* 浏览器调试时忽略 */
