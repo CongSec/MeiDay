@@ -28,7 +28,7 @@ MeiDay 专注于“当下”——只做好一件事：**稳定流畅安全的�
 
 完成任务自动封存进「时间胶囊」，像翻开日历一样回看每一天的成果。支持**日历视图**（完成/未完成任务按天归属、跨天任务横条可视化）、**年度热力图**和**工作量趋势图**，让成长轨迹一目了然；重复任务自动枚举所有发生日，回顾不遗漏。
 
-![Image](https://b3logfile.com/file/2026/10/siyuan/1714493573033/assets/PixPin_2026-10-02_15-54-38-20261002171405-rb81p01.gif)
+![Image](https://b3logfile.com/file/2026/11/PixPin_2026-11-01_19-34-32-cWna2Cd.gif)
 
 ### 数据安全与性能安全
 
@@ -42,7 +42,7 @@ MeiDay 专注于“当下”——只做好一件事：**稳定流畅安全的�
 
 性能压力测试(test/12345678),模拟十年数据,每天150个任务,仍可流畅使用
 
-![image](https://b3logfile.com/file/2026/10/siyuan/1714493573033/assets/recording-20260917221055-9cl9zh6.gif)
+![image](https://b3logfile.com/file/2026/11/recording-20260917221055-9cl9zh6-compressed-2026-11-01_19-15-54-oGkylyT.gif)
 
 ### 任务添加与修改
 
@@ -98,7 +98,7 @@ Windows 桌面可置顶显示今日未完成任务，截图或视频会议时自
 
 显示密钥、登录记录、每一项增删改操作全部留痕，关键操作有据可查，任何风吹草动尽在掌握。
 
-![image](https://b3logfile.com/file/2026/10/siyuan/1714493573033/assets/PixPin_2026-10-01_23-23-02-20261001232330-fisegvg.gif)
+![image](https://b3logfile.com/file/2026/11/PixPin_2026-10-01_23-23-02-20261001232330-fisegvg-compressed-2026-11-01_19-14-36-owXiaca.gif)
 
 ### 数据迁移备份功能
 
@@ -256,4 +256,3 @@ Copy-Item ".\meiday-siyuan-plugin\dist\*" `
 支持docker一键部署启动后端,直接使用`docker run -d --name meiday --restart unless-stopped -p 8001:8000 -e FRONTEND_ORIGINS="http://localhost:5173,http://localhost,https://task.congsec.cn" -v meiday_data:/data crpi-8r9w3eevpt68aj3u.cn-hangzhou.personal.cr.aliyuncs.com/congsec/meiday:latest`命令即可
 
 ‍
-
