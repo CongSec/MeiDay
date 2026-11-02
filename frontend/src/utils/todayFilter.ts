@@ -162,3 +162,14 @@ export function isRepeatTaskActiveOn(t: Task, date: string): boolean {
   if (t.repeatProcessed?.[date]) return false
   return date >= rule.start
 }
+
+/** 项目页主列表「今天活跃」判定（项目页进行中列表 / 侧栏数标 / 顶部进度统计共用）：
+ *  - 重复任务按 isRepeatTaskActiveOn（未到首次出现日的重复任务不进入主列表，
+ *    只进「未来任务」分区）；
+ *  - 开始时间晚于今天（明天及以后才开始）的任务同样不进入主列表，
+ *    移入「未来任务」分区，不在项目页直接显示。 */
+export function isProjectTaskActiveToday(t: Task, today: string): boolean {
+  if (!isRepeatTaskActiveOn(t, today)) return false
+  if (t.startTime && dateKeyOf(t.startTime) > today) return false
+  return true
+}

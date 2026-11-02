@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { useNow } from '@/composables/useNow'
 import { dateKeyOf, formatTodayTitle, todayKey } from '@/utils/time'
@@ -11,7 +11,7 @@ import { useTasksStore } from '@/stores/tasks'
 import { sortSubtasks } from '@/utils/task'
 import AppIcon from '@/components/AppIcon.vue'
 
-const props = defineProps<{ task: Task; project?: Project; future?: boolean; warm?: boolean; futureDate?: string }>()
+const props = defineProps<{ task: Task; project?: Project; future?: boolean; warm?: boolean }>()
 const emit = defineEmits<{
   edit: [Task]
   toggle: [string]
@@ -43,13 +43,46 @@ const overdue = computed(() => {
   return new Date(props.task.reminderTime).getTime() <= now.value
 })
 
+/** 重复图标自定义气泡：悬停显示重复规则类型。
+ *  原生 title 在部分环境（WebView / 触屏 / 悬停未精准落到小图标）不弹出，
+ *  改用 Teleport + fixed 定位的自定义气泡，任何环境都能稳定显示，且不被卡片 overflow 裁剪。 */
+const repeatTipOpen = ref(false)
+const repeatTipPos = ref({ x: 0, y: 0 })
+let repeatTipCleanup: (() => void) | null = null
+
+function onRepeatTipEnter(e: MouseEvent) {
+  const el = e.currentTarget as HTMLElement
+  const r = el.getBoundingClientRect()
+  repeatTipPos.value = { x: r.left + r.width / 2, y: r.top }
+  repeatTipOpen.value = true
+  // 页面滚动 / 窗口尺寸变化时隐藏，避免气泡位置错位残留
+  const hide = () => (repeatTipOpen.value = false)
+  window.addEventListener('scroll', hide, { capture: true })
+  window.addEventListener('resize', hide)
+  repeatTipCleanup = () => {
+    window.removeEventListener('scroll', hide, { capture: true })
+    window.removeEventListener('resize', hide)
+  }
+}
+
+function onRepeatTipLeave() {
+  repeatTipOpen.value = false
+  repeatTipCleanup?.()
+  repeatTipCleanup = null
+}
+
+onBeforeUnmount(() => {
+  repeatTipCleanup?.()
+  repeatTipCleanup = null
+})
+
 
 /** 今日任务视图的暖色主色调：true 时卡片使用琥珀/橙色系强调，项目页保持品牌蓝不变 */
 const warm = computed(() => !!props.warm)
 
 const hasSubtasks = computed(() => (props.task.subtasks?.length ?? 0) > 0)
 
-/** 右侧竖列是否显示：提醒/开始/截止时间、重复规则、附件任一存在时渲染（未来任务卡除外） */
+/** 右侧竖列是否显示：提醒/开始/截止时间、重复规则、附件任一存在时渲染（未来任务卡与普通卡一致） */
 const rightMetaVisible = computed(() =>
   !!(
     props.task.reminderTime ||
@@ -83,14 +116,6 @@ function timeStr(t: string) {
 function dateStr(t: string) {
   return t.slice(5, 10)
 }
-
-/** 未来任务「下一次出现」标签：MM-DD 周X（如 09-29 周二） */
-const WEEKDAY_NAMES = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
-const futureDateLabel = computed(() => {
-  if (!props.futureDate) return ''
-  const wd = new Date(`${props.futureDate}T00:00:00+08:00`).getDay()
-  return `${props.futureDate.slice(5, 10)} ${WEEKDAY_NAMES[wd]}`
-})
 
 /** 子任务是否已过提醒时间（未完成） */
 function subOverdue(s: Subtask) {
@@ -196,36 +221,13 @@ function onSubDragEnd() {
             {{ task.name || '未命名任务' }}
           </span>
           <span
-            v-if="future"
-            class="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-600 font-medium shrink-0"
-            title="开始时间在未来"
-          >
-            未来
-          </span>
-          <span v-if="overdue" class="shrink-0 text-red-500" title="已过提醒时间"><AppIcon name="bell" :size="15" /></span>
+            v-if="overdue"
+            class="shrink-0 text-red-500"
+            title="已过提醒时间"
+            ><AppIcon name="bell" :size="15"
+          /></span>
         </div>
         <p v-if="task.description" class="mt-1 text-xs text-slate-500 clamp-2">{{ task.description }}</p>
-        <!-- 未来任务卡：保持原有 meta 行（下次出现时间 / 提醒 / 重复 / 附件） -->
-        <div v-if="future" class="mt-1 flex flex-wrap gap-x-4 gap-y-1.5 text-[11px] text-slate-400">
-          <span v-if="futureDate" class="inline-flex items-center gap-1" :class="warm ? 'text-amber-600' : 'text-brand/90'" title="下一次出现时间">
-            <AppIcon name="calendarFuture" :size="12" />下次 {{ futureDateLabel }}
-          </span>
-          <span v-if="task.reminderTime" class="inline-flex items-center gap-1">
-            <AppIcon name="bell" :size="12" />{{ timeStr(task.reminderTime) }}
-          </span>
-          <span v-if="task.repeat" class="inline-flex items-center gap-1" :class="warm ? 'text-amber-600' : 'text-brand/90'" :title="`重复任务：${formatRepeat(task.repeat)}`">
-            <AppIcon name="repeat" :size="12" />{{ formatRepeat(task.repeat) }}
-          </span>
-          <span
-            v-if="(task.attachments?.length ?? 0) > 0"
-            class="inline-flex items-center gap-1 cursor-pointer"
-            :class="warm ? 'text-amber-600' : 'text-brand/80'"
-            :title="`${task.attachments.length} 个附件，点击打开查看/预览`"
-            @click.stop="emit('edit', task)"
-          >
-            <AppIcon name="paperclip" :size="12" />{{ task.attachments.length }}
-          </span>
-        </div>
         <!-- 子任务进度（无子任务时不显示）：分支图标 + 进度数字，进度条随内容区宽度 -->
         <div v-if="subProgress" class="mt-1">
           <div class="flex items-center gap-2 text-[11px] text-slate-400">
@@ -243,7 +245,7 @@ function onSubDragEnd() {
         </div>
       </div>
       <!-- 最右侧竖列（高度由内容决定、项间无空隙紧凑排列）：提醒贴顶；右侧列为最高内容时末行自然贴底；开始/截止精确到时分；重复只显示图标 -->
-      <div v-if="!future && rightMetaVisible" class="shrink-0 self-stretch flex flex-col items-end min-w-0 text-[11px] text-slate-400">
+      <div v-if="rightMetaVisible" class="shrink-0 self-stretch flex flex-col items-end min-w-0 text-[11px] text-slate-400">
         <span v-if="task.reminderTime" class="inline-flex items-center gap-1" title="提醒时间">
           <AppIcon name="bell" :size="12" />{{ timeStr(task.reminderTime) }}
         </span>
@@ -254,13 +256,18 @@ function onSubDragEnd() {
           <AppIcon name="clock" :size="12" />{{ timeStr(task.endTime) }}
         </span>
         <span v-if="task.repeat || (task.attachments?.length ?? 0) > 0" class="inline-flex items-center gap-2">
-          <AppIcon
+          <span
             v-if="task.repeat"
-            name="repeat"
-            :size="12"
-            :class="warm ? 'text-amber-600' : 'text-brand/90'"
-            :title="`重复任务：${formatRepeat(task.repeat)}`"
-          />
+            class="inline-flex"
+            @mouseenter="onRepeatTipEnter"
+            @mouseleave="onRepeatTipLeave"
+          >
+            <AppIcon
+              name="repeat"
+              :size="12"
+              :class="warm ? 'text-amber-600' : 'text-brand/90'"
+            />
+          </span>
           <span
             v-if="(task.attachments?.length ?? 0) > 0"
             class="inline-flex items-center gap-1 cursor-pointer"
@@ -356,5 +363,17 @@ function onSubDragEnd() {
         </div>
       </VueDraggable>
       </div>
+
+    <!-- 重复图标悬浮气泡：Teleport 到 body + fixed 定位，规避卡片 overflow/transform 裁剪；
+          水平居中于图标上方，pointer-events-none 避免气泡自身触发 hover 状态残留 -->
+    <Teleport to="body">
+      <div
+        v-if="repeatTipOpen"
+        class="fixed z-50 rounded-lg bg-slate-800 text-white text-[11px] leading-none px-2.5 py-2 shadow-lg whitespace-nowrap pointer-events-none select-none"
+        :style="{ left: repeatTipPos.x + 'px', top: repeatTipPos.y + 'px', transform: 'translate(-50%, calc(-100% - 10px))' }"
+      >
+        {{ formatRepeat(task.repeat) }}
+      </div>
+    </Teleport>
   </div>
 </template>

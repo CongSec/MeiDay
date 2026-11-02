@@ -211,8 +211,8 @@ function forcePending() {
 async function bootAfterLogin() {
   // 首登先引导加载（等同网页端 TodayView 挂载）：version=0 的账号（如测试号）
   // 没有同步日志，轮询拿不到 changes，必须显式拉取一次数据再进入 2s 轮询。
-  // 注意：「立即同步」已改为直连 OSS 全量重拉，bootstrapLoad 本身已经把全部项目拉过一遍，
-  // 这里再调 syncNow() 会把同一批项目重复全量拉一次，因此只负责引导加载 + 启动轮询。
+  // 注意：「立即同步」已改为软重启（重置内存 + bootstrapLoad 全量重载），
+  // 这里刚引导加载过，再调 syncNow() 会重复全量拉一次，因此只负责引导加载 + 启动轮询。
   await bootstrapLoad().catch(() => {})
   startSyncPoll()
 }
@@ -341,7 +341,7 @@ const syncState = ref<'idle' | 'running' | 'ok' | 'fail'>('idle')
 let syncStateTimer: number | undefined
 
 async function onRefresh() {
-  // 直连 OSS 全量重拉可能耗时数秒到数十秒：同步中禁用按钮，避免连点重复发起
+  // 软重启（重置内存 + 全量重载）可能耗时数秒到数十秒：同步中禁用按钮，避免连点重复发起
   if (syncState.value === 'running') return
   syncState.value = 'running'
   const ok = await syncNow()
@@ -782,7 +782,7 @@ const settingsBgStyle = computed(() => ({
 .ghost-btn:hover {
   background: rgba(0, 0, 0, 0.12);
 }
-/* 「立即同步」执行中禁用：直连 OSS 全量重拉耗时较长，禁用态需可见 */
+/* 「立即同步」执行中禁用：软重启全量重载耗时较长，禁用态需可见 */
 .ghost-btn:disabled {
   opacity: 0.6;
   cursor: default;

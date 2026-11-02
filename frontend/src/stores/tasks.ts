@@ -11,7 +11,7 @@ import { idbClearTrashUserCache, idbGet, idbListKeys, idbPut, idbDel } from '@/u
 import { debounce, type Debounced } from '@/utils/debounce'
 import { queueSyncChange } from '@/utils/syncReport'
 import { addDaysKey, dateKeyOf, diffDaysKey, nowIso, todayKey } from '@/utils/time'
-import { isRepeatTaskActiveOn, isTaskVisibleToday } from '@/utils/todayFilter'
+import { isProjectTaskActiveToday, isTaskVisibleToday } from '@/utils/todayFilter'
 import { buildOccurrenceTemplate, buildReminderPayload, buildRepeatOccurrence, hasNextUnprocessedRepeatDay, nextRepeatDate, repeatRuleFingerprint, repeatShapeEquals, rootIdOf, shiftTaskTimes, skipProcessedRepeatDays } from '@/utils/repeat'
 import { api } from '@/api/client'
 import { logAudit, logAttachmentDeletion, safeDetail } from '@/utils/audit'
@@ -776,8 +776,9 @@ export const useTasksStore = defineStore('tasks', {
       return dedupTasksById(Object.values(s.tasks).flat())
         .filter((t) => t.status === 'pending' && isTaskVisibleToday(t, today)).length
     },
-    /** 侧栏头部：全部待办任务数（跨项目，仅统计内存中已加载的项目） */
-    pendingCount: (s) => dedupTasksById(Object.values(s.tasks).flat()).filter((t) => t.status === 'pending' && isRepeatTaskActiveOn(t, todayKey())).length,
+    /** 侧栏头部：全部待办任务数（跨项目，仅统计内存中已加载的项目；
+     *  与项目页主列表同口径：开始时间晚于今天（未来才开始）的任务不计入） */
+    pendingCount: (s) => dedupTasksById(Object.values(s.tasks).flat()).filter((t) => t.status === 'pending' && isProjectTaskActiveToday(t, todayKey())).length,
     /** 侧栏头部：今天已完成任务数（跨项目；完成任务时 updatedAt 记为完成时间） */
     completedTodayCount: (s) => {
       const today = todayKey()
