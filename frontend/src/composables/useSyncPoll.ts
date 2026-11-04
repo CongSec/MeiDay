@@ -152,6 +152,10 @@ async function pollOnce(): Promise<boolean> {
   try {
     // 1) 先把本地（含离线期间）的待发上报补报给中心服务器
     const reported = await flushPendingSyncReports(auth.username)
+    // 1.5) BUG-1 修复：提醒清单待报补报——上报失败/离线期间标记保留，网络恢复后
+    //      随轮询自动重试，避免"设了提醒却因一次请求失败永久缺失"
+    const tasks = useTasksStore()
+    await tasks.flushReminderSyncIfPending()
     // 只用于"按 id 精确排除本端刚上报的事件"。**绝不能**用服务端返回的 version(MAX(id))
     // 抬高本地游标：那会连带跳过 (本地游标, MAX] 区间内其它设备刚产生、本端尚未拉取的
     // 事件，而它们已被视为"已消费"，后端不会再补发 → 该端永久陈旧。

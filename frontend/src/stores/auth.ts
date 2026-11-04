@@ -253,6 +253,13 @@ export const useAuthStore = defineStore('auth', {
       ])
       // 尽力把待发变更上报发给中心服务器（队列按用户隔离，登出时保留、下次登录补报）
       await flushPendingSyncReports(username)
+      // BUG-1 修复：登出前尽量冲刷待报的提醒清单（须在 resetAll 清空内存之前执行，
+      // 否则 rows 无法从 store 重建）；仍失败则标记保留，下次同账号登录由轮询补报
+      try {
+        await useTasksStore().flushReminderSyncIfPending()
+      } catch {
+        /* 网络失败不阻塞登出：标记已在 IDB，下次登录补报 */
+      }
       // 登出同样销毁隐私日记内存密钥/解密态与空闲锁（每个账号日记独立，换账号不得残留）
       const { useDiaryStore } = await import('./diary')
       useDiaryStore().lock()

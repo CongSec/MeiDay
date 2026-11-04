@@ -10,6 +10,7 @@ import { enrichOssError } from '@/utils/ossDiag'
 import { idbClearTrashUserCache, idbGet, idbListKeys, idbPut, idbDel } from '@/utils/idb'
 import { debounce, type Debounced } from '@/utils/debounce'
 import { queueSyncChange } from '@/utils/syncReport'
+import { clearReminderSyncPending, hasReminderSyncPending, markReminderSyncPending } from '@/utils/reminderSyncReport'
 import { addDaysKey, dateKeyOf, diffDaysKey, nowIso, todayKey } from '@/utils/time'
 import { isProjectTaskActiveToday, isTaskVisibleToday } from '@/utils/todayFilter'
 import { buildOccurrenceTemplate, buildReminderPayload, buildRepeatOccurrence, hasNextUnprocessedRepeatDay, nextRepeatDate, repeatRuleFingerprint, repeatShapeEquals, rootIdOf, shiftTaskTimes, skipProcessedRepeatDays } from '@/utils/repeat'
@@ -700,6 +701,10 @@ function flushAllPendingSaves() {
   for (const fn of tombstoneDebouncers.values()) fn.flush()
   for (const fn of saveDebouncers.values()) fn.flush()
   for (const fn of trashDebouncers.values()) fn.flush()
+  // BUG-1 修复：防抖 300ms 内关闭页面会让 syncReminderTimer 丢失、提醒清单不上报。
+  // 页面隐藏/关闭前尽力补报一次；若此刻请求被页面卸载中止，待报标记已落盘，下次登录由轮询补报。
+  const tasks = useTasksStore()
+  if (tasks.hasAny()) void tasks.syncReminders()
 }
 // 页面隐藏/关闭前尽量落盘，减少“防抖 800ms 内关闭导致 OSS 未保存”的数据丢失
 if (typeof window !== 'undefined') {
@@ -2895,7 +2900,11 @@ export const useTasksStore = defineStore('tasks', {
     },
     async syncReminders() {
       const auth = useAuthStore()
-      if (!auth.token || !this.hasAny()) return
+      // 无登录态：不处理（登出流程负责尽力冲刷，若离线标记保留、下次登录补报）
+      if (!auth.token || !auth.username) return
+      // 未加载任何任务：无法重建 rows，本次跳过但【保留】待报标记——
+      // 页面刷新/重启后内存为空，待任务加载完由下一轮轮询补报，避免丢失
+      if (!this.hasAny()) return
       const rows: Parameters<typeof api.syncReminders>[0] = []
       // 单个提醒入队：主任务带 repeat 时把规则一并上报（服务器每行只存这一条规则，
       // 发完邮件后自行推进；名称/描述会上传服务器，供提醒邮件展示）。
@@ -2960,8 +2969,27 @@ export const useTasksStore = defineStore('tasks', {
       // 说明（BUG-33）：projectIds 包含 '' 表示“未分类”已加载，后端据此精确替换其提醒行，
       // 未加载时不会误删；后端 DELETE/INSERT 已做逐项 + 幂等处理，避免 IN ('') 或主键冲突。
       const loadedPids = Object.keys(this.tasks)
-      if (!loadedPids.length && !rows.length) return
-      await api.syncReminders(rows, loadedPids)
+      if (!loadedPids.length && !rows.length) {
+        await clearReminderSyncPending(auth.username)
+        return
+      }
+      // BUG-1 修复：先落盘"待报"标记，再上报。成功清除标记；失败保留标记，
+      // 由 2 秒轮询 / 下次任务变更 / 登出前冲刷自动补报——不再"失败即丢"。
+      await markReminderSyncPending(auth.username)
+      try {
+        await api.syncReminders(rows, loadedPids)
+        await clearReminderSyncPending(auth.username)
+      } catch (e) {
+        console.warn('提醒清单上报失败，已进入待报队列，稍后自动重试', e)
+      }
+    },
+    /** 轮询/登出冲刷入口：有待报标记才补报，避免无谓请求。失败由内部保留标记继续等下一轮。 */
+    async flushReminderSyncIfPending() {
+      const auth = useAuthStore()
+      if (!auth.token || !auth.username) return
+      if (await hasReminderSyncPending(auth.username)) {
+        await this.syncReminders()
+      }
     },
     hasAny(): boolean {
       return Object.keys(this.tasks).length > 0
