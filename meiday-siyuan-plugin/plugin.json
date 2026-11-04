@@ -2,7 +2,7 @@
   "name": "MeiDay",
   "author": "congsec",
   "url": "https://github.com/CongSec/MeiDay",
-  "version": "1.9.7",
+  "version": "1.9.8",
   "minAppVersion": "3.0.0",
   "backends": [
     "all"
