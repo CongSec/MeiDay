@@ -11,7 +11,7 @@ import { idbClearTrashUserCache, idbGet, idbListKeys, idbPut, idbDel } from '@/u
 import { debounce, type Debounced } from '@/utils/debounce'
 import { queueSyncChange } from '@/utils/syncReport'
 import { clearReminderSyncPending, hasReminderSyncPending, markReminderSyncPending } from '@/utils/reminderSyncReport'
-import { addDaysKey, dateKeyOf, diffDaysKey, nowIso, todayKey } from '@/utils/time'
+import { addDays, addDaysKey, dateKeyOf, diffDaysKey, nowIso, todayKey } from '@/utils/time'
 import { isProjectTaskActiveToday, isTaskVisibleToday } from '@/utils/todayFilter'
 import { buildOccurrenceTemplate, buildReminderPayload, buildRepeatOccurrence, hasNextUnprocessedRepeatDay, nextRepeatDate, repeatRuleFingerprint, repeatShapeEquals, rootIdOf, shiftTaskTimes, skipProcessedRepeatDays } from '@/utils/repeat'
 import { api } from '@/api/client'
@@ -4332,6 +4332,47 @@ export const useTasksStore = defineStore('tasks', {
       })
       this.trash[trashPid] = mergeUnique(this.trash[trashPid] ?? [], [deletedRecord])
       if (!this.trashLoaded.includes(trashPid)) this.trashLoaded.push(trashPid)
+      // 活跃待办重复任务按天入舱后，任务本身就地顺延到下一个「未处理」重复日（用户反馈 Bug）：
+      // 入舱只标记 repeatProcessed[day]='deleted' 并生成单日胶囊记录，任务仍滞留为 pending；
+      // 若不顺延，其 reminderTime/起止时间一直停留在被入舱那天，第二天界面/小组件显示的仍是
+      // 昨天的提醒时间，且提醒上报继续携带旧时间。此处把任务时间平移到下一个未处理重复日
+      // （跳过已单日完成/删除的日期，语义与模板推进一致）；无剩余重复日或已超 endAfter 时
+      // 保持原样，由调用方 deleteFutureTaskConfirmed 的 hasFuture 分支负责移出活跃列表。
+      if (masterPid === undefined && source.repeat && source.status === 'pending') {
+        const ownDay = dateKeyOf(source.reminderTime || source.endTime || source.startTime || '')
+        if (ownDay && day >= ownDay) {
+          const processed = source.repeatProcessed ?? {}
+          let next = nextRepeatDate(source.repeat, ownDay)
+          let guard = 0
+          while (next && processed[next] && guard < 400) {
+            const nd = nextRepeatDate(source.repeat, next)
+            if (!nd || nd <= next) {
+              next = null
+              break
+            }
+            next = nd
+            guard++
+          }
+          if (next && next > ownDay && !(source.repeat.endAfter && next > source.repeat.endAfter)) {
+            const offset = diffDaysKey(ownDay, next)
+            source.startTime = source.startTime ? addDays(source.startTime, offset) : ''
+            source.endTime = source.endTime ? addDays(source.endTime, offset) : ''
+            source.reminderTime = source.reminderTime ? addDays(source.reminderTime, offset) : null
+            source.isReminded = false
+            source.updatedAt = nowIso()
+            if (source.subtasks?.length) {
+              source.subtasks = source.subtasks.map((s) => ({
+                ...s,
+                startTime: s.startTime ? addDays(s.startTime, offset) : '',
+                endTime: s.endTime ? addDays(s.endTime, offset) : '',
+                reminderTime: s.reminderTime ? addDays(s.reminderTime, offset) : null,
+              }))
+            }
+            // 时间变化影响项目主列表排序键（提醒/开始时间）：就地重排，保持界面顺序与时间一致
+            if (rootActivePid) this.tasks[rootActivePid] = sortActiveList(this.tasks[rootActivePid] ?? [])
+          }
+        }
+      }
       // 立即落盘全部涉及项目
       const jobs: Promise<boolean>[] = []
       if (rootActivePid) jobs.push(this.saveProjectNow(rootActivePid))
