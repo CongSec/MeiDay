@@ -4281,6 +4281,14 @@ export const useTasksStore = defineStore('tasks', {
       const repeatsSnap = new Map<string, RepeatMaster[]>()
       const trashSnap = new Map<string, Task[]>()
       if (rootActivePid) tasksSnap.set(rootActivePid, (this.tasks[rootActivePid] ?? []).slice())
+      // 活跃分支（masterPid === undefined）时 source 是被入舱的活跃重复任务本身，其所在项目
+      // 可能不等于根任务项目、或根任务已不在活跃列表（已完成入回收站）。若只按 rootActivePid
+      // 落盘，source 的 repeatProcessed 标记与顺延后的时间只存在于内存，本端刷新或其它端
+      // 同步后任务会按旧版本「复活」（用户反馈 Bug）。因此 source 所在活跃项目必须纳入快照与落盘。
+      const sourceActivePid = Object.entries(this.tasks).find(([, l]) => l.some((x) => x.id === source.id))?.[0]
+      if (sourceActivePid && sourceActivePid !== rootActivePid) {
+        tasksSnap.set(sourceActivePid, (this.tasks[sourceActivePid] ?? []).slice())
+      }
       if (masterPid) repeatsSnap.set(masterPid, JSON.parse(JSON.stringify(this.repeats[masterPid] ?? [])))
       trashSnap.set(trashPid, (this.trash[trashPid] ?? []).slice())
       if (rootInTrash && rootInTrash !== trashPid) trashSnap.set(rootInTrash, (this.trash[rootInTrash] ?? []).slice())
@@ -4294,6 +4302,40 @@ export const useTasksStore = defineStore('tasks', {
       }
       if (source && source !== root) {
         source.repeatProcessed = { ...(source.repeatProcessed ?? {}), [day]: 'deleted' }
+      }
+      // 活跃分支（masterPid === undefined，物化出的任务承担后续周期）时，repeats 中可能仍残留
+      // 与该链同源的模板（其它端尚未同步物化移除 / 本地物化写盘失败的竞态）。此时必须同样在模板
+      // 上标记 repeatProcessed[day]='deleted'，否则其它端按旧模板物化时会重新生成这一天（复活）。
+      // 先快照（供失败回滚）再原地改模板。
+      let linkedRepeatsPid: string | undefined
+      if (masterPid === undefined) {
+        for (const pid of Object.keys(this.repeats)) {
+          const m = (this.repeats[pid] ?? []).find(
+            (x) => !x.deletedAt && (x.sourceTaskId === rootId || x.template.id === taskId || x.template.id === source.id),
+          )
+          if (m) {
+            linkedRepeatsPid = pid
+            if (!repeatsSnap.has(pid)) repeatsSnap.set(pid, JSON.parse(JSON.stringify(this.repeats[pid] ?? [])))
+            break
+          }
+        }
+        if (linkedRepeatsPid !== undefined) {
+          const mlist = this.repeats[linkedRepeatsPid] ?? []
+          const mi = mlist.findIndex(
+            (m) =>
+              !m.deletedAt &&
+              (m.sourceTaskId === rootId || m.template.id === taskId || m.template.id === source.id),
+          )
+          if (mi >= 0) {
+            const m = mlist[mi]
+            mlist[mi] = {
+              ...m,
+              template: { ...m.template, repeatProcessed: { ...(m.template.repeatProcessed ?? {}), [day]: 'deleted' } },
+              updatedAt: nowIso(),
+            }
+            this.repeats[linkedRepeatsPid] = [...mlist]
+          }
+        }
       }
       // 生成单日已删除记录（入回收站，按当天分片）
       const occTime = source.reminderTime ?? source.startTime ?? source.endTime ?? `${day}T00:00:00+08:00`
@@ -4370,13 +4412,21 @@ export const useTasksStore = defineStore('tasks', {
             }
             // 时间变化影响项目主列表排序键（提醒/开始时间）：就地重排，保持界面顺序与时间一致
             if (rootActivePid) this.tasks[rootActivePid] = sortActiveList(this.tasks[rootActivePid] ?? [])
+            if (sourceActivePid && sourceActivePid !== rootActivePid) {
+              this.tasks[sourceActivePid] = sortActiveList(this.tasks[sourceActivePid] ?? [])
+            }
           }
         }
       }
-      // 立即落盘全部涉及项目
+      // 立即落盘全部涉及项目（source 所在活跃项目必须写入：活跃分支的标记/顺延才有持久化，
+      // 否则本端刷新或其它端同步会按旧版本复活该任务）
       const jobs: Promise<boolean>[] = []
       if (rootActivePid) jobs.push(this.saveProjectNow(rootActivePid))
+      if (sourceActivePid && sourceActivePid !== rootActivePid) jobs.push(this.saveProjectNow(sourceActivePid))
       if (masterPid) jobs.push(this.saveRepeatsNow(masterPid))
+      if (linkedRepeatsPid !== undefined && linkedRepeatsPid !== masterPid) {
+        jobs.push(this.saveRepeatsNow(linkedRepeatsPid))
+      }
       jobs.push(this.saveTrashNow(trashPid))
       if (rootInTrash && rootInTrash !== trashPid) jobs.push(this.saveTrashNow(rootInTrash))
       const ok = (await Promise.all(jobs)).every(Boolean)
@@ -4454,6 +4504,14 @@ export const useTasksStore = defineStore('tasks', {
       const repeatsSnap = new Map<string, RepeatMaster[]>()
       const trashSnap = new Map<string, Task[]>()
       if (rootActivePid) tasksSnap.set(rootActivePid, (this.tasks[rootActivePid] ?? []).slice())
+      // 活跃分支（masterPid === undefined）时 source 是待完成的活跃重复任务本身，其所在项目
+      // 可能不等于根任务项目、或根任务已不在活跃列表（已完成入回收站）。若只按 rootActivePid
+      // 落盘，source 的 repeatProcessed 标记只存在于内存，本端刷新或其它端同步后会按旧版本
+      // 重新物化/显示该日（与单日删除同一类 Bug）。因此 source 所在活跃项目必须纳入快照与落盘。
+      const sourceActivePid = Object.entries(this.tasks).find(([, l]) => l.some((x) => x.id === source.id))?.[0]
+      if (sourceActivePid && sourceActivePid !== rootActivePid) {
+        tasksSnap.set(sourceActivePid, (this.tasks[sourceActivePid] ?? []).slice())
+      }
       if (masterPid) repeatsSnap.set(masterPid, JSON.parse(JSON.stringify(this.repeats[masterPid] ?? [])))
       trashSnap.set(trashPid, (this.trash[trashPid] ?? []).slice())
       if (rootInTrash && rootInTrash !== trashPid) trashSnap.set(rootInTrash, (this.trash[rootInTrash] ?? []).slice())
@@ -4465,6 +4523,39 @@ export const useTasksStore = defineStore('tasks', {
       }
       if (source && source !== root) {
         source.repeatProcessed = { ...(source.repeatProcessed ?? {}), [day]: 'completed' }
+      }
+      // 活跃分支（masterPid === undefined）时，repeats 中可能仍残留与该链同源的模板
+      // （物化竞态 / 本地物化写盘失败的竞态）。同样在模板上标记 repeatProcessed[day]='completed'，
+      // 防止其它端按旧模板物化/显示该日（与单日删除同一类复活 Bug）。先快照再原地改模板。
+      let linkedRepeatsPid: string | undefined
+      if (masterPid === undefined) {
+        for (const pid of Object.keys(this.repeats)) {
+          const m = (this.repeats[pid] ?? []).find(
+            (x) => !x.deletedAt && (x.sourceTaskId === rootId || x.template.id === taskId || x.template.id === source.id),
+          )
+          if (m) {
+            linkedRepeatsPid = pid
+            if (!repeatsSnap.has(pid)) repeatsSnap.set(pid, JSON.parse(JSON.stringify(this.repeats[pid] ?? [])))
+            break
+          }
+        }
+        if (linkedRepeatsPid !== undefined) {
+          const mlist = this.repeats[linkedRepeatsPid] ?? []
+          const mi = mlist.findIndex(
+            (m) =>
+              !m.deletedAt &&
+              (m.sourceTaskId === rootId || m.template.id === taskId || m.template.id === source.id),
+          )
+          if (mi >= 0) {
+            const m = mlist[mi]
+            mlist[mi] = {
+              ...m,
+              template: { ...m.template, repeatProcessed: { ...(m.template.repeatProcessed ?? {}), [day]: 'completed' } },
+              updatedAt: nowIso(),
+            }
+            this.repeats[linkedRepeatsPid] = [...mlist]
+          }
+        }
       }
       const occTime =
         source.reminderTime ?? source.startTime ?? source.endTime ?? `${day}T00:00:00+08:00`
@@ -4505,7 +4596,11 @@ export const useTasksStore = defineStore('tasks', {
       if (!this.trashLoaded.includes(trashPid)) this.trashLoaded.push(trashPid)
       const jobs: Promise<boolean>[] = []
       if (rootActivePid) jobs.push(this.saveProjectNow(rootActivePid))
+      if (sourceActivePid && sourceActivePid !== rootActivePid) jobs.push(this.saveProjectNow(sourceActivePid))
       if (masterPid) jobs.push(this.saveRepeatsNow(masterPid))
+      if (linkedRepeatsPid !== undefined && linkedRepeatsPid !== masterPid) {
+        jobs.push(this.saveRepeatsNow(linkedRepeatsPid))
+      }
       jobs.push(this.saveTrashNow(trashPid))
       if (rootInTrash && rootInTrash !== trashPid) jobs.push(this.saveTrashNow(rootInTrash))
       const ok = (await Promise.all(jobs)).every(Boolean)
