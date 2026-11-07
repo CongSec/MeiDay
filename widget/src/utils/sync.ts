@@ -320,6 +320,7 @@ function mergeDeletedProjects(local: DeletedProject[], remote: DeletedProject[])
  * - firstProjectAt：取最早的非空值，绝不覆盖/绝不清零（一旦写入永不变更）；
  * - daily：同一天取两端增量之和（不同天的记录自然累加）；新写入的任务状态按任务 ID
  *   逐项合并，避免已同步过的累计值再次相加。绝不从任务列表重算。
+ * - sealed（封口）日：计数已定型，取 ts 较新的一侧、不叠加（叠加会把同一批历史事件重复计数）。
  */
 export function mergeStats(local: UserStats, remote: UserStats): UserStats {
   const daily: Record<string, StatsDailyEntry> = {}
@@ -333,6 +334,14 @@ export function mergeStats(local: UserStats, remote: UserStats): UserStats {
     if (!a) daily[k] = b
     else if (!b) daily[k] = a
     else {
+      const aSealed = a.sealed === true
+      const bSealed = b.sealed === true
+      if (aSealed || bSealed) {
+        // 封口日：取 ts 较新的一侧（更接近定型值），绝不叠加；
+        // 若较新的一侧仍带明细（他端封口后又补记历史日），保留明细，下一次封口时再压缩。
+        daily[k] = a.ts >= b.ts ? a : b
+        continue
+      }
       const aHasTasks = a.tasks != null
       const bHasTasks = b.tasks != null
       const ts = a.ts > b.ts ? a.ts : b.ts

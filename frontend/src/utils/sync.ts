@@ -1,5 +1,6 @@
 import type { OssClient } from '@/utils/oss'
 import { canonicalJson } from '@/utils/task'
+import { addDaysKey, todayKey } from '@/utils/time'
 import type { DeletedProject, Profile, Project, StatsDailyEntry, StatsTaskDelta, Task, UserStats } from '@/types'
 
 /**
@@ -342,11 +343,34 @@ function mergeDeletedProjects(local: DeletedProject[], remote: DeletedProject[])
   return [...byId.values()]
 }
 
+/** stats.json 封口保留窗口（天）：与墓碑日志 TOMBSTONE_RETENTION_DAYS 保持一致。
+ *  超过窗口的旧日期压缩为 {v, ts, sealed:true}（丢弃逐任务明细、计数不变），
+ *  文件体积从此有上限、写放大可控；封口日合并「取 ts 新者、不叠加」，杜绝多端重复计数。 */
+export const STATS_SEAL_DAYS = 180
+/** 封口算法：把「早于窗口」且仍带 tasks 明细的日期条目压成 {v, ts, sealed:true}。
+ *  幂等、可反复执行；返回是否发生了封口（用于决定是否需要写回）。 */
+export function sealOldDays(stats: UserStats | null | undefined, windowDays: number = STATS_SEAL_DAYS): { stats: UserStats | null; changed: boolean } {
+  if (stats == null) return { stats: null, changed: false }
+  const cutoff = addDaysKey(todayKey(), -windowDays)
+  let changed = false
+  const daily = stats.daily ?? {}
+  for (const key of Object.keys(daily)) {
+    const entry = daily[key]
+    // 无明细的旧数据（legacy）不加封口标记：合并仍走「叠加存量」语义，保持迁移期行为不变
+    if (!entry || entry.sealed || entry.tasks == null) continue
+    if (key >= cutoff) continue
+    daily[key] = { v: entry.v, ts: entry.ts, sealed: true }
+    changed = true
+  }
+  return { stats, changed }
+}
+
 /**
  * 合并用户统计（多端冲突时用）：
  * - firstProjectAt：取最早的非空值，绝不覆盖/绝不清零（一旦写入永不变更）；
  * - daily：同一天取两端增量之和（不同天的记录自然累加）；新写入的任务状态按任务 ID
  *   逐项合并，避免已同步过的累计值再次相加。绝不从任务列表重算。
+ * - sealed（封口）日：计数已定型，取 ts 较新的一侧、不叠加（叠加会把同一批历史事件重复计数）。
  */
 export function mergeStats(local: UserStats, remote: UserStats): UserStats {
   const daily: Record<string, StatsDailyEntry> = {}
@@ -360,6 +384,14 @@ export function mergeStats(local: UserStats, remote: UserStats): UserStats {
     if (!a) daily[k] = b
     else if (!b) daily[k] = a
     else {
+      const aSealed = a.sealed === true
+      const bSealed = b.sealed === true
+      if (aSealed || bSealed) {
+        // 封口日：取 ts 较新的一侧（更接近定型值），绝不叠加；
+        // 若较新的一侧仍带明细（他端封口后又补记历史日），保留明细，下一次封口时再压缩。
+        daily[k] = a.ts >= b.ts ? a : b
+        continue
+      }
       const aHasTasks = a.tasks != null
       const bHasTasks = b.tasks != null
       const ts = a.ts > b.ts ? a.ts : b.ts

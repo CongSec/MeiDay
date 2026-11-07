@@ -113,6 +113,9 @@ export interface StatsDailyEntry {
   ts: string
   /** 多端合并用的逐任务状态，key 为任务 id；旧数据可能缺失 */
   tasks?: Record<string, StatsTaskDelta>
+  /** 封口标记：超过保留窗口的旧日期被压缩（丢弃 tasks 明细），v 为已定型的净增量。
+   *  mergeStats 对封口日“取 ts 新者、不叠加”，防止多端把同一批历史事件重复计数。 */
+  sealed?: boolean
 }
 
 /**

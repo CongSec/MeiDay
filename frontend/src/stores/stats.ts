@@ -1,12 +1,12 @@
 import { defineStore } from 'pinia'
 import { useAuthStore } from './auth'
 import { createOssClient, describeOssError, paths } from '@/utils/oss'
-import { compareAndSwapPut, lastModifiedOf, lmKeyOf, mergeStats, mergeStatsAfterSave, versionToken } from '@/utils/sync'
+import { compareAndSwapPut, lastModifiedOf, lmKeyOf, mergeStats, mergeStatsAfterSave, sealOldDays, versionToken } from '@/utils/sync'
 import { enrichOssError } from '@/utils/ossDiag'
 import { idbGet, idbPut, idbDel } from '@/utils/idb'
 import { queueSyncChange } from '@/utils/syncReport'
 import { nowIso, todayKey } from '@/utils/time'
-import type { UserStats } from '@/types'
+import type { StatsDailyEntry, UserStats } from '@/types'
 /**
  * 用户统计 store（全部存于用户 OSS 的 stats.json，不上服务器）。
  *
@@ -19,6 +19,9 @@ import type { UserStats } from '@/types'
  * 计数采用“按天净增量”结构：daily[日期] = { v, ts, tasks }，当前累计 = 所有 v 之和。
  * tasks 记录当天每个任务的最近完成/取消状态，供多端冲突合并时逐任务去重；
  * firstProjectAt 取最早非空，天然安全且不丢历史。
+ *
+ * 体积控制：超过 180 天的旧日期由 sealOldDays 封口（丢弃 tasks 明细、只留 {v, ts, sealed:true}），
+ * 文件体积从此有上限、写放大可控；封口日合并「取 ts 新者、不叠加」，多端不会重复计数。
  */
 let statsSaveTimer: number | undefined
 function emptyStats(): UserStats {
@@ -82,12 +85,16 @@ export const useStatsStore = defineStore('stats', {
         )
         if (res.res.status !== 304) {
           const remote = JSON.parse(res.content.toString()) as UserStats
-          this.stats = remote
-          await idbPut('kv', cacheKey(auth.username), remote)
+          // 读盘即封口：老版本写出的明细旧日期在此一次压缩，内存/IDB 立即收缩；
+          // 若确实发生了封口，顺手 CAS 写回（幂等，成功后下次加载 changed=false 不再写）。
+          const sealed = sealOldDays(remote)
+          this.stats = sealed.stats ?? remote
+          await idbPut('kv', cacheKey(auth.username), this.stats)
           const newEtag = versionToken(res.res.headers as Record<string, unknown>, res.content) ?? ''
           if (newEtag) await idbPut('kv', eKey, newEtag)
           const newLm = lastModifiedOf(res.res.headers as Record<string, unknown>)
           if (newLm) await idbPut('kv', lmKey, newLm)
+          if (sealed.changed) void this.save(this.stats)
         }
       } catch (e) {
         const err = e as { code?: string | number; status?: number }
@@ -102,6 +109,9 @@ export const useStatsStore = defineStore('stats', {
     _persist() {
       const auth = useAuthStore()
       if (!this.stats) this.stats = emptyStats()
+      // 写盘前先把超过窗口的旧日期封口：内存与快照同步收缩，之后 save 里的封口是幂等空跑
+      const sealed = sealOldDays(this.stats)
+      if (sealed.stats) this.stats = sealed.stats
       this.stats.updated_at = nowIso()
       if (auth.username) {
         void idbPut('kv', cacheKey(auth.username), JSON.parse(JSON.stringify(this.stats)))
@@ -125,6 +135,9 @@ export const useStatsStore = defineStore('stats', {
       let knownEtag = await idbGet<string>('kv', eKey)
       try {
         for (let attempt = 0; attempt < 3; attempt++) {
+          // 每次 PUT 前封口（含冲突合并后的重试轮）：OSS 上永远不会出现超窗口的明细条目
+          const sealed = sealOldDays(stats)
+          stats = sealed.stats ?? stats
           const result = await compareAndSwapPut<UserStats>(client, key, stats, knownEtag)
           if (result.ok) {
             if (result.etag) await idbPut('kv', eKey, result.etag)
@@ -182,8 +195,11 @@ export const useStatsStore = defineStore('stats', {
       if (!this.stats) this.stats = emptyStats()
       if (!this.stats.daily) this.stats.daily = {}
       const ts = nowIso()
-      const cur = this.stats.daily[key]?.v ?? 0
-      const entry = this.stats.daily[key] ?? { v: 0, ts }
+      const prev = this.stats.daily[key]
+      const cur = prev?.v ?? 0
+      // 封口日被再次写入（如重复任务补记历史日）时先「开封」：保留已定型计数与时间，再累加并补回明细；
+      // 开封后的条目会在下一次封口（该日仍超窗口）时重新压缩，不会让体积长期膨胀。
+      const entry: StatsDailyEntry = prev && !prev.sealed ? { ...prev } : { v: prev?.v ?? 0, ts: prev?.ts ?? ts }
       if (taskId) {
         entry.tasks = entry.tasks ?? {}
         entry.tasks[taskId] = { v: delta > 0 ? 1 : 0, ts }
