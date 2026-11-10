@@ -185,9 +185,14 @@ def sync_reminders(body: RemindersSyncRequest, username: str = Depends(get_usern
                 # 客户端可能带着旧的提醒时间同步（服务器已把重复提醒推进到未来），
                 # 若服务器侧的提醒时间严格晚于客户端提交的，说明是“回退同步”，
                 # 保留服务器侧的推进状态（时间/起止/is_reminded），避免被客户端覆盖回去。
+                # BUG-35 修复：回退保护仅在“客户端提交的这个提醒时间已在 sent_reminders
+                # 历史中”（该时间确实已发送过、客户端只是重复同步旧时间）时才启用；
+                # 用户把提醒时间改成一个比服务器已推进时间更早的新时间（未发送过）时，
+                # 视为真实修改，走下方正常注册/推进逻辑，不再被静默丢弃。
                 prev = old_by_key.get((task.id, task.subtaskId))
                 prev_rt = prev["reminder_time"] if prev else None
-                if prev_rt and _iso_gt(prev_rt, task.reminderTime):
+                sent_key = (task.id, task.subtaskId, task.reminderTime)
+                if prev_rt and _iso_gt(prev_rt, task.reminderTime) and sent_key in sent:
                     reminder_time = prev_rt
                     start_time = prev["start_time"]
                     end_time = prev["end_time"]
