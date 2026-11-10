@@ -766,6 +766,9 @@ async function submit() {
   // 或规则被整体修改——继续沿用会让提醒时间钉在已删除/已过期的日期上（表现为：改日期列表
   // 后仍按旧日期提醒；改提醒时间时提交“旧日期+新时分”被服务器回退保护丢弃）。此时重新锚定
   // 到“今天或下一次重复日”，保证提醒只落在新规则的有效重复日上。
+  // 例外（BUG-36）：旧日期虽仍是合法重复日，但若任务未完成且日期已早于今天（昨天没完成
+  // 留到今天），继续沿用会让提醒日期钉在昨天、改时分也移不到今天；对“过期 + 待办”的旧日期
+  // 同样重新锚定到今天/下一次重复日，其余场景（未来模板 / 已完成 / 已删除）保持原行为。
   let reminderTime: string | null = null
   if (reminder.value) {
     if (isNewModel && repeat) {
@@ -773,8 +776,10 @@ async function submit() {
         ? (dateKeyOf(props.task.reminderTime || props.task.startTime || props.task.endTime) || '')
         : ''
       const start = repeat.start ?? todayKey()
-      if (!occDate || !(repeat.start && isRepeatDay(repeat, repeat.start, occDate))) {
-        occDate = currentOrNextOccurrence(repeat, start, todayKey())
+      const today = todayKey()
+      const stalePending = props.task?.status === 'pending' && !!occDate && occDate < today
+      if (!occDate || stalePending || !(repeat.start && isRepeatDay(repeat, repeat.start, occDate))) {
+        occDate = currentOrNextOccurrence(repeat, start, today)
       }
       reminderTime = fromLocalInput(`${occDate}T${reminder.value}`)
     } else {
