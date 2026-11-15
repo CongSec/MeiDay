@@ -9,7 +9,7 @@ import { useWidgetStore } from '@/stores/widget'
 import { idbClearUserCache } from '@/utils/idb'
 import { getSavedPassword } from '@/api/client'
 import { bootstrapLoad, startSyncPoll, stopSyncPoll, armRecoveryLoop, disarmRecovery } from '@/composables/useSyncPoll'
-import { seedSessionFromConfig } from '@/utils/config'
+import { persistSessionToConfig, seedSessionFromConfig } from '@/utils/config'
 
 /**
  * 401 恢复钩子：必须在 Pinia 创建之后注册（useXxxStore 依赖激活的 Pinia 实例）。
@@ -68,12 +68,20 @@ async function bootstrap() {
     // 否则冷启动时 tasks 为空，今日视图永远空白（自动登录路径之前漏了这步）。
     await bootstrapLoad().catch(() => {})
     startSyncPoll()
+    // 关键修复：自动解锁成功后把最新登录态（tokenAt/savedPwAt）写回 config.json。
+    // 旧版本只在“手动登录/登出”时持久化，自动解锁从不刷新 config，导致
+    // config.json 里的 savedPwAt 停留在最后一次手动登录的时间；每次启动
+    // seedSessionFromConfig 又用这个陈旧时间戳覆盖 localStorage，7 天过期
+    // 检查（getSavedPassword）在满 7 天时删掉记住的密码，进入“每次都要重新登录”
+    // 的死循环。这里每次成功解锁都刷新，7 天时钟持续重置。
+    await persistSessionToConfig().catch(() => {})
   } else if (auth.isLoggedIn && (await auth.tryOfflineUnlock())) {
     // 服务器不可达（token 仍在）但本地缓存凭证可用：离线解锁进入（轮询会失败退避，
     // 连接状态显示失败，服务器恢复后自动重登回到在线）。
     // 注意:401（会话失效）时 request() 已清 token,isLoggedIn 为 false,不会走这条路径。
     await bootstrapLoad().catch(() => {})
     startSyncPoll()
+    await persistSessionToConfig().catch(() => {})
   } else {
     // 自动解锁失败：打开设置让用户重新登录。若仍持有本地凭据（保存的密码未过期），
     // 则进入“待网络恢复”自动重试（如开机时还没网）——监听 online + 指数退避，
