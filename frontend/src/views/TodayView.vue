@@ -14,7 +14,7 @@ import AppIcon from '@/components/AppIcon.vue'
 import CloudStatus from '@/components/CloudStatus.vue'
 import { dateKeyOf, nowIso, toLocalInput, addMonthsKey } from '@/utils/time'
 import { collectFutureVisibleTasks, isTaskVisibleToday } from '@/utils/todayFilter'
-import { compareTasksByTime } from '@/utils/task'
+import { compareAutoTasks } from '@/utils/task'
 import type { Subtask, Task } from '@/types'
 import { useNow } from '@/composables/useNow'
 import { taskCompleteFeedback, vibrateSubtaskComplete } from '@/utils/taskFeedback'
@@ -88,9 +88,10 @@ const sorted = computed(() => {
   const byOrder = (a: Task, b: Task) => (orderMap.get(a.id) ?? 0) - (orderMap.get(b.id) ?? 0)
   const group = (list: Task[]) => {
     // 手动拖拽顺序最高优先：注册过 todayOrder 的按顺序表排；
-    // 未注册的跳过手动键，按统一链（提醒 > 开始 > 创建时间）排，endTime 不再参与
+    // 未注册的按「普通在前、重复在后」分组（组内统一链：提醒 > 开始 > 创建时间），
+    // 重复任务即使带早提醒也不会排在普通任务前面（endTime 不参与）
     const registered = list.filter((t) => orderMap.has(t.id)).sort(byOrder)
-    const unregistered = list.filter((t) => !orderMap.has(t.id)).sort(compareTasksByTime)
+    const unregistered = list.filter((t) => !orderMap.has(t.id)).sort(compareAutoTasks)
     return [...registered, ...unregistered]
   }
   return [

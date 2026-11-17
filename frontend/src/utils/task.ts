@@ -71,6 +71,25 @@ export function compareTasksByTime(
   return (a.createdAt || '').localeCompare(b.createdAt || '')
 }
 
+/** 重复任务判定：任务带重复规则（repeat 字段非空）即为重复任务。
+ *  重复规则被移除（编辑去掉重复）后字段消失，自然回归普通任务；子任务无重复规则恒为 false。 */
+export function isRepeatTask(t: Task | Subtask): boolean {
+  return !!(t as Task).repeat
+}
+
+/** 无手动键时的自动排序：普通任务在前、重复任务整体在后（与已完成任务的区段边界由
+ *  调用方的状态分组保证）。重复任务哪怕带提醒/开始/截止时间也不参与普通任务的排序竞争，
+ *  只在重复任务内部沿用统一时间链（提醒 > 开始 > 创建时间）。 */
+export function compareAutoTasks(
+  a: Task | Subtask,
+  b: Task | Subtask,
+): number {
+  const ra = isRepeatTask(a) ? 1 : 0
+  const rb = isRepeatTask(b) ? 1 : 0
+  if (ra !== rb) return ra - rb
+  return compareTasksByTime(a, b)
+}
+
 /** 在 list 现有顺序中求 task 的时间落点下标：从段首起用统一时间链（提醒 > 开始 > 创建）
  *  向前扫描，遇到第一个「时间更晚」的任务即停，插在它前面；整段没有更晚任务时插到段尾。
  *  落点只由时间链决定，与其它任务的手动拖拽位置无关（列表若本就按时间排好，则等价于严格升序插入）。

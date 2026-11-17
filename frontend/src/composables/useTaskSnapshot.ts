@@ -4,7 +4,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useTasksStore } from '@/stores/tasks'
 import { todayKey } from '@/utils/time'
 import { isTaskVisibleToday } from '@/utils/todayFilter'
-import { compareTasksByTime } from '@/utils/task'
+import { compareAutoTasks } from '@/utils/task'
 import { debounce } from '@/utils/debounce'
 import {
   consumeLaunchToday,
@@ -28,7 +28,7 @@ function computeTodayPendingNames(): string[] {
   const byOrder = (a: Task, b: Task) => (orderMap.get(a.id) ?? 0) - (orderMap.get(b.id) ?? 0)
   const group = (arr: Task[]) => {
     const registered = arr.filter((t) => orderMap.has(t.id)).sort(byOrder)
-    const unregistered = arr.filter((t) => !orderMap.has(t.id)).sort(compareTasksByTime)
+    const unregistered = arr.filter((t) => !orderMap.has(t.id)).sort(compareAutoTasks)
     return [...registered, ...unregistered]
   }
   const pending = group(list.filter((t) => t.status === 'pending'))

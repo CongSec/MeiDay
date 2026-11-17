@@ -6,7 +6,7 @@ import { useTasksStore } from '@/stores/tasks'
 import { useStatsStore } from '@/stores/stats'
 import { useWidgetStore, type WidgetMode } from '@/stores/widget'
 import { isTaskVisibleToday } from '@/utils/todayFilter'
-import { compareTasksByTime } from '@/utils/task'
+import { compareAutoTasks } from '@/utils/task'
 import { todayKey } from '@/utils/time'
 import { bootstrapLoad, startSyncPoll, stopSyncPoll, syncNow, isSynced, disarmRecovery } from '@/composables/useSyncPoll'
 import { persistSessionToConfig, persistServerConfigToConfig } from '@/utils/config'
@@ -261,14 +261,14 @@ const filtered = computed(() =>
   tasks.all.filter((t) => t.status === 'pending' && isTaskVisibleToday(t, today.value)),
 )
 
-/** 与网页端今日视图一致：注册过 todayOrder 的按顺序表排，未注册的跳过手动键，
- *  按统一链（提醒 > 开始 > 创建时间）排，endTime 不再参与 */
+/** 与网页端今日视图一致：注册过 todayOrder 的按顺序表排，未注册的按「普通在前、重复在后」
+ *  分组（组内统一链：提醒 > 开始 > 创建时间），endTime 不再参与 */
 const sorted = computed(() => {
   const orderMap = new Map<string, number>()
   tasks.todayOrder.forEach((id, idx) => orderMap.set(id, idx))
   const byOrder = (a: Task, b: Task) => (orderMap.get(a.id) ?? 0) - (orderMap.get(b.id) ?? 0)
   const registered = filtered.value.filter((t) => orderMap.has(t.id)).sort(byOrder)
-  const unregistered = filtered.value.filter((t) => !orderMap.has(t.id)).sort(compareTasksByTime)
+  const unregistered = filtered.value.filter((t) => !orderMap.has(t.id)).sort(compareAutoTasks)
   return [...registered, ...unregistered]
 })
 

@@ -8,6 +8,7 @@
  * 跨天任务：任务小块显示在「归属当天」格子里（已完成=完成当天，未完成=提醒/开始当天），
  * 并保留从开始日（提醒优先）延伸到完成/截止日的横条；横条整根固定在同一行（不产生台阶），
  * 与对应小块的垂直行号对齐；同一天内普通任务小块与横条按时间排序、上下堆叠，绝不重叠。
+ * 跨天横条的标题文字居中显示在整根横条（当前月可见段）的几何中心，锚点日不再单独渲染标题小块。
  */
 import { computed } from 'vue'
 import type { RepeatMaster, Task } from '@/types'
@@ -242,6 +243,8 @@ const futureRepeatChips = computed<Chip[]>(() => {
 const chipsByDay = computed(() => {
   const map = new Map<string, Chip[]>()
   for (const c of [...doneChips.value, ...pendingChips.value, ...futureRepeatChips.value]) {
+    // 跨天任务的锚点小块：标题文字已并入横条居中显示，不再作为小块单独渲染
+    if (c.cross) continue
     const arr = map.get(c.day) ?? []
     arr.push(c)
     map.set(c.day, arr)
@@ -420,6 +423,12 @@ interface BarSeg {
   endCol: number
   /** 横条所在行号（固定 lane，整根横条同一行） */
   topRow: number
+  /** 该段是否包含横条可见段的几何中心（标题文字渲染在该段） */
+  centerInSeg: boolean
+  /** 标题文字中心点在该段所在行内的列位置（0–7，可为小数） */
+  labelCol: number
+  /** 标题文字最大宽度（占该段宽度的百分比），保证不越出横条底色范围 */
+  maxWidthPct: number
 }
 interface WeekRow {
   cells: DayCell[]
@@ -465,6 +474,9 @@ const rows = computed<WeekRow[]>(() => {
     const s = Number(from.slice(8, 10))
     const e = Number(to.slice(8, 10))
     const topRow = bar.lane
+    // 横条可见段的几何中心（列单位，可为小数）：标题文字据此居中（按当前月内可见段，而非完整跨月范围）
+    const centerColGlobal = firstCol.value + (s + e - 1) / 2
+    const centerRow = Math.floor(centerColGlobal / 7)
     let day = s
     while (day <= e) {
       const idx = firstCol.value + (day - 1)
@@ -475,7 +487,15 @@ const rows = computed<WeekRow[]>(() => {
       const segEnd = Math.min(e, rowEnd)
       const startCol = firstCol.value + (segStart - 1) - r * 7
       const endCol = firstCol.value + (segEnd - 1) - r * 7
-      out[r].segments.push({ bar, startCol, endCol, topRow })
+      let labelCol = 0
+      let maxWidthPct = 0
+      if (r === centerRow) {
+        labelCol = Math.min(Math.max(centerColGlobal - r * 7, startCol + 0.5), endCol + 0.5)
+        // 文字半宽不超过到段两端的距离，保证文字不越出横条底色范围；段宽不足 1 列时仍可占满整段
+        const halfSpan = Math.min(labelCol - startCol, endCol + 1 - labelCol)
+        maxWidthPct = Math.min((halfSpan * 2) / (endCol - startCol + 1), 1) * 100
+      }
+      out[r].segments.push({ bar, startCol, endCol, topRow, centerInSeg: r === centerRow, labelCol, maxWidthPct })
       day = segEnd + 1
     }
   }
@@ -609,7 +629,20 @@ function changeMonth(delta: number) {
               }"
               :title="barTitle(seg.bar)"
               @click="emit('open-task', seg.bar.task, seg.bar.anchorDay)"
-            ></div>
+            >
+              <!-- 标题文字：居中放在整根横条（当前月可见段）的几何中心，文字不越出横条底色范围 -->
+              <span
+                v-if="seg.centerInSeg"
+                class="absolute z-10 block h-full max-w-full truncate px-1 text-center text-[10px] leading-[20px]"
+                :class="seg.bar.kind === 'done' ? 'text-slate-600' : 'text-amber-800'"
+                :style="{
+                  left: ((seg.labelCol - seg.startCol) / (seg.endCol - seg.startCol + 1)) * 100 + '%',
+                  top: '0',
+                  transform: 'translateX(-50%)',
+                  maxWidth: seg.maxWidthPct + '%',
+                }"
+              >{{ taskDisplayName(seg.bar.task) }}</span>
+            </div>
           </div>
         </div>
       </div>

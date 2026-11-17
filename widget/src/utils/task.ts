@@ -71,6 +71,25 @@ export function compareTasksByTime(
   return (a.createdAt || '').localeCompare(b.createdAt || '')
 }
 
+/** 重复任务判定：任务带重复规则（repeat 字段非空）即为重复任务。
+ *  重复规则被移除（编辑去掉重复）后字段消失，自然回归普通任务；子任务无重复规则恒为 false。 */
+export function isRepeatTask(t: Task | Subtask): boolean {
+  return !!(t as Task).repeat
+}
+
+/** 无手动键时的自动排序：普通任务在前、重复任务整体在后（与已完成任务的区段边界由
+ *  调用方的状态分组保证）。重复任务哪怕带提醒/开始/截止时间也不参与普通任务的排序竞争，
+ *  只在重复任务内部沿用统一时间链（提醒 > 开始 > 创建时间）。 */
+export function compareAutoTasks(
+  a: Task | Subtask,
+  b: Task | Subtask,
+): number {
+  const ra = isRepeatTask(a) ? 1 : 0
+  const rb = isRepeatTask(b) ? 1 : 0
+  if (ra !== rb) return ra - rb
+  return compareTasksByTime(a, b)
+}
+
 /** 统一排序链（带手动键）：手动排序 > 提醒时间 > 开始时间 > 创建时间。
  *  manualA / manualB 为手动顺序值（今日视图为 todayOrder 下标、项目/子任务为 sort），
  *  缺失时该键跳过（直接落到下一键比较）。 */

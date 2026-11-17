@@ -5,7 +5,7 @@ import { applyDeletedTombstones, lastModifiedOf, lmKeyOf, mergeDeletedTombstones
 import { idbGet, idbPut, idbDel } from '@/utils/idb'
 import { nowIso, todayKey } from '@/utils/time'
 import { isTaskVisibleToday } from '@/utils/todayFilter'
-import { compareTaskChain, normalizeTasks } from '@/utils/task'
+import { compareAutoTasks, normalizeTasks } from '@/utils/task'
 import { addDaysKey, dateKeyOf } from '@/utils/time'
 import { UNCATEGORIZED, type RepeatMaster, type Task } from '@/types'
 
@@ -149,8 +149,15 @@ function isServerEmptyError(e: unknown): boolean {
 }
 
 function sortActiveList(list: Task[]): Task[] {
-  // 统一排序链：手动 sort > 提醒 > 开始 > 创建时间（升序；缺失键排后，endTime 不参与）
-  const cmp = (a: Task, b: Task) => compareTaskChain(a, b, a.sort, b.sort)
+  // 统一排序链：手动 sort > 提醒时间 > 开始时间 > 创建时间（升序；缺失键排后，endTime 不参与）。
+  // 拖拽过（有 sort）的任务按 sort 升序（含重复任务——手动拖拽位置最高优先）；未拖过的按
+  // 「普通任务在前、重复任务在后」分组，组内再走统一时间链（重复任务不参与普通任务的排序竞争）。
+  const cmp = (a: Task, b: Task) => {
+    const ma = a.sort ?? Number.MAX_SAFE_INTEGER
+    const mb = b.sort ?? Number.MAX_SAFE_INTEGER
+    if (ma !== mb) return ma - mb
+    return compareAutoTasks(a, b)
+  }
   const pending = list.filter((t) => t.status === 'pending').sort(cmp)
   const rest = list.filter((t) => t.status !== 'pending').sort(cmp)
   return [...pending, ...rest]
