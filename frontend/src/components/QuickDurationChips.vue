@@ -91,25 +91,37 @@ function openAdd() {
   addErr.value = ''
 }
 
-function cancelAdd() {
-  adding.value = false
-  addErr.value = ''
-}
-
-async function confirmAdd() {
-  if (saving.value) return
-  // v-model 在 type=number 输入框上会把值自动转成 number，这里兼容 string/number 两种形态，
-  // 不能用 value.trim()（数字没有 trim 方法，会抛 TypeError 导致点击无反应）
+/** 校验输入并换算成分钟；不合法时写 addErr 并返回 null。
+ *  v-model 在 type=number 输入框上会把值自动转成 number，这里兼容 string/number 两种形态，
+ *  不能用 value.trim()（数字没有 trim 方法，会抛 TypeError 导致点击无反应） */
+function parseMins(): number | null {
   const raw = Number(addValue.value)
   if (!addValue.value || !Number.isFinite(raw) || !Number.isInteger(raw) || raw <= 0) {
     addErr.value = '请输入大于 0 的整数'
-    return
+    return null
   }
   const mins = addUnit.value === 'hour' ? raw * 60 : raw
   if (mins < 1 || mins > MAX_MINUTES) {
     addErr.value = '时长需在 1 分钟 ~ 24 小时之间'
-    return
+    return null
   }
+  return mins
+}
+
+/** 确认：不存库，直接把「当前时刻 + 输入时长」填为提醒时间（emit apply）并关闭表单 */
+function applyAdd() {
+  const mins = parseMins()
+  if (mins === null) return
+  emit('apply', fmtApplied(mins))
+  adding.value = false
+  addErr.value = ''
+}
+
+/** 保存：完整校验（含已存在/条数上限）后写入账号快捷清单（服务器，多端同步），成功关闭表单 */
+async function saveAdd() {
+  if (saving.value) return
+  const mins = parseMins()
+  if (mins === null) return
   if (durations.value.includes(mins)) {
     addErr.value = '该时长已存在'
     return
@@ -154,7 +166,7 @@ async function confirmAdd() {
         >×</span>
       </button>
 
-      <!-- ＋添加 / 添加表单 -->
+      <!-- ＋添加 / 添加表单：确认＝即用（当前时刻＋时长，不存库）；保存＝写入账号快捷清单 -->
       <div v-if="adding" class="inline-flex items-center gap-1">
         <input
           v-model="addValue"
@@ -163,7 +175,7 @@ async function confirmAdd() {
           max="1440"
           placeholder="时长"
           class="w-16 border rounded-md px-1.5 py-0.5 text-[11px] outline-none focus:ring-2 focus:ring-brand/50"
-          @keydown.enter.prevent="confirmAdd"
+          @keydown.enter.prevent="applyAdd"
         />
         <select v-model="addUnit" class="border rounded-md px-1 py-0.5 text-[11px] bg-white">
           <option value="min">分钟</option>
@@ -172,17 +184,24 @@ async function confirmAdd() {
         <button
           type="button"
           class="text-[11px] text-brand font-medium hover:underline disabled:opacity-50"
+          title="当前时刻 + 输入时长，直接设为提醒时间"
           :disabled="saving"
-          @click="confirmAdd"
-        >确定</button>
-        <button type="button" class="text-[11px] text-slate-400 hover:text-slate-600" @click="cancelAdd">取消</button>
+          @click="applyAdd"
+        >确认</button>
+        <button
+          type="button"
+          class="text-[11px] text-slate-400 hover:text-slate-600 disabled:opacity-50"
+          title="保存到快捷时长清单（下次可直接点标签使用）"
+          :disabled="saving"
+          @click="saveAdd"
+        >保存</button>
       </div>
       <button
         v-else
         type="button"
         class="text-[11px] text-brand font-medium hover:underline disabled:opacity-50"
-        :disabled="saving || durations.length >= MAX_DURATIONS"
-        :title="durations.length >= MAX_DURATIONS ? `最多 ${MAX_DURATIONS} 条` : '添加自定义提醒时长'"
+        :disabled="saving"
+        title="添加自定义提醒时长"
         @click="openAdd"
       >＋添加</button>
 

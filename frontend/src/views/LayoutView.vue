@@ -274,6 +274,9 @@ onMounted(async () => {
 })
 
 async function bootstrap() {
+  // F0/F1：进入追平状态——bootstrap 的加载/同步期自动写回（今日顺序对账、归档、物化、自愈）
+  // 一律推迟，由 useSyncPoll 追平完成后的 finalizeSyncCatchUp 统一收敛
+  tasks.setSyncCatchingUp()
   await projects.load()
   // 恢复全部真实项目缓存，侧栏角标/今日计数在进入今日视图前也准确
   await tasks.loadFromIdb([...projects.projects.map((p) => p.id)])

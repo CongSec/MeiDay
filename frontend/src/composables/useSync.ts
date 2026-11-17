@@ -34,6 +34,8 @@ export function useSync() {
     if (syncing.value) return false
     syncing.value = true
     try {
+      // F0/F1：手动刷新同样进入追平状态——刷新期间的自动写回推迟，全部项目拉取成功后收敛
+      tasks.setSyncCatchingUp()
       await projects.flushProfile()
       await projects.load()
       // 统计文件一并从 OSS 同步（只读展示，不参与任务合并）
@@ -61,6 +63,8 @@ export function useSync() {
         ? projectIds
         : [...new Set([...todayIds, ...viewIds])]
       const failed = await tasks.syncAll(target)
+      // F0/F1：全部项目拉取成功 = 追平完成 → 最终对账 + 收敛被延迟的自动写回
+      if (failed === 0) await tasks.finalizeSyncCatchUp()
       if (failed > 0) {
         ui.toast(`同步完成，${failed} 个项目同步失败`, 'error')
       } else if (!silent) {

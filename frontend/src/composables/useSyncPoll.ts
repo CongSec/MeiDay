@@ -21,12 +21,18 @@ import { flushPendingSyncReports } from '@/utils/syncReport'
 const POLL_INTERVAL_MS = 2000
 const MAX_BACKOFF_MS = 30_000
 const HIDDEN_INTERVAL_MS = 15_000
+/** 追平门闩兜底：进入追平状态超过该时长仍未完成（如单个项目持续拉取失败），强制收敛一次，
+ *  避免门闩永久卡死自动写回（今日对账 / 归档 / 物化落盘等）——此时数据可能未完全追平，
+ *  但 reconcile 的 fullyLoaded 保守保留兜底，行为回退到修复前「按加载时写回」的水平。 */
+const CATCH_UP_TIMEOUT_MS = 90_000
 const VERSION_KEY_PREFIX = 'sync:version:'
 
 const active = ref(false)
 let timer: number | undefined
 let stopped = false
 let intervalMs = POLL_INTERVAL_MS
+/** 本次追平门闩的启动时刻（startSyncPoll 时记录，用于超时兜底强制收敛） */
+let catchUpStartedAt = 0
 
 function versionKey(username: string): string {
   return `${VERSION_KEY_PREFIX}${username}`
@@ -190,6 +196,17 @@ async function pollOnce(): Promise<boolean> {
     }
     // 3) 只有全部拉取成功才推进本地版本游标；失败则不推进，下一轮重试失败资源
     if (pulledAll) await saveVersion(auth.username, cursor)
+    // 3.5) F0/F1：检测到「无积压变更且本轮全部拉取成功」= 追平完成 → 执行最终对账 +
+    //    收敛被延迟的自动写回 + 重放未落盘保存。full_sync（全量同步）与全新设备（cur=0，
+    //    全量加载）同样视为已追平；本轮还有积压则保持门闩，下轮继续追平。
+    //    兜底：追平长期未完成（如单个项目持续失败）时按超时强制收敛一次。
+    const catchUpOverdue = Date.now() - catchUpStartedAt > CATCH_UP_TIMEOUT_MS
+    if (
+      catchUpOverdue ||
+      (pulledAll && (state.full_sync || cur === 0 || state.changes.length === 0))
+    ) {
+      await tasks.finalizeSyncCatchUp()
+    }
     // 4) 有未读公告时派发事件，通知主界面弹窗（弹窗中用户逐条阅读时由主界面去重，
     //    避免正在看的公告被打断；弹完后下一轮轮询自动接上新的未读）
     if (state.announcements && state.announcements.length) {
@@ -223,6 +240,10 @@ export function startSyncPoll(): void {
   stopped = false
   active.value = true
   intervalMs = POLL_INTERVAL_MS
+  // F0/F1：进入追平状态——首轮轮询及后续逐批追平期间，加载/同步路径的自动写回
+  //（今日顺序对账、归档、物化、自愈、合并写回）一律推迟，追平完成由 finalizeSyncCatchUp 收敛
+  catchUpStartedAt = Date.now()
+  useTasksStore().setSyncCatchingUp()
   void (async () => {
     const ok = await pollOnce()
     intervalMs = ok ? POLL_INTERVAL_MS : Math.min(intervalMs * 2, MAX_BACKOFF_MS)

@@ -728,6 +728,37 @@ if (typeof window !== 'undefined') {
   }, 60_000)
 }
 
+/**
+ * F3 写前队列：最近一次「已排期但可能未落盘」的脏项目集合，持久化在 IDB kv。
+ * 页面隐藏/关闭/被杀时未完成的防抖保存，由下次启动 finalizeSyncCatchUp 重放
+ * （force 重跑 syncProject，合并语义保证不会用空/陈旧数据覆盖远端）。
+ */
+const DIRTY_KEY_PREFIX = 'dirty:'
+
+function dirtyPidsKey(username: string): string {
+  return `${DIRTY_KEY_PREFIX}${username}`
+}
+
+/** 内存缓存（会话内同一用户只读一次 IDB；mark/clear 的读写都基于该缓存）。
+ *  按用户名缓存，避免登出切换账号时串号。 */
+const dirtyPidsCache: Map<string, Set<string>> = new Map()
+
+async function loadDirtyPids(username: string): Promise<string[]> {
+  if (!username || typeof window === 'undefined') return []
+  const cached = dirtyPidsCache.get(username)
+  if (cached) return [...cached]
+  const pids = (await idbGet<string[]>('kv', dirtyPidsKey(username))) ?? []
+  dirtyPidsCache.set(username, new Set(pids))
+  return [...dirtyPidsCache.get(username)!]
+}
+
+async function saveDirtyPids(username: string, pids: string[]): Promise<void> {
+  dirtyPidsCache.set(username, new Set(pids))
+  if (!username || typeof window === 'undefined') return
+  if (pids.length) await idbPut('kv', dirtyPidsKey(username), pids)
+  else await idbDel('kv', dirtyPidsKey(username))
+}
+
 /** 「设为子任务」撤销快照：记录转换前的归属/顺序/状态，供 undoSubtaskConversion 还原 */
 interface SubtaskConversionSnapshot {
   sourceId: string
@@ -767,6 +798,14 @@ export const useTasksStore = defineStore('tasks', {
     repeatsLoaded: [] as string[],
     /** 今日任务跨项目拖拽顺序表（任务 id 全局有序；展示时按「今日可见 + 仍存在」过滤） */
     todayOrder: [] as string[],
+    /** 同步追平门闩（F0/F1）：置位期间禁止加载/同步期自动写回 OSS——今日顺序对账
+     *  （reconcile/reposition）、自动归档、到期物化、自愈清理的落盘一律推迟；用户动作写
+     *  （编辑/拖拽/完成/删除）不受影响。追平后由 finalizeSyncCatchUp 统一执行最终对账
+     *  并冲刷被延迟的写回。 */
+    syncCatchingUp: false,
+    /** 追平门闩期间被延迟落盘的项目（自动写回：墓碑/回收站/任务/模板），追平后按
+     *  「墓碑→回收站→任务→模板」顺序收敛（见 finalizeSyncCatchUp） */
+    deferredWritebackProjects: [] as string[],
   }),
   getters: {
     /** 全部已加载任务（跨项目），按 id 去重：跨项目移动后同 id 的过期副本只保留 updatedAt 最新一份，
@@ -855,7 +894,12 @@ export const useTasksStore = defineStore('tasks', {
         if (deleted.length) {
           this.trash[projectId] = mergeUnique(this.trash[projectId] ?? [], deleted)
           await idbPut('trash', trashCacheKey(auth.username, projectId), this.trash[projectId])
-          void this._persistTrash(projectId, true)
+          if (this.syncCatchingUp) {
+            // F1：追平门闩——加载路径的回收站写回延迟到追平后统一收敛
+            this.deferWriteback(projectId)
+          } else {
+            void this._persistTrash(projectId, true)
+          }
         }
         // 墓碑日志：顺带读本地缓存（不标记已加载，远端由 syncProject/轮询刷新）
         const cachedTombstones = await idbGet<TombstoneEntry[]>('kv', tombstonesCacheKey(auth.username, projectId))
@@ -899,7 +943,12 @@ export const useTasksStore = defineStore('tasks', {
           if (deleted.length) {
             this.trash[projectId] = mergeUnique(this.trash[projectId] ?? [], deleted)
             await idbPut('trash', trashCacheKey(auth.username, projectId), this.trash[projectId])
-            void this._persistTrash(projectId, true)
+            if (this.syncCatchingUp) {
+              // F1：追平门闩——加载路径的回收站写回延迟到追平后统一收敛
+              this.deferWriteback(projectId)
+            } else {
+              void this._persistTrash(projectId, true)
+            }
           }
           const newEtag = versionToken(res.res.headers as Record<string, unknown>, res.content) ?? ''
           if (newEtag) await idbPut('kv', etagKey, newEtag)
@@ -1640,8 +1689,10 @@ export const useTasksStore = defineStore('tasks', {
     },
     /** 拉取单个项目：从 OSS 重拉任务并与本地按 updatedAt 合并（含回收站/墓碑），
      *  有本地改动（含尚未落盘的防抖修改）时写回合并结果，CAS 兜底冲突。
-     *  供轮询增量同步与 syncAll 复用；远端文件不存在时静默保留本地数据。 */
-    async syncProject(projectId: string) {
+     *  供轮询增量同步与 syncAll 复用；远端文件不存在时静默保留本地数据。
+     *  force=true：跳过 If-Modified-Since 条件 GET（强制 200 重拉），用于追平后的
+     *  「被门闩延迟的写回重跑 / 上次会话未落盘保存的重放」。 */
+    async syncProject(projectId: string, force = false) {
       if (projectId === UNCATEGORIZED) return
       this.touchProject(projectId)
       const auth = useAuthStore()
@@ -1654,7 +1705,7 @@ export const useTasksStore = defineStore('tasks', {
       const lm = await idbGet<string>('kv', lmKey)
       const res = await client.get(
         key,
-        lm ? { headers: { 'If-Modified-Since': lm } } : undefined,
+        !force && lm ? { headers: { 'If-Modified-Since': lm } } : undefined,
       )
       if (res.res.status === 304) return // 远端未变化（Last-Modified 命中），无需下载/合并
       const remote = JSON.parse(res.content.toString()) as Task[]
@@ -1732,10 +1783,16 @@ export const useTasksStore = defineStore('tasks', {
       })
       if (
         localAddsOrReplaces &&
-        canonicalJson(merged) !== canonicalJson(sortActiveList([...rawRemoteActive])) &&
-        allowWriteBack(projectId)
+        canonicalJson(merged) !== canonicalJson(sortActiveList([...rawRemoteActive]))
       ) {
-        await this.saveProject(projectId, [...merged])
+        if (this.syncCatchingUp) {
+          // F1：追平门闩——合并写回延迟到追平后 force 重跑（追平期间本地数据可能陈旧，
+          // 写回会让陈旧本地内容在合并裁决中抢占先机、覆盖他端更新；追平后数据可信，
+          // 再由 finalizeSyncCatchUp 按原条件重跑写回）。不消耗 allowWriteBack 限流窗口。
+          this.deferWriteback(projectId)
+        } else if (allowWriteBack(projectId)) {
+          await this.saveProject(projectId, [...merged])
+        }
       }
     },
     /** 手动/下拉刷新全量同步：逐项目调用 syncProject，返回失败的项目数。 */
@@ -1763,6 +1820,11 @@ export const useTasksStore = defineStore('tasks', {
       return failed
     },
     async sweepCompleted(projectId?: string) {
+      // F1：追平门闩——加载/同步期间本地 updatedAt 可能陈旧（他端已完成/已恢复任务的旧状态），
+      // 此时归档会把「他端已恢复/编辑过」的任务误移入回收站并写墓碑（跨端消失）。追平后由
+      // finalizeSyncCatchUp 在数据可信时统一执行。离线会话（永不追平）则暂停归档：
+      // 已完成任务仍显示在列表中（状态 completed），联网追平后自动归档。
+      if (this.syncCatchingUp) return
       const auth = useAuthStore()
       const today = todayKey()
       const pids = projectId ? [projectId] : Object.keys(this.tasks)
@@ -1825,6 +1887,8 @@ export const useTasksStore = defineStore('tasks', {
           await idbPut('tasks', taskCacheKey(auth.username, projectId), list)
             queueSyncChange(auth.username, 'tasks', projectId)
           if (attempt > 0 && mergedNewData) useUiStore().toast('检测到其他设备同时修改，已自动合并最新数据', 'ok')
+          // F3 写前队列：任务已成功落盘 → 清除脏标记
+          this.clearDirtyPid(projectId)
           return true
         }
         // 冲突：把远端与本地按 updatedAt 合并后再重试，不丢失任一端修改
@@ -1970,6 +2034,8 @@ export const useTasksStore = defineStore('tasks', {
         }
         await idbPut('trash', trashCacheKey(auth.username, projectId), r.merged)
         queueSyncChange(auth.username, 'trash', projectId)
+        // F3 写前队列：回收站已成功落盘 → 清除脏标记
+        this.clearDirtyPid(projectId)
         return true
       }
       // 真实项目：按月分片写入，只碰「内存中已有任务的月份 + 已加载窗口」，
@@ -2024,6 +2090,8 @@ export const useTasksStore = defineStore('tasks', {
       // 更新合并 IDB 缓存（UI / 下次 loadTrash 直接读取）
       await idbPut('trash', trashCacheKey(auth.username, projectId), this.trash[projectId] ?? list)
       queueSyncChange(auth.username, 'trash', projectId)
+      // F3 写前队列：回收站已成功落盘 → 清除脏标记
+      this.clearDirtyPid(projectId)
       return true
       } catch (e) {
         console.error('保存时间胶囊到 OSS 失败', e)
@@ -2039,6 +2107,8 @@ export const useTasksStore = defineStore('tasks', {
       void idbPut('tasks', taskCacheKey(auth.username, projectId), this.tasks[projectId] ?? [])
       ensureDebouncer(this, projectId)()
       this._syncReminders()
+      // F3 写前队列：标记「有排期未落盘的变更」，页面被杀时由下次启动重放
+      this.markDirtyPid(projectId)
     },
     /** 回收站变更持久化（immediate=true 时跳过防抖立即保存） */
     _persistTrash(projectId: string, immediate = false) {
@@ -2050,6 +2120,8 @@ export const useTasksStore = defineStore('tasks', {
       } else {
         fn()
       }
+      // F3 写前队列
+      this.markDirtyPid(projectId)
     },
     /* ---- 时间胶囊墓碑日志：写入 / 移除 / 落盘 / 读取 ---- */
     /** 把离开活跃列表的任务 upsert 进墓碑日志（按 id 保留 updatedAt 最新，写时按窗口裁剪）。
@@ -2067,6 +2139,8 @@ export const useTasksStore = defineStore('tasks', {
       ensureTombstoneDebouncer(this, projectId)()
       const auth = useAuthStore()
       if (auth.username) await idbPut('kv', tombstonesCacheKey(auth.username, projectId), next)
+      // F3 写前队列
+      this.markDirtyPid(projectId)
     },
     /** 从墓碑日志移除指定 id（恢复任务/项目、导入覆盖时调用），整文件替换语义保证删除传播到其他设备 */
     async removeTombstones(projectId: string, ids: string[]) {
@@ -2077,6 +2151,8 @@ export const useTasksStore = defineStore('tasks', {
       ensureTombstoneDebouncer(this, projectId)()
       const auth = useAuthStore()
       if (auth.username) await idbPut('kv', tombstonesCacheKey(auth.username, projectId), next)
+      // F3 写前队列
+      this.markDirtyPid(projectId)
     },
     /** 墓碑日志立即落盘（取消防抖，供确认式操作 / 逐出前冲刷使用）；失败不弹错误，返回 false。
      *  失败时自动重新排定防抖重试（防抖重试与确认式保存互补，保证墓碑最终落盘）。 */
@@ -2110,6 +2186,8 @@ export const useTasksStore = defineStore('tasks', {
             // 本地写入成功后清掉 Last-Modified，避免下一轮读路径用旧时间条件 GET 误判 304
             await idbDel('kv', lmKeyOf(etagKey))
             await idbPut('kv', tombstonesCacheKey(auth.username, projectId), entries)
+            // F3 写前队列：墓碑已成功落盘 → 清除脏标记
+            this.clearDirtyPid(projectId)
             return true
           }
           if (result.remote) {
@@ -2393,6 +2471,8 @@ export const useTasksStore = defineStore('tasks', {
             await idbDel('kv', lmKeyOf(etagKey))
             await idbPut('repeats', repeatsCacheKey(auth.username, projectId), list)
             queueSyncChange(auth.username, 'repeats', projectId)
+            // F3 写前队列：重复模板已成功落盘 → 清除脏标记
+            this.clearDirtyPid(projectId)
             return true
           }
           // 冲突：墓碑感知 + last-writer-wins 合并（R4 修复，替代按 id 简单并集）——
@@ -2403,6 +2483,8 @@ export const useTasksStore = defineStore('tasks', {
             await idbDel('repeats', repeatsCacheKey(auth.username, projectId))
             await idbDel('kv', etagKey)
             await idbDel('kv', lmKeyOf(etagKey))
+            // F3 写前队列：本地缓存已作废，脏标记一并清除
+            this.clearDirtyPid(projectId)
             return true
           }
           if (result.remote) {
@@ -2436,6 +2518,8 @@ export const useTasksStore = defineStore('tasks', {
       void idbPut('repeats', repeatsCacheKey(auth.username, projectId), this.repeats[projectId] ?? [])
       void this.saveRepeatsNow(projectId)
       this._syncReminders()
+      // F3 写前队列
+      this.markDirtyPid(projectId)
     },
     /**
      * 重复任务物化：到期的重复模板生成可见任务（新 id、pending，时间按周期顺延）；
@@ -2539,7 +2623,13 @@ export const useTasksStore = defineStore('tasks', {
           }
           if (changed) {
             this.repeats[pid] = remaining
-            this._persistRepeats(pid)
+            if (this.syncCatchingUp) {
+              // F1：追平门闩——模板落盘延迟到追平后（IDB 显式写入，保证缓存与内存一致）
+              await idbPut('repeats', repeatsCacheKey(auth.username, pid), this.repeats[pid])
+              this.deferWriteback(pid)
+            } else {
+              this._persistRepeats(pid)
+            }
           }
           if (toAdd.length) {
             const list = this.tasks[pid] ?? []
@@ -2555,7 +2645,13 @@ export const useTasksStore = defineStore('tasks', {
             // 也收敛为一条，不再写回两条
             const cleaned = await this._selfHealRepeatDuplicates(pid, next)
             this.tasks[pid] = sortActiveList(cleaned)
-            this._persist(pid)
+            if (this.syncCatchingUp) {
+              // F1：追平门闩——任务落盘延迟到追平后（IDB 显式写入）
+              await idbPut('tasks', taskCacheKey(auth.username, pid), this.tasks[pid])
+              this.deferWriteback(pid)
+            } else {
+              this._persist(pid)
+            }
           }
         } catch (e) {
           // 单个项目对账/物化失败（离线等）不影响其它项目：本轮跳过，等待下次同步成功后再触发。
@@ -2577,9 +2673,16 @@ export const useTasksStore = defineStore('tasks', {
       if (tombstoned.length) {
         this.trash[projectId] = mergeUnique(this.trash[projectId] ?? [], tombstoned)
         await idbPut('trash', trashCacheKey(auth.username, projectId), this.trash[projectId])
-        // 自愈去重入回收站的任务同样写墓碑：防止陈旧设备把重复行并回活跃列表复活
-        await this.upsertTombstones(projectId, tombstoned)
-        void this._persistTrash(projectId, true)
+        if (this.syncCatchingUp) {
+          // F1：追平门闩——自愈写回延迟到追平后统一收敛（内存 + IDB 已更新，展示不受影响；
+          // 墓碑仅入本地，防复活依据仍在，追平后由 finalizeSyncCatchUp 落盘）
+          await this.upsertTombstonesLocalOnly(projectId, tombstoned)
+          this.deferWriteback(projectId)
+        } else {
+          // 自愈去重入回收站的任务同样写墓碑：防止陈旧设备把重复行并回活跃列表复活
+          await this.upsertTombstones(projectId, tombstoned)
+          void this._persistTrash(projectId, true)
+        }
         logAudit('重复任务去重', safeDetail(`项目ID：${projectId}，移除重复 ${tombstoned.length} 条`))
       }
       if (masters.length) {
@@ -2588,7 +2691,12 @@ export const useTasksStore = defineStore('tasks', {
         if (newMasters.length) {
           this.repeats[projectId] = [...existing, ...newMasters]
           await idbPut('repeats', repeatsCacheKey(auth.username, projectId), this.repeats[projectId])
-          void this.saveRepeatsNow(projectId)
+          if (this.syncCatchingUp) {
+            // F1：追平门闩——模板落盘延迟到追平后统一收敛
+            this.deferWriteback(projectId)
+          } else {
+            void this.saveRepeatsNow(projectId)
+          }
           logAudit('重复任务去重', safeDetail(`项目ID：${projectId}，恢复重复模板 ${newMasters.length} 条`))
         }
       }
@@ -2630,11 +2738,20 @@ export const useTasksStore = defineStore('tasks', {
         return true
       })
       if (!orphans.length) return list
-      // 写墓碑（防对端按并集合并复活）→ 移除顶层残留
-      await this.upsertTombstones(
-        projectId,
-        orphans.map((t) => ({ id: t.id, updatedAt: t.updatedAt })),
-      )
+      if (this.syncCatchingUp) {
+        // F1：追平门闩——墓碑落盘延迟到追平后统一收敛（内存 + IDB 已更新，防复活依据仍在本地）
+        await this.upsertTombstonesLocalOnly(
+          projectId,
+          orphans.map((t) => ({ id: t.id, updatedAt: t.updatedAt })),
+        )
+        this.deferWriteback(projectId)
+      } else {
+        // 写墓碑（防对端按并集合并复活）→ 移除顶层残留
+        await this.upsertTombstones(
+          projectId,
+          orphans.map((t) => ({ id: t.id, updatedAt: t.updatedAt })),
+        )
+      }
       logAudit('清理孤儿副本', safeDetail(`项目ID：${projectId}，移除 ${orphans.length} 条（已转成其他任务的子任务）`))
       const drop = new Set(orphans.map((t) => t.id))
       return list.filter((t) => !drop.has(t.id))
@@ -2994,6 +3111,118 @@ export const useTasksStore = defineStore('tasks', {
     hasAny(): boolean {
       return Object.keys(this.tasks).length > 0
     },
+    /** 进入追平状态：启动同步/全量加载前调用（bootstrap、手动同步、轮询首轮）。幂等。 */
+    setSyncCatchingUp() {
+      this.syncCatchingUp = true
+    },
+    /** 追平门闩期间被延迟的自动写回落盘：记录项目（去重），由 finalizeSyncCatchUp 收敛 */
+    deferWriteback(projectId: string) {
+      if (!this.deferredWritebackProjects.includes(projectId)) {
+        this.deferredWritebackProjects.push(projectId)
+      }
+    },
+    /** 墓碑仅入内存 + IDB（不排期 OSS 写）：供追平门闩期间的自愈路径使用，追平后由
+     *  finalizeSyncCatchUp 统一 flush（防止陈旧数据在追平期间把墓碑写回覆盖远端证据）。 */
+    async upsertTombstonesLocalOnly(
+      projectId: string,
+      tasks: Array<Pick<Task, 'id' | 'updatedAt'>>,
+    ) {
+      const entries = tasks
+        .filter((t) => t && t.id && t.updatedAt)
+        .map((t) => ({ id: t.id, updatedAt: t.updatedAt }))
+      if (!entries.length) return
+      const next = pruneTombstones([...(this.tombstones[projectId] ?? []), ...entries])
+      this.tombstones[projectId] = next
+      const auth = useAuthStore()
+      if (auth.username) await idbPut('kv', tombstonesCacheKey(auth.username, projectId), next)
+    },
+    /** F3 写前队列：标记项目「有已排期、尚未落盘的变更」（_persist 等排期入口调用）。
+     *  去重后写 IDB；页面被杀时未完成的保存由下次启动 finalizeSyncCatchUp 重放。 */
+    markDirtyPid(projectId: string) {
+      const auth = useAuthStore()
+      if (!auth.username || typeof window === 'undefined') return
+      void loadDirtyPids(auth.username).then(async (pids) => {
+        if (pids.includes(projectId)) return
+        await saveDirtyPids(auth.username, [...pids, projectId])
+      })
+    },
+    /** F3 写前队列：项目成功落盘后清除脏标记（saveProject/saveTrash/saveRepeats/saveTombstones 成功时调用） */
+    clearDirtyPid(projectId: string) {
+      const auth = useAuthStore()
+      if (!auth.username || typeof window === 'undefined') return
+      void loadDirtyPids(auth.username).then(async (pids) => {
+        if (!pids.includes(projectId)) return
+        await saveDirtyPids(auth.username, pids.filter((p) => p !== projectId))
+      })
+    },
+    /**
+     * 追平完成后的统一收敛（F0/F1/F3）：由 useSyncPoll / useSync 在「无积压变更且本轮全部
+     * 拉取成功」时调用。此刻数据已与 OSS 对齐，才允许自动写回：
+     *  ① 自动归档昨日完成任务（此时本地 updatedAt 可信，不会误移他端已恢复的任务）；
+     *  ② 物化到期重复任务（数据可信后的落盘）；
+     *  ③ 今日顺序表最终对账（清理死 id + 追加末尾补登记 + 写回）；
+     *  ④ 冲刷追平门闩期间被延迟的自动写回（墓碑→回收站→任务→模板；syncProject 延迟写回
+     *     force 重跑）；
+     *  ⑤ F3：重放上次会话未落盘的排期保存（force 重跑 syncProject，合并语义保证不覆盖远端）。
+     * ①~③ 仅在「首次追平」时执行（幂等）；④⑤ 失败项保留，下轮无积压 poll 再次调用重试。
+     * 注意：单项持续失败**不**重新拉起门闩——否则单个坏项目会永久禁用今日对账/自动写回；
+     * 失败项只留在 deferredWritebackProjects 里由后续轮询反复冲刷，不影响其它功能。
+     */
+    async finalizeSyncCatchUp() {
+      // 追平未完成（数据不完整）且无待收敛项时不动作
+      if (!this.syncCatchingUp && !this.deferredWritebackProjects.length) return
+      const wasCatchingUp = this.syncCatchingUp
+      // 数据已追平：关闭门闩，本函数内所有自动写回才允许执行
+      this.syncCatchingUp = false
+      if (wasCatchingUp) {
+        try {
+          await this.sweepCompleted()
+        } catch (e) {
+          console.warn('追平归档失败（下轮重试）', e)
+        }
+        try {
+          await this.materializeRepeats()
+        } catch (e) {
+          console.warn('追平物化失败（下轮重试）', e)
+        }
+        try {
+          this.reconcileTodayOrder()
+        } catch (e) {
+          console.warn('追平今日顺序对账失败（下轮重试）', e)
+        }
+      }
+      // ④ 追平门闩期间被延迟的自动写回：写序「墓碑→回收站→任务→模板」
+      //（与单次操作写序一致，避免对端短暂复活）。仅对「内存已加载」的资源落盘：
+      // 未加载资源不写，防止空数组覆盖远端。
+      const failed: string[] = []
+      for (const pid of this.deferredWritebackProjects) {
+        try {
+          let ok = this.tombstones[pid] !== undefined ? await this.saveTombstonesNow(pid) : true
+          ok = (this.trash[pid] !== undefined ? await this.saveTrashNow(pid) : true) && ok
+          ok = (this.tasks[pid] !== undefined ? await this.saveProjectNow(pid) : true) && ok
+          ok = (this.repeats[pid] !== undefined ? await this.saveRepeatsNow(pid) : true) && ok
+          // syncProject 被门闩延迟的写回：force 重拉合并后按原条件写回
+          await this.syncProject(pid, true)
+          if (!ok) failed.push(pid)
+        } catch (e) {
+          console.warn('追平收敛写回失败（下轮重试）', pid, e)
+          failed.push(pid)
+        }
+      }
+      // ⑤ F3：重放上次会话未落盘的排期保存（force 重跑 syncProject：合并语义保证只把
+      //    本地更新的内容写回，不会用空/陈旧数据覆盖远端）
+      const dirtyPids = await loadDirtyPids(useAuthStore().username)
+      for (const pid of dirtyPids) {
+        try {
+          await this.syncProject(pid, true)
+          this.clearDirtyPid(pid)
+        } catch (e) {
+          console.warn('重放未落盘保存失败（下次启动重试）', pid, e)
+          failed.push(pid)
+        }
+      }
+      this.deferredWritebackProjects = failed
+    },
     upsert(task: Task) {
       normalizeTask(task)
       const target = task.projectId
@@ -3041,10 +3270,12 @@ export const useTasksStore = defineStore('tasks', {
         const pendingEnd = list.findIndex((t) => t.status !== 'pending')
         const bound = pendingEnd === -1 ? list.length : pendingEnd
         const at = timeInsertIndex(list, task, 0, bound)
+        // F2：与编辑归位同一套重编逻辑（baseline = 插入前快照）——只对「sort 值变化」的
+        // 任务写新值并 bump updatedAt（被新任务推后的任务位置确实变了，需让新排序跨端胜出）；
+        // 未受影响任务保持原 sort 值不动，不再整表重写（避免跨端 tie 裁决复活旧 sort）。
+        const insertBaseline = list.slice()
         list.splice(at, 0, task)
-        list.forEach((t, i) => {
-          t.sort = i
-        })
+        this._renumberOrder(target, list, insertBaseline)
         // 新建任务同样按时间在今日视图就位（与编辑归位同一套语义）：把新任务按时间链插入
         // todayOrder 正确位置（今日不可见——如未来日期——的任务不登记）。跨项目移入的任务若
         // 今日可见也一并按时间归位；已登记的只挪位置，未登记的连同当屏可见任务整体落表。
@@ -3075,8 +3306,11 @@ export const useTasksStore = defineStore('tasks', {
       for (let i = 0; i < ordered.length; i++) {
         const t = ordered[i]
         const oldIdx = prevIndex.get(t.id)
-        const moved = oldIdx === undefined || oldIdx !== i || t.sort !== i
-        t.sort = i
+        // F2：只对「sort 值确实变化」的任务写入新值——未移动任务保持原 sort 值，
+        // 避免编辑/拖拽时整表重写 sort 造成跨端 tie 裁决把旧 sort 复活（顺序错乱）。
+        // moved（新任务 / sort 值变化）的任务才 bump updatedAt，让新排序在跨端合并时胜出。
+        const moved = oldIdx === undefined || t.sort !== i
+        if (t.sort !== i) t.sort = i
         if (moved) t.updatedAt = now
       }
       this.tasks[projectId] = ordered
@@ -3317,6 +3551,10 @@ export const useTasksStore = defineStore('tasks', {
      * 今日不可见的任务不处理。渲染顺序没有变化时不写盘，避免无意义的 CAS 写与跨端广播。
      */
     repositionTodayOrder(task: Task) {
+      // F0：追平门闩——加载/同步期间 this.all 可能不完整，此时基于不完整列表的整屏落表 /
+      // 挪位会重排并写回 OSS（覆盖他端手动顺序）；一律推迟到追平后（由最终对账 + 后续
+      // 用户编辑的落点兜底）。
+      if (this.syncCatchingUp) return
       const today = todayKey()
       if (!isTaskVisibleToday(task, today)) return
       const byId = new Map(this.all.map((t) => [t.id, t]))
@@ -3360,40 +3598,46 @@ export const useTasksStore = defineStore('tasks', {
      * 统一对账：让今日顺序表收敛为「当前今日可见的待办任务」（按时间就位，手动顺序保留）。
      * 触发点：今日视图加载 / 跨天定时器 / 物化 / 批量导入 / 完成·删除·恢复之后。
      *  - 清理：剔除已删除、已完成、今日不可见、或已不存在（死 id，删除后残留）的任务 id，
-     *    防止顺序表随物化/导入/删除无限膨胀；
-     *  - 补登记：今日可见但未登记的待办任务，按「第一更晚即停」插入（与 timeInsertIndex 同语义，
-     *    不受其它任务手动拖拽位置影响）——覆盖物化任务、批量导入、未来日期任务首次可见、
-     *    跨设备同步来的新任务；
+     *    防止顺序表随物化/导入/删除无限膨胀；「不在内存」的 id 仅在「所有项目都已加载」时
+     *    才判定为死 id，未全量加载时保守保留（F0.2）；
+     *  - 补登记：今日可见但未登记的待办任务，按时间排序后**整体追加到末尾**（F0.4，
+     *    不再按时间插到已登记任务中间，避免新任务把整条顺序表顶开、影响他端手动顺序）——
+     *    覆盖物化任务、批量导入、未来日期任务首次可见、跨设备同步来的新任务；
      *  - 已登记的相对顺序保持不变（拖拽手动顺序优先）；
      *  - 顺序无变化时不写盘，避免无谓的 CAS 写与跨端广播。
+     * 追平门闩（syncCatchingUp）开启期间直接跳过，由 finalizeSyncCatchUp 在追平后统一执行。
      */
     reconcileTodayOrder() {
+      // F0：追平门闩——加载/同步期间 this.all / todayOrder 可能陈旧或不完整（缓存恢复落后
+      // 于 OSS、增量同步逐项目追平中）。此时执行 ① 清理会把「已登记但尚未加载进内存」的
+      // 任务误判为死 id 剔除，② 补登记又按时间重插并写回 OSS 覆盖他端手动顺序（实锤 bug：
+      // 大郎该吃药了 被时间重排并同步到全端）。追平后由 finalizeSyncCatchUp 统一执行最终对账。
+      if (this.syncCatchingUp) return
       const today = todayKey()
       const byId = new Map(this.all.map((t) => [t.id, t]))
+      // F0.2：仅当「所有项目都已加载」时才允许按“不在内存”判定死 id 剔除；未全量加载时
+      // （缓存设备只刷今日相关项目）「不在内存」可能是「项目尚未加载」而非真删除，保守保留，
+      // 由项目加载后/全量加载后的后续对账剔除，避免误删顺序表条目。
+      const projects = useProjectsStore()
+      // profile 尚未加载（长度 0）时不可判定「全部已加载」，一律保守保留
+      const fullyLoaded =
+        projects.projects.length > 0 &&
+        projects.projects.every((p) => this.loadedProjects.includes(p.id))
       // ① 清理：仅保留「存在、未删除、未完成、今日可见」的任务 id
       const ids = this.todayOrder.filter((id) => {
         const t = byId.get(id)
-        if (!t) return false
+        if (!t) return !fullyLoaded
         if (t.status === 'deleted' || t.status === 'completed') return false
         return isTaskVisibleToday(t, today)
       })
-      // ② 补登记：今日可见待办中未登记的按「第一更晚即停」插入（组内先按时间排，保证插入稳定）
+      // ② 补登记（F0.4）：今日可见待办中未登记的按时间排序后**整体追加到末尾**——不再按
+      // 时间插到已登记任务中间（那会让新任务把整条顺序表顶开、影响他端已拖拽的手动顺序）。
+      // 已登记任务相对顺序（手动拖拽优先）保持不动。
       const orderSet = new Set(ids)
       const toInsert = this.all
         .filter((t) => t.status === 'pending' && isTaskVisibleToday(t, today) && !orderSet.has(t.id))
         .sort(compareTasksByTime)
-      for (const task of toInsert) {
-        let at = ids.length
-        for (let i = 0; i < ids.length; i++) {
-          const other = byId.get(ids[i])
-          if (!other || !isTaskVisibleToday(other, today)) continue
-          if (compareTasksByTime(other, task) > 0) {
-            at = i
-            break
-          }
-        }
-        ids.splice(at, 0, task.id)
-      }
+      for (const task of toInsert) ids.push(task.id)
       if (ids.join('|') === this.todayOrder.join('|')) return
       this.setTodayOrder(ids, { audit: false })
     },
