@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { useNow } from '@/composables/useNow'
 import { dateKeyOf, formatTodayTitle, todayKey } from '@/utils/time'
-import { formatRepeat, isNewStyleRepeat } from '@/utils/repeat'
+import { formatRepeat, isNewStyleRepeat, displayReminderTimeForRepeat } from '@/utils/repeat'
 import type { Project, Subtask, Task } from '@/types'
 import { VueDraggable } from 'vue-draggable-plus'
 import { getDragOptions, setDragging, startPointerTrack, stopPointerTrack, trackDropPointer, lastDropPointer } from '@/utils/drag'
@@ -111,6 +111,12 @@ const subProgress = computed(() => {
 /** 提醒时间显示：当天只显示「时:分」，非当天显示「月-日 时:分」 */
 function timeStr(t: string) {
   return dateKeyOf(t) === todayKey() ? formatTodayTitle(t).slice(6) : formatTodayTitle(t)
+}
+
+/** 重复任务提醒时间显示值：未完成且带重复规则时，日期推进到“今天或之前最近的一个重复日”，
+ *  时分不变（BUG-37，显示层计算，不改任务数据）；其余场景原样显示。 */
+function reminderDisplay(t: string | null): string {
+  return displayReminderTimeForRepeat(t, props.task.repeat, props.task.status) ?? ''
 }
 
 function dateStr(t: string) {
@@ -247,7 +253,7 @@ function onSubDragEnd() {
       <!-- 最右侧竖列（高度由内容决定、项间无空隙紧凑排列）：提醒贴顶；右侧列为最高内容时末行自然贴底；开始/截止精确到时分；重复只显示图标 -->
       <div v-if="rightMetaVisible" class="shrink-0 self-stretch flex flex-col items-end min-w-0 text-[11px] text-slate-400">
         <span v-if="task.reminderTime" class="inline-flex items-center gap-1" title="提醒时间">
-          <AppIcon name="bell" :size="12" />{{ timeStr(task.reminderTime) }}
+          <AppIcon name="bell" :size="12" />{{ timeStr(reminderDisplay(task.reminderTime)) }}
         </span>
         <span v-if="task.startTime" class="inline-flex items-center gap-1" title="开始时间">
           <AppIcon name="calendar" :size="12" />{{ timeStr(task.startTime) }}
@@ -357,7 +363,7 @@ function onSubDragEnd() {
             <span v-if="s.startTime" class="inline-flex items-center gap-1"><AppIcon name="calendar" :size="11" />{{ dateStr(s.startTime) }}</span>
             <span v-if="s.endTime" class="inline-flex items-center gap-1"><AppIcon name="clock" :size="11" />{{ dateStr(s.endTime) }}</span>
             <span v-if="s.reminderTime" :class="subOverdue(s) ? 'text-red-500' : ''" class="inline-flex items-center gap-1">
-              <AppIcon name="bell" :size="11" />{{ timeStr(s.reminderTime) }}
+              <AppIcon name="bell" :size="11" />{{ timeStr(reminderDisplay(s.reminderTime)) }}
             </span>
           </div>
         </div>

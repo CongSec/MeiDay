@@ -1,5 +1,5 @@
 import type { RepeatRule, Task } from '@/types'
-import { addDays, addDaysKey, dateKeyOf, diffDaysKey, nowIso } from './time'
+import { addDays, addDaysKey, dateKeyOf, diffDaysKey, nowIso, todayKey } from './time'
 import { isLegalWorkday, nextLegalWorkday } from './legalWorkday'
 
 const WEEKDAY_NAMES = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
@@ -478,4 +478,35 @@ export function buildOccurrenceTemplate(
     repeatOccurrence: undefined,
   }
   return { template, dueDate: date }
+}
+
+/**
+ * BUG-37 显示层工具：重复任务提醒时间的「显示值」——日期推进到“今天或之前最近的一个重复日”，
+ * 时分保持不变。仅对未完成且带重复规则的任务生效；未来日期 / 无规则 / 原日期非重复日 / 已完成
+ * 任务一律返回原值（任务数据本身不动，实际提醒仍由后端按周期推进保证）。
+ *
+ * 例（每周一、周三提醒 09:00）：周一提醒后未完成，周二（非重复日）显示仍为周一；
+ * 周三（下一个重复日到来）显示推进到周三 09:00。每天重复时自动跟到当天。
+ */
+export function displayReminderTimeForRepeat(
+  reminderTime: string | null,
+  repeat: RepeatRule | null | undefined,
+  status: string,
+): string | null {
+  if (!reminderTime || !repeat || status !== 'pending') return reminderTime
+  const rtDate = dateKeyOf(reminderTime)
+  const today = todayKey()
+  if (rtDate > today) return reminderTime // 未来提醒不推进
+  const start = repeat.start ?? rtDate
+  if (!isRepeatDay(repeat, start, rtDate)) return reminderTime // 原日期非重复日（异常数据）不推进
+  // 从原日期推进，取 <= 今天的最后一个重复日（保时分；预算与 nextRepeatDate 一致）
+  let anchor = rtDate
+  let last = rtDate
+  for (let i = 0; i < 20000; i++) {
+    const nxt = nextRepeatDate(repeat, anchor)
+    if (!nxt || nxt > today) break
+    last = nxt
+    anchor = nxt
+  }
+  return last === rtDate ? reminderTime : `${last}${reminderTime.slice(10)}`
 }
