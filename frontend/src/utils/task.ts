@@ -107,11 +107,90 @@ export function timeInsertIndex<T extends Task | Subtask>(
   return at
 }
 
+/** 求 pending 段内的落点下标（新建任务、编辑改时间/改重复属性后的归位共用）。
+ *  list[0, bound) 必须都是 pending 任务（已完成等其余任务在 bound 之后）。
+ *  - 普通任务：自上而下扫普通任务，落在「最后一条时间不晚于它的普通任务」之后；
+ *    一条普通任务都没有则落在段首。**重复任务的位置完全不参与**——重复任务哪怕时间更早，
+ *    也不影响普通任务的落点。
+ *  - 重复任务（保底）：活动范围限定在「最后一条普通任务之后 → 段末」；范围内自上而下扫
+ *    重复任务，落在「最后一条时间不晚于它的重复任务」之后；范围内没有更早的重复任务时，
+ *    落在范围开头（即所有普通任务之后）。因此新建的重复任务永远排在普通任务之后。
+ *  全程忽略手动键（sort / todayOrder 下标），与 timeInsertIndex 同一套时间链（提醒 > 开始 > 创建）。 */
+export function repeatAwareInsertIndex<T extends Task | Subtask>(
+  list: T[],
+  task: T,
+  bound: number = list.length,
+): number {
+  const end = Math.max(0, Math.min(bound, list.length))
+  // 最后一条普通任务的下标：重复任务的保底边界（一条普通任务都没有时为 -1）
+  let lastNormal = -1
+  for (let i = 0; i < end; i++) {
+    if (!isRepeatTask(list[i])) lastNormal = i
+  }
+  if (isRepeatTask(task)) {
+    // 保底区：所有普通任务之后；区内按时间落到「最后一条不晚于它的重复任务」之后
+    const floor = lastNormal + 1
+    let at = floor
+    for (let i = floor; i < end; i++) {
+      if (!isRepeatTask(list[i])) continue
+      if (compareTasksByTime(list[i], task) <= 0) at = i + 1
+    }
+    return at
+  }
+  // 普通任务：只跟普通任务比时间，落在最后一条「不晚于它」的普通任务之后
+  let at = 0
+  for (let i = 0; i < end; i++) {
+    if (isRepeatTask(list[i])) continue
+    if (compareTasksByTime(list[i], task) <= 0) at = i + 1
+  }
+  return at
+}
+
+/** 同 repeatAwareInsertIndex，但作用于「id 顺序表」（今日视图跨项目全局顺序表 todayOrder 用）。
+ *  lookup 返回 id 对应的任务；查不到的 id（项目尚未加载的残留、历史死 id）按普通任务占位，
+ *  但不参与时间比较（不改变落点）。规则与项目页完全一致：
+ *  - 普通任务：落在最后一条「时间不晚于它」的普通任务之后；
+ *  - 重复任务：保底在所有普通任务之后，区内落在最后一条「时间不晚于它」的重复任务之后。 */
+export function repeatAwareInsertIndexForIds(
+  ids: string[],
+  task: Task,
+  lookup: (id: string) => Task | undefined,
+  bound: number = ids.length,
+): number {
+  const end = Math.max(0, Math.min(bound, ids.length))
+  const isRepeatId = (id: string): boolean => {
+    const t = lookup(id)
+    return !!t && isRepeatTask(t)
+  }
+  let lastNormal = -1
+  for (let i = 0; i < end; i++) {
+    if (!isRepeatId(ids[i])) lastNormal = i
+  }
+  if (isRepeatTask(task)) {
+    const floor = lastNormal + 1
+    let at = floor
+    for (let i = floor; i < end; i++) {
+      if (!isRepeatId(ids[i])) continue
+      const other = lookup(ids[i])
+      if (other && compareTasksByTime(other, task) <= 0) at = i + 1
+    }
+    return at
+  }
+  let at = 0
+  for (let i = 0; i < end; i++) {
+    if (isRepeatId(ids[i])) continue
+    const other = lookup(ids[i])
+    if (other && compareTasksByTime(other, task) <= 0) at = i + 1
+  }
+  return at
+}
+
 /** 统一排序链（带手动键）：手动排序 > 提醒时间 > 开始时间 > 创建时间。
  *  manualA / manualB 为手动顺序值（今日视图为 todayOrder 下标、项目/子任务为 sort）。
  *  注意：只有双方都有手动键时才比较该键；缺失的一侧按 Number.MAX_SAFE_INTEGER 处理，
  *  即“没拖过（无 sort）”的任务会排在所有已拖过的任务之后——并非“跳过该键直接比时间”。
- *  需要忽略手动键的场景（新建落点 / 编辑时间归位）请直接用 compareTasksByTime 或 timeInsertIndex。 */
+ *  需要忽略手动键的场景（新建落点 / 编辑时间归位）请直接用 compareTasksByTime /
+ *  repeatAwareInsertIndex（带普通/重复分区的那套落点）。 */
 export function compareTaskChain(
   a: Task | Subtask,
   b: Task | Subtask,

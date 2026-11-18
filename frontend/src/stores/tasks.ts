@@ -17,7 +17,7 @@ import { buildOccurrenceTemplate, buildReminderPayload, buildRepeatOccurrence, h
 import { api } from '@/api/client'
 import { logAudit, logAttachmentDeletion, safeDetail } from '@/utils/audit'
 import { UNCATEGORIZED, type AttachmentMeta, type RepeatMaster, type Subtask, type Task, type TombstoneEntry } from '@/types'
-import { canonicalJson, compareAutoTasks, compareTasksByTime, isRepeatTask, newSubtask, normalizeTask, normalizeTasks, pendingSubtaskReminders, timeInsertIndex } from '@/utils/task'
+import { canonicalJson, compareAutoTasks, isRepeatTask, newSubtask, normalizeTask, normalizeTasks, pendingSubtaskReminders, repeatAwareInsertIndex, repeatAwareInsertIndexForIds, timeInsertIndex } from '@/utils/task'
 import { deleteAttachments, ossFileName } from '@/utils/attachments'
 const saveDebouncers = new Map<string, Debounced<[]>>()
 const trashDebouncers = new Map<string, Debounced<[]>>()
@@ -234,20 +234,6 @@ function sortActiveList(list: Task[]): Task[] {
   const rest = list.filter((t) => t.status !== 'pending').sort(cmp)
   return [...pending, ...rest]
 }
-/** 求 pending 段内「普通/重复」分区边界：返回普通任务区终点（= 第一个重复任务下标，
- *  无重复任务时为 pending 段终点）与重复任务区起点（同一值）。调用方保证 list 前
- *  bound 项为 pending（普通在前、重复在后），未排序的中间状态也能正确求界。 */
-function repeatSectionBounds(list: Task[], bound: number): { normalTo: number; repeatFrom: number } {
-  let repeatStart = bound
-  for (let i = 0; i < bound; i++) {
-    if (isRepeatTask(list[i])) {
-      repeatStart = i
-      break
-    }
-  }
-  return { normalTo: repeatStart, repeatFrom: repeatStart }
-}
-
 /** 排序时间键（用于“本次编辑是否改了时间”的判定）：截到分钟再比。
  *  表单往返是 toLocalInput(slice(0,16)) → fromLocalInput，秒与时区后缀会被抹掉，
  *  直接比原始字符串会把「只改了描述」误判成「改了时间」，从而把任务弹离手动位置。
@@ -2657,8 +2643,11 @@ export const useTasksStore = defineStore('tasks', {
             const next = [...list]
             for (const task of toAdd) {
               if (next.some((t) => t.id === task.id)) continue
+              // 物化出的重复任务沿用模板自带的 sort（来自其源重复任务，通常已在重复区），
+              // 再交给 sortActiveList 统一就位：不重编 sort 也不会打乱用户手动位置，
+              // 同时保留「updatedAt 继承模板」的跨端语义（改 updatedAt 会让陈旧物化覆盖他端编辑）。
               next.push(task)
-              // 物化出的重复任务（当日可见的待办）由 reconcileTodayOrder 统一按时间登记进 todayOrder；
+              // 物化出的重复任务（当日可见的待办）由 reconcileTodayOrder 统一登记进 todayOrder；
               // 完成/删除时对账会把它从顺序表移除，不会无限累积。
               logAudit('生成重复任务', safeDetail(`任务ID：${task.id}，项目ID：${pid}，周期：${task.repeat?.type ?? ''}`))
             }
@@ -3273,36 +3262,30 @@ export const useTasksStore = defineStore('tasks', {
         if (timeChanged || repeatChanged) {
           // 与新建任务同一套语义：按统一时间链（提醒 > 开始 > 创建）重找落点，忽略已有手动 sort。
           // 先按状态判定所属区段（pending 区在前、其余在后，与 sortActiveList 一致），
-          // pending 段内再按「普通/重复」分区落点（普通任务插在普通区、重复任务插在重复区，
-          // 重复任务即使带早提醒也绝不插到普通任务前面）；最后整体重编 sort 序号。
+          // pending 段内走 repeatAwareInsertIndex（普通任务只跟普通任务比、重复任务保底在
+          // 普通任务之后），重复任务即使带早提醒也绝不插到普通任务前面；最后整体重编 sort 序号。
           const baseline = list.slice()
           list.splice(idx, 1)
           const pendingEnd = list.findIndex((t) => t.status !== 'pending')
           const bound = pendingEnd === -1 ? list.length : pendingEnd
-          const { normalTo, repeatFrom } = repeatSectionBounds(list, bound)
           const at =
             before.status === 'pending'
-              ? isRepeatTask(before)
-                ? timeInsertIndex(list, before, repeatFrom, bound)
-                : timeInsertIndex(list, before, 0, normalTo)
+              ? repeatAwareInsertIndex(list, before, bound)
               : timeInsertIndex(list, before, bound, list.length)
           list.splice(at, 0, before)
           this._renumberOrder(target, list, baseline)
-          // 今日页/桌面小组件走另一套手动键（todayOrder 下标），同步按时间归位
+          // 今日页/桌面小组件走另一套手动键（todayOrder 下标），同步按同一套落点归位
           this.repositionTodayOrder(before)
         }
       } else {
-        // 新建/跨项目移入：不继承旧项目的 sort；按统一时间链（提醒 > 开始 > 创建）把新任务
-        // 插到第一个「时间比它更晚」的任务之前（整段无更晚任务则插到段尾）——落点只看时间，
-        // 不受其它任务手动拖拽位置影响；其它任务相对顺序保持不变。再整体重排 sort 序号，
-        // 使新顺序在加载/同步合并后依然保持。重复任务按「普通在前、重复在后」分区落点：
-        // 插到重复区（普通任务全部之后），即使带早提醒也不插到普通任务前面。
+        // 新建/跨项目移入：不继承旧项目的 sort；落点与编辑归位共用 repeatAwareInsertIndex：
+        //  - 普通任务：只看普通任务的时间，落在「最后一条时间不晚于它的普通任务」之后
+        //    （重复任务的位置完全不参与——重复任务哪怕时间更早也不影响普通任务的落点）；
+        //  - 重复任务（保底）：永远落在所有普通任务之后，再在重复任务之间按时间落点。
+        // 其它任务相对顺序保持不变；之后再整体重排 sort 序号，使新顺序在加载/同步合并后依然保持。
         const pendingEnd = list.findIndex((t) => t.status !== 'pending')
         const bound = pendingEnd === -1 ? list.length : pendingEnd
-        const { normalTo, repeatFrom } = repeatSectionBounds(list, bound)
-        const at = isRepeatTask(task)
-          ? timeInsertIndex(list, task, repeatFrom, bound)
-          : timeInsertIndex(list, task, 0, normalTo)
+        const at = repeatAwareInsertIndex(list, task, bound)
         // F2：与编辑归位同一套重编逻辑（baseline = 插入前快照）——只对「sort 值变化」的
         // 任务写新值并 bump updatedAt（被新任务推后的任务位置确实变了，需让新排序跨端胜出）；
         // 未受影响任务保持原 sort 值不动，不再整表重写（避免跨端 tie 裁决复活旧 sort）。
@@ -3521,8 +3504,8 @@ export const useTasksStore = defineStore('tasks', {
     /**
      * 子任务提升为主任务：把 parentTaskId 下 subId 子任务变成该项目顶层任务（松手即生效）。
      * 归属父任务所在项目（仅「项目」是继承关系）；自身属性（名称/描述/时间/提醒/附件）
-     * 原样保留；完成状态不保留（新任务 status='pending'）；追加到该项目任务列表末尾
-     * （sort=当前长度，放最后）。
+     * 原样保留；完成状态不保留（新任务 status='pending'）；落点与新建任务同一套规则
+     * （repeatAwareInsertIndex：按统一时间链就位，忽略手动 sort）。
      * viewProjectId（可选）：调用方（项目视图）传入当前所在项目，优先在该项目数组内定位
      * 父任务，避免 this.all 跨项目收敛命中错误项目的同名父任务（BUG：拖拽子任务后
      * 任务在视图里“消失”）。
@@ -3552,10 +3535,15 @@ export const useTasksStore = defineStore('tasks', {
       // 从父任务移除该子任务
       parent.subtasks = parent.subtasks.filter((s) => s.id !== subId)
       parent.updatedAt = now
-      // 追加到项目任务列表末尾
+      // 落点与「新建任务」同一套规则（repeatAwareInsertIndex）：提升出来的任务按
+      // 「普通任务只跟普通任务比时间、重复任务保底在普通任务之后」就位（它是普通任务）。
       const list = this.tasks[pid] ?? []
-      task.sort = list.length
-      this.tasks[pid] = [...list, task]
+      const pendingEnd = list.findIndex((t) => t.status !== 'pending')
+      const bound = pendingEnd === -1 ? list.length : pendingEnd
+      const at = repeatAwareInsertIndex(list, task, bound)
+      const baseline = list.slice()
+      list.splice(at, 0, task)
+      this._renumberOrder(pid, list, baseline)
       this._persist(pid)
       // 今日视图：新任务若今日可见则登记顺序（按时间链归位；不可见时自动跳过）
       this.repositionTodayOrder(task)
@@ -3592,12 +3580,6 @@ export const useTasksStore = defineStore('tasks', {
       if (!isTaskVisibleToday(task, today)) return
       const byId = new Map(this.all.map((t) => [t.id, t]))
       const orderMap = new Map(this.todayOrder.map((id, i) => [id, i]))
-      /** 锚点时间比较：仅今日可见的任务参与（跳过历史/不可见 id）；返回该任务相对 task 的排序结果 */
-      const anchorRank = (id: string): number | null => {
-        const other = byId.get(id)
-        if (!other || !isTaskVisibleToday(other, today)) return null
-        return compareTasksByTime(other, task)
-      }
       let ids: string[]
       let renderedBefore: string | null = null
       if (orderMap.has(task.id)) {
@@ -3614,29 +3596,15 @@ export const useTasksStore = defineStore('tasks', {
         renderedBefore = ids.join('|')
         ids = ids.filter((id) => id !== task.id)
       }
-      // 与项目页新建/编辑的落点语义一致：从段首起步，遇到第一个「时间比 task 更晚」的可见任务
-      // 即停，插在它前面；整段没有更晚任务时插到段尾（不受手动拖拽位置影响，与 timeInsertIndex 一致）。
-      // 额外分区：重复任务只在重复区（第一个重复任务下标起）内找落点，普通任务最多到重复区边界
-      // 为止——重复任务即使带早提醒也绝不插到普通任务前面（普通在前、重复在后）。
-      let repeatStart = ids.length
-      for (let i = 0; i < ids.length; i++) {
-        const other = byId.get(ids[i])
-        if (other && isRepeatTask(other)) {
-          repeatStart = i
-          break
-        }
+      // 与项目页新建/编辑完全同一套落点（repeatAwareInsertIndexForIds）：
+      //  - 普通任务：落在「最后一条时间不晚于它的普通任务」之后，重复任务的位置完全不参与；
+      //  - 重复任务（保底）：落在所有普通任务之后，再在重复任务之间按时间落点。
+      // 只跟「今日可见」的任务比时间（历史/不可见 id 不参与比较），与原有语义一致。
+      const lookup = (id: string): Task | undefined => {
+        const t = byId.get(id)
+        return t && isTaskVisibleToday(t, today) ? t : undefined
       }
-      const from = isRepeatTask(task) ? repeatStart : 0
-      const to = isRepeatTask(task) ? ids.length : repeatStart
-      let at = to
-      for (let i = from; i < to; i++) {
-        const r = anchorRank(ids[i])
-        if (r === null) continue
-        if (r > 0) {
-          at = i
-          break
-        }
-      }
+      const at = repeatAwareInsertIndexForIds(ids, task, lookup)
       ids.splice(at, 0, task.id)
       if (ids.join('|') === (renderedBefore ?? this.todayOrder.join('|'))) return
       this.setTodayOrder(ids, { audit: false })
@@ -3647,9 +3615,10 @@ export const useTasksStore = defineStore('tasks', {
      *  - 清理：剔除已删除、已完成、今日不可见、或已不存在（死 id，删除后残留）的任务 id，
      *    防止顺序表随物化/导入/删除无限膨胀；「不在内存」的 id 仅在「所有项目都已加载」时
      *    才判定为死 id，未全量加载时保守保留（F0.2）；
-     *  - 补登记：今日可见但未登记的待办任务，按时间排序后**整体追加到末尾**（F0.4，
-     *    不再按时间插到已登记任务中间，避免新任务把整条顺序表顶开、影响他端手动顺序）——
-     *    覆盖物化任务、批量导入、未来日期任务首次可见、跨设备同步来的新任务；
+     *  - 补登记：今日可见但未登记的待办任务，用与新建/编辑完全同一套落点
+     *    （repeatAwareInsertIndexForIds）逐条登记：普通任务落在「最后一条时间不晚于它的
+     *    普通任务」之后、重复任务保底在所有普通任务之后——覆盖物化任务、批量导入、
+     *    未来日期任务首次可见、跨设备同步来的新任务；
      *  - 已登记的相对顺序保持不变（拖拽手动顺序优先）；
      *  - 顺序无变化时不写盘，避免无谓的 CAS 写与跨端广播。
      * 追平门闩（syncCatchingUp）开启期间直接跳过，由 finalizeSyncCatchUp 在追平后统一执行。
@@ -3677,27 +3646,24 @@ export const useTasksStore = defineStore('tasks', {
         if (t.status === 'deleted' || t.status === 'completed') return false
         return isTaskVisibleToday(t, today)
       })
-      // ② 补登记（F0.4）：今日可见待办中未登记的按时间排序后**整体追加到末尾**——不再按
-      // 时间插到已登记任务中间（那会让新任务把整条顺序表顶开、影响他端已拖拽的手动顺序）。
-      // 已登记任务相对顺序（手动拖拽优先）保持不动。重复任务按「普通在前、重复在后」分区：
-      // 普通任务插到重复区之前（无重复区则插到末尾），重复任务追加到末尾（重复区内部按时间排）
-      // ——重复任务即使带早提醒也绝不登记到普通任务前面。
+      // ② 补登记（F0.4）：今日可见但未登记的待办任务，用与新建/编辑完全同一套落点
+      // （repeatAwareInsertIndexForIds）逐条登记：
+      //  - 普通任务：落在「最后一条时间不晚于它的普通任务」之后——重复任务的位置不参与；
+      //  - 重复任务（保底）：落在所有普通任务之后，再在重复任务之间按时间落点。
+      // 已登记任务的相对顺序全程不变（拖拽手动顺序优先），只插入新 id。
       const orderSet = new Set(ids)
-      const toInsert = this.all.filter(
-        (t) => t.status === 'pending' && isTaskVisibleToday(t, today) && !orderSet.has(t.id),
-      )
-      const normals = toInsert.filter((t) => !isRepeatTask(t)).sort(compareTasksByTime)
-      const repeats = toInsert.filter((t) => isRepeatTask(t)).sort(compareTasksByTime)
-      let insertAt = ids.length
-      for (let i = 0; i < ids.length; i++) {
-        const t = byId.get(ids[i])
-        if (t && isRepeatTask(t)) {
-          insertAt = i
-          break
-        }
+      const toInsert = this.all
+        .filter((t) => t.status === 'pending' && isTaskVisibleToday(t, today) && !orderSet.has(t.id))
+        .sort(compareAutoTasks)
+      // 只跟「今日可见」的任务比时间（历史/不可见 id 不参与比较），与 repositionTodayOrder 一致
+      const lookup = (id: string): Task | undefined => {
+        const t = byId.get(id)
+        return t && isTaskVisibleToday(t, today) ? t : undefined
       }
-      ids.splice(insertAt, 0, ...normals.map((t) => t.id))
-      for (const r of repeats) ids.push(r.id)
+      for (const t of toInsert) {
+        const at = repeatAwareInsertIndexForIds(ids, t, lookup)
+        ids.splice(at, 0, t.id)
+      }
       if (ids.join('|') === this.todayOrder.join('|')) return
       this.setTodayOrder(ids, { audit: false })
     },
@@ -3722,36 +3688,32 @@ export const useTasksStore = defineStore('tasks', {
             return true
           }
           if (result.remote && Array.isArray((result.remote as { ids?: string[] }).ids)) {
-            // 多端同时拖拽：本地顺序优先，远端比本地多出的任务 id 追加到末尾，不丢任一端。
-            // 分区合并：普通任务插到重复区之前、重复任务追加到末尾（与对账同一规则），
-            // 多端冲突合并时也不破坏「普通在前、重复在后」的分区。
+            // 多端同时拖拽：本地顺序优先，远端比本地多出的任务 id 按与新建/对账同一套落点
+            // （repeatAwareInsertIndexForIds）逐条插入，不丢任一端，也不破坏
+            // 「普通任务在前、重复任务保底在后」的约定。
             const remoteIds = (result.remote as { ids: string[] }).ids
             const seen = new Set(this.todayOrder)
             const additions = remoteIds.filter((id) => !seen.has(id))
             if (additions.length) {
               const byId = new Map(this.all.map((t) => [t.id, t]))
-              const addNormals = additions.filter((id) => {
+              for (const id of additions) {
                 const t = byId.get(id)
-                return !t || !isRepeatTask(t)
-              })
-              const addRepeats = additions.filter((id) => {
-                const t = byId.get(id)
-                return !!t && isRepeatTask(t)
-              })
-              let at = this.todayOrder.length
-              for (let i = 0; i < this.todayOrder.length; i++) {
-                const t = byId.get(this.todayOrder[i])
-                if (t && isRepeatTask(t)) {
-                  at = i
-                  break
+                // 任务尚未加载进内存（其它项目）：按普通任务处理，追加到重复区之前
+                if (!t) {
+                  let at = this.todayOrder.length
+                  for (let i = 0; i < this.todayOrder.length; i++) {
+                    const other = byId.get(this.todayOrder[i])
+                    if (other && isRepeatTask(other)) {
+                      at = i
+                      break
+                    }
+                  }
+                  this.todayOrder.splice(at, 0, id)
+                  continue
                 }
+                const at = repeatAwareInsertIndexForIds(this.todayOrder, t, (x) => byId.get(x))
+                this.todayOrder.splice(at, 0, id)
               }
-              this.todayOrder = [
-                ...this.todayOrder.slice(0, at),
-                ...addNormals,
-                ...this.todayOrder.slice(at),
-                ...addRepeats,
-              ]
             }
             await idbPut('kv', todayOrderCacheKey(auth.username), { ids: this.todayOrder })
             knownEtag = result.remoteEtag ?? undefined
