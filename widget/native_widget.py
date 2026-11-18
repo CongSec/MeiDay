@@ -4,6 +4,7 @@
 用 Win32 分层窗口(UpdateLayeredWindow, 32bpp BGRA premultiplied)实现真正的
 逐像素透明：圆角半透明背景 + 不透明黑色文字，背景透明度可调、可透出桌面/
 其它程序。独立线程 + 消息泵，由主进程通过 set_* 线程安全接口驱动重绘。
+头部一行：左上角日期（前端推送）+ 右上角时钟（HH:MM，窗口线程每分钟自更新）。
 
 透明语义：
   state["transparency"] ∈ [0.05, 1.0]，越大背景越透明（后面程序越清楚）。
@@ -249,6 +250,7 @@ class NativeWidget:
             "transparency": 0.6,   # 背景透明度：越大越透明
             "font_size": 16,      # 任务文字基准字号（px），日期按比例缩放
             "date": "",
+            "time": "",           # 右上角时钟（HH:MM），由窗口线程每分钟更新
             "tasks": [],           # list[str]
             "ready": False,        # 是否已有真实数据
         }
@@ -386,12 +388,18 @@ class NativeWidget:
         except Exception:
             pass
 
+        last_time_str = ""
         while not self._stop.is_set():
             # 泵消息
             msg = MSG()
             while user32.PeekMessageW(ctypes.byref(msg), 0, 0, 0, 1):  # PM_REMOVE
                 user32.TranslateMessage(ctypes.byref(msg))
                 user32.DispatchMessageW(ctypes.byref(msg))
+            # 时钟：分钟变化时触发重绘（仅显示时分，由本窗口自维护、不依赖前端推送）
+            now_t = time.strftime("%H:%M")
+            if now_t != last_time_str:
+                last_time_str = now_t
+                self.set_state(time=now_t)
             if self._render_pending.is_set():
                 self._render_pending.clear()
                 st = self._snapshot()
@@ -472,6 +480,11 @@ class NativeWidget:
         y = L["pad_top"]
         if st["date"]:
             d.text((L["pad_x"], y), st["date"], font=font_date, fill=txt_color)
+        # 右上角时钟（HH:MM，右对齐与日期同行）
+        t = st.get("time") or ""
+        if t:
+            tw = d.textlength(t, font=font_date)
+            d.text((w - L["pad_x"] - tw, y), t, font=font_date, fill=txt_color)
         y += L["header_h"]
 
         tasks = st["tasks"]
