@@ -14,6 +14,11 @@ MeiDay 桌面小组件启动器（Windows 专用）
 其它职责：
   - 起本机 HTTP 服务（127.0.0.1:5173）托管 widget/dist 构建产物，供设置窗口加载；
   - 托盘（pystray）：左键 = 打开设置；右键菜单 = 打开设置 / 退出；
+  - 空闲自动隐藏（隐私保护，设置里可开关）：整个系统无鼠标/键盘操作持续 5 秒后
+    自动隐藏常驻视图，一旦检测到输入立即恢复显示；手动隐藏优先（不被输入唤醒）；
+  - 鼠标悬浮隐藏（设置里可开关）：指针停在任务卡片内 300ms 后整块隐去（完全透视
+    背后窗口），移出矩形立即原样恢复；只叠加在 view 可见态之上，不改三模式，
+    设置界面（settings）不参与；
   - 置顶循环：view 模式把原生视图置顶（所有应用窗口之上），并杜绝被最小化/隐藏
     （Win+D 显示桌面、Win+M 全部最小化、Aero Shake 等均不消失）；
   - 防偷窥：对两个窗口持续 SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)，
@@ -94,6 +99,11 @@ _STATE = {
     "native": None,      # NativeWidget 原生视图窗口
     "mode": "view",      # view / settings / hidden
     "pos": None,         # (逻辑像素 x, y)：视图与设置窗口的共享位置
+    "auto_hidden": False,  # 当前 hidden 是否由「空闲自动隐藏」触发（True=可被输入唤醒）
+    # 「鼠标悬浮隐藏」状态：只作用于原生视图窗口自身，不动 _STATE["mode"] 与设置窗口。
+    "hover_hidden": False,   # 当前是否因指针停留而暂时隐去任务卡片
+    "hover_enter_at": None,  # 指针本次进入卡片矩形的 monotonic 时刻（停留判定基准）
+    "hover_outside": False,  # 指针是否已被观察到在卡片外（模式切换后需先出区才重新计时）
 }
 
 
@@ -110,7 +120,7 @@ def _native():
 # ---------------------------------------------------------------------------
 DEFAULT_CONFIG = {
     "session": {"token": "", "tokenAt": 0, "savedPw": "", "savedPwAt": 0, "username": ""},
-    "widget": {"opacity": 0.6, "width": 360, "posX": None, "posY": None, "autoStart": False, "fontSize": 16},
+    "widget": {"opacity": 0.6, "width": 360, "posX": None, "posY": None, "autoStart": False, "fontSize": 16, "autoHide": True, "hoverHide": True},
     # 服务器配置镜像（config.json → 前端 localStorage）：旧配置无该键时由 _deep_merge 自动补默认值
     "server": {"servers": [], "active": ""},
 }
@@ -253,6 +263,25 @@ def _user32():
     return ctypes.windll.user32
 
 
+class LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD)]
+
+
+def _idle_ms():
+    """系统自最后一次鼠标/键盘输入以来的毫秒数（GetLastInputInfo，全系统生效）。
+    返回 0（视为活跃）为安全默认：探测失败时不触发自动隐藏。"""
+    try:
+        lii = LASTINPUTINFO()
+        lii.cbSize = ctypes.sizeof(LASTINPUTINFO)
+        if not _user32().GetLastInputInfo(ctypes.byref(lii)):
+            return 0
+        tick = ctypes.windll.kernel32.GetTickCount()
+        # 两个 32 位 tick 都可能回绕，按无符号差值计算真实流逝毫秒
+        return (tick - lii.dwTime) & 0xFFFFFFFF
+    except Exception:
+        return 0
+
+
 def find_hwnds_by_pid(pid):
     """枚举某进程的可见顶层窗口，排除控制台窗口（ConsoleWindowClass）。
 
@@ -352,10 +381,39 @@ def set_click_through(enabled):
     return True
 
 
-def _window_size(hwnd):
+def _window_rect(hwnd):
+    """窗口物理矩形 (left, top, right, bottom)；失败返回 None。
+    全部为物理像素（进程已 SetProcessDPIAware，GetCursorPos 同为物理坐标）。"""
     rect = wintypes.RECT()
-    _user32().GetWindowRect(hwnd, ctypes.byref(rect))
-    return rect.right - rect.left, rect.bottom - rect.top
+    if not _user32().GetWindowRect(hwnd, ctypes.byref(rect)):
+        return None
+    return int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)
+
+
+def _cursor_pos():
+    """当前鼠标物理坐标 (x, y)；失败返回 None。"""
+    pt = wintypes.POINT()
+    if not _user32().GetCursorPos(ctypes.byref(pt)):
+        return None
+    return int(pt.x), int(pt.y)
+
+
+def _pointer_in_window(hwnd):
+    """指针是否落在窗口矩形内（含边缘内侧；隐藏窗口中位置依旧有效）。"""
+    pos = _cursor_pos()
+    rect = _window_rect(hwnd)
+    if pos is None or rect is None:
+        return False
+    x, y = pos
+    left, top, right, bottom = rect
+    return left <= x < right and top <= y < bottom
+
+
+def _window_size(hwnd):
+    rect = _window_rect(hwnd)
+    if rect is None:
+        return 0, 0
+    return rect[2] - rect[0], rect[3] - rect[1]
 
 
 def _dpi_scale(hwnd=None):
@@ -428,14 +486,43 @@ def _apply_startup_position():
         native.set_position(nx, ny)
 
 
+def _hover_reset():
+    """清空「鼠标悬浮隐藏」状态（模式切换 / 开关关闭时调用）。
+    同时要求指针先被观察到在卡片外，才重新开始「入区停留」计时：设置面板与任务
+    卡片几乎完全重叠，点右上角关闭设置后指针往往正落在卡片矩形内，若不做这层
+    约束，切回 view 后 300ms 卡片就被隐去，用户会以为小组件没回来。"""
+    _STATE["hover_hidden"] = False
+    _STATE["hover_enter_at"] = None
+    _STATE["hover_outside"] = False
+
+
+def _hover_apply(hidden):
+    """把「悬浮隐藏」结果实际应用到原生视图窗口。
+    只在 view 模式可见态下改变可见性：settings / hidden 模式的显隐由模式独占，
+    这里绝不让原生卡片在设置面板上「自己冒出来」（浮层与模式切换线程存在竞态）。"""
+    native = _native()
+    if _STATE.get("mode") != "view":
+        _STATE["hover_hidden"] = False
+        return
+    if native is None:
+        return
+    _STATE["hover_hidden"] = bool(hidden)
+    native.set_visible(not hidden)
+    if not hidden:
+        native.bring_to_top()
+
+
 def apply_mode(mode):
     """切换三模式：
     - view   ：原生视图窗口显示（鼠标穿透、置顶），设置窗口隐藏；
     - settings：设置窗口显示（可交互、置前），原生视图隐藏；
     - hidden ：两个窗口都隐藏，仅保留后台同步与托盘。
-    """
+
+    模式切换会清空「悬浮隐藏」状态（见 _hover_reset），并要求指针先离开卡片矩形，
+    之后重新入区停留才再次触发隐藏：显隐由模式决定，悬浮只叠加在 view 可见态之上。"""
     mode = mode if mode in ("view", "settings", "hidden") else "view"
     _STATE["mode"] = mode
+    _hover_reset()
     win = _win()
     hwnd = _STATE.get("hwnd")
     native = _native()
@@ -489,12 +576,123 @@ def keep_topmost_loop(stop_event):
             native = _native()
             hwnd = native.hwnd if native is not None else 0
             if hwnd:
+                # 悬浮隐藏期间不得「复活」窗口：这里每 0.5s 的
+                # IsWindowVisible → SW_SHOWNOACTIVATE 兜底会与悬浮隐藏打架，
+                # 让指针停留 300ms 藏起来的卡片立刻闪回。悬浮隐藏由
+                # hover_hide_loop 独占管理，本循环在其生效期间完全让位。
+                if _STATE.get("hover_hidden"):
+                    time.sleep(0.5)
+                    continue
                 if _user32().IsIconic(hwnd) or not _user32().IsWindowVisible(hwnd):
                     _user32().ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE：恢复且不激活
                 native.bring_to_top()
         except Exception as e:
             _log(f"[keep_topmost] {e!r}")
         time.sleep(0.5)
+
+
+# ---------------------------------------------------------------------------
+# 空闲自动隐藏（隐私保护）
+# ---------------------------------------------------------------------------
+IDLE_HIDE_MS = 5000    # 整个系统无鼠标/键盘操作持续多久后自动隐藏
+IDLE_POLL_S = 0.25     # 轮询间隔，也是「检测到输入后立即恢复显示」的响应延迟上限
+
+
+def idle_hide_loop(stop_event):
+    """隐私保护：整个系统无鼠标/键盘操作持续 IDLE_HIDE_MS 后自动隐藏常驻视图，
+    一旦检测到新输入立即恢复显示（复用 apply_mode 的 view/hidden 切换）。
+    - 仅 view 模式参与；设置窗口（settings 模式）不参与；
+    - 手动隐藏优先：_STATE["auto_hidden"] 只由本循环置位，
+      前端任何显式 set_mode（手动隐藏/打开设置/登录等）都会清除它，输入不再唤醒；
+    - 开关被关闭时若正处于自动隐藏状态，恢复视图显示（避免关了开关窗口仍消失）。"""
+    while not stop_event.is_set():
+        time.sleep(IDLE_POLL_S)
+        try:
+            enabled = bool(read_config().get("widget", {}).get("autoHide", True))
+            mode = _STATE.get("mode")
+            idle_ms = _idle_ms()
+            if enabled:
+                if mode == "view" and idle_ms >= IDLE_HIDE_MS:
+                    _STATE["auto_hidden"] = True
+                    apply_mode("hidden")
+                    _call_js("window.__setMode && window.__setMode('hidden')")
+                elif mode == "hidden" and _STATE.get("auto_hidden") and idle_ms < IDLE_HIDE_MS:
+                    _STATE["auto_hidden"] = False
+                    apply_mode("view")
+                    _call_js("window.__setMode && window.__setMode('view')")
+            else:
+                if _STATE.get("auto_hidden") and mode == "hidden":
+                    _STATE["auto_hidden"] = False
+                    apply_mode("view")
+                    _call_js("window.__setMode && window.__setMode('view')")
+        except Exception as e:
+            _log(f"[idle_hide] {e!r}")
+
+
+# ---------------------------------------------------------------------------
+# 鼠标悬浮隐藏
+# ---------------------------------------------------------------------------
+# 原生视图窗口带 WS_EX_TRANSPARENT（鼠标穿透），收不到 WM_MOUSEMOVE，
+# 因此命中判定只能由后台线程轮询 GetCursorPos 与 GetWindowRect 比对完成。
+HOVER_POLL_S = 0.04        # 轮询间隔：40ms，恢复「移出即显示」的观感上限
+HOVER_HIDE_DELAY_S = 0.3   # 入区停留阈值：≥300ms 才隐藏，瞬时划过不触发（防误触闪烁）
+# config.json 读取节流：命中判定 40ms 一次，若每次都 read_config()（文件 IO + JSON 解析）
+# 会产生 25 次/秒的无谓磁盘读；开关变化 0.5s 内生效已足够，因此每 N 轮刷新一次。
+HOVER_CFG_EVERY = 12       # ≈ 12 × 40ms = 480ms
+
+
+def hover_hide_loop(stop_event):
+    """鼠标悬浮隐藏：指针停在任务卡片矩形内 ≥300ms 时把卡片整块隐去
+    （完全透视背后窗口，鼠标本来就不拦截），指针移出矩形立即原样恢复。
+
+    约束（与既有机制的边界）：
+    - 仅 view 模式参与：settings（设置界面）与 hidden（手动/空闲隐藏）一律不动；
+      设置界面期间原生卡片本就 set_visible(False)，所以「设置界面不隐藏」天然成立；
+    - 只改原生窗口自身可见性，不改 _STATE["mode"] / 前端 widget.mode，
+      因此不会污染「显示/隐藏小组件」按钮文案与空闲自动隐藏状态机；
+    - 开关关闭：view 下立即清除悬浮状态并恢复显示（不能让卡片继续隐着）；
+      settings / hidden 下只清状态——显隐由模式独占，绝不在设置面板上冒卡片；
+    - 模式切换后要求指针先被观察到在卡片外，重新入区停留才计时：设置面板与卡片
+      几乎完全重叠，关闭设置时指针常正好落在卡片上，否则「刚关设置卡片就消失」。"""
+    tick = 0
+    enabled = True
+    while not stop_event.is_set():
+        time.sleep(HOVER_POLL_S)
+        try:
+            tick += 1
+            if tick % HOVER_CFG_EVERY == 1:
+                enabled = bool(read_config().get("widget", {}).get("hoverHide", True))
+            mode = _STATE.get("mode")
+            native = _native()
+            hwnd = native.hwnd if native is not None else 0
+            if not enabled or mode != "view" or not hwnd:
+                # 开关关闭：view 下立即恢复显示（不能让卡片继续隐着）；
+                # settings / hidden：显隐由模式独占，这里只清状态，绝不 set_visible(True)。
+                if _STATE.get("hover_hidden"):
+                    _hover_apply(False)
+                _hover_reset()
+                continue
+
+            now = time.monotonic()
+            if _pointer_in_window(hwnd):
+                if _STATE.get("hover_hidden"):
+                    continue  # 指针仍在卡片内：保持隐藏
+                # 模式切换后尚未观察到指针出区：不开始计时（避免「刚回来就消失」）
+                if _STATE.get("hover_outside"):
+                    t0 = _STATE.get("hover_enter_at")
+                    if t0 is None:
+                        _STATE["hover_enter_at"] = now
+                    elif now - t0 >= HOVER_HIDE_DELAY_S:
+                        _hover_apply(True)
+                continue
+
+            # 指针在卡片外：标记出区并立即恢复（移出即显示）
+            _STATE["hover_outside"] = True
+            _STATE["hover_enter_at"] = None
+            if _STATE.get("hover_hidden"):
+                _hover_apply(False)
+        except Exception as e:
+            _log(f"[hover_hide] {e!r}")
 
 
 def set_display_affinity(hwnd):
@@ -673,6 +871,9 @@ class Api:
 
     def set_mode(self, mode):
         apply_mode(mode)
+        # 前端显式切换（手动隐藏 / 打开设置 / 登录等）= 用户接管控制权：
+        # 清除自动隐藏标记，此后输入不再自动唤醒（手动隐藏优先）。
+        _STATE["auto_hidden"] = False
         return True
 
     def update_view(self, data):
@@ -783,6 +984,8 @@ def main():
             print("[widget] 警告：未找到设置窗口句柄")
         threading.Thread(target=keep_topmost_loop, args=(stop_event,), daemon=True).start()
         threading.Thread(target=enforce_affinity_loop, args=(stop_event,), daemon=True).start()
+        threading.Thread(target=idle_hide_loop, args=(stop_event,), daemon=True).start()
+        threading.Thread(target=hover_hide_loop, args=(stop_event,), daemon=True).start()
 
         start_tray()
         print("[widget] 桌面小组件已启动（托盘左键=设置，右键=菜单）")

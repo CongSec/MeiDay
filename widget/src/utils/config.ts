@@ -8,7 +8,7 @@ import { importServerConfig, snapshotServerConfig } from '@/utils/serverConfig'
  * 桌面小组件与 Python 壳之间的配置桥接。
  * config.json 固定存放于程序同级目录（Python 端管理），结构：
  *   { session: {token, tokenAt, savedPw, savedPwAt, username},
- *     widget:  {opacity, width, posX, posY, autoStart, fontSize},
+ *     widget:  {opacity, width, posX, posY, autoStart, fontSize, autoHide, hoverHide},
  *     server:  {servers, active} }
  * 登录态/服务器配置在 localStorage（同步访问）与 config.json（持久化）之间镜像。
  */
@@ -30,6 +30,11 @@ export interface WidgetConfig {
   autoStart: boolean
   /** 任务文字基准字号（px） */
   fontSize: number
+  /** 空闲自动隐藏（隐私保护）：整个系统无操作 3 秒后自动隐藏，有输入立即恢复 */
+  autoHide: boolean
+  /** 鼠标悬浮隐藏：指针停在任务显示界面（原生视图卡片矩形）内 300ms 后整块隐去，
+      移出矩形立即恢复；设置界面（settings 模式）不受影响 */
+  hoverHide: boolean
 }
 
 export interface ServerConfig {
@@ -64,6 +69,8 @@ const defaultWidget = (): WidgetConfig => ({
   posY: null,
   autoStart: false,
   fontSize: 16,
+  autoHide: true,
+  hoverHide: true,
 })
 
 const defaultServer = (): ServerConfig => ({

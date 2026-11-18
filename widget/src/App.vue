@@ -50,9 +50,11 @@ function quitWidget() {
   pvApi()?.quit()
 }
 
-/* 托盘/Python 通知：全局 setMode 入口（Python 端 evaluate_js 调用） */
+/* 托盘/Python 通知：全局 setMode 入口（Python 端 evaluate_js 调用）。
+   仅更新本地状态，不回调 api.set_mode（Python 端已直接 apply_mode，
+   避免通知回流清除其 auto_hidden 标记）。 */
 ;(window as any).__setMode = (mode: string) => {
-  widget.setMode(mode as WidgetMode)
+  widget.applyShellMode(mode as WidgetMode)
 }
 
 /** 等待 pywebview JS 桥就绪：Vue 挂载可能早于桥注入，导致 set_mode / update_view 静默丢失。
@@ -336,6 +338,19 @@ function persistWidget() {
 async function onAutoStart(e: Event) {
   await widget.setAutoStart((e.target as HTMLInputElement).checked)
 }
+/** 「离开自动隐藏」开关：空闲 3 秒自动隐藏由 Python 端 idle_hide_loop 执行，
+    这里只落盘配置（config.json），下次轮询即生效。 */
+function onAutoHide(e: Event) {
+  widget.autoHide = (e.target as HTMLInputElement).checked
+  persistWidget()
+}
+/** 「鼠标悬浮隐藏」开关：悬浮判定与显隐由 Python 端 hover_hide_loop 执行
+    （原生视图窗口鼠标穿透、收不到 mousemove，只能由 Python 轮询指针矩形命中）。
+    这里只落盘配置；关掉开关后后台线程下一轮即恢复显示。设置界面不受影响。 */
+function onHoverHide(e: Event) {
+  widget.hoverHide = (e.target as HTMLInputElement).checked
+  persistWidget()
+}
 /** 「立即同步」按钮四态：idle / 同步中 / 已同步 / 同步失败（成功失败均 2s 后复原） */
 const syncState = ref<'idle' | 'running' | 'ok' | 'fail'>('idle')
 let syncStateTimer: number | undefined
@@ -497,6 +512,20 @@ const settingsBgStyle = computed(() => ({
             </button>
           </div>
           <div class="row">
+            <span class="row-label">离开自动隐藏</span>
+            <label class="switch">
+              <input type="checkbox" :checked="widget.autoHide" @change="onAutoHide" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="row">
+            <span class="row-label" title="鼠标停在任务显示界面 0.3 秒后隐藏，移开立即恢复">鼠标悬浮隐藏</span>
+            <label class="switch">
+              <input type="checkbox" :checked="widget.hoverHide" @change="onHoverHide" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="row">
             <span class="row-label">立即同步</span>
             <button class="ghost-btn" :disabled="syncState === 'running'" @click="onRefresh">
               {{ syncState === 'running' ? '同步中…' : syncState === 'ok' ? '已同步' : syncState === 'fail' ? '同步失败' : '同步' }}
@@ -519,7 +548,6 @@ const settingsBgStyle = computed(() => ({
             />
             <span class="row-value">{{ Math.round(widget.opacity * 100) }}%</span>
           </div>
-          <div class="hint">透明度越高，背景越透明，后面程序越清晰；任务文字保持黑色。</div>
           <div class="row">
             <span class="row-label">宽度 (px)</span>
             <input

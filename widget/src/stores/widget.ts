@@ -23,6 +23,10 @@ export const useWidgetStore = defineStore('widget', {
     posY: null as number | null,
     autoStart: false,
     fontSize: 16,
+    /** 空闲自动隐藏（隐私保护）：整个系统无操作 3 秒后自动隐藏，有输入立即恢复 */
+    autoHide: true,
+    /** 鼠标悬浮隐藏：指针停在任务显示界面内 300ms 后隐去，移出立即恢复（设置界面不隐藏） */
+    hoverHide: true,
     ready: false,
   }),
   actions: {
@@ -35,6 +39,9 @@ export const useWidgetStore = defineStore('widget', {
       this.posY = typeof w.posY === 'number' ? w.posY : null
       this.fontSize = Math.min(32, Math.max(14, Number(w.fontSize) || 16))
       this.autoStart = !!w.autoStart
+      this.autoHide = typeof w.autoHide === 'boolean' ? w.autoHide : true
+      // 鼠标悬浮隐藏：旧配置无该键时为 undefined → 默认开启（_deep_merge 也会补 True）
+      this.hoverHide = typeof w.hoverHide === 'boolean' ? w.hoverHide : true
       // 以系统注册表为准同步开机自启动状态（可能被外部改动）
       const api = pvApi()
       if (api?.get_auto_start) {
@@ -60,6 +67,13 @@ export const useWidgetStore = defineStore('widget', {
         }
       }
     },
+    /** Python 壳通知（空闲自动隐藏 / 恢复、托盘打开设置）：仅更新本地状态，
+        不回调 api.set_mode——避免通知回流清除 Python 端 auto_hidden 标记。 */
+    applyShellMode(mode: WidgetMode): void {
+      this.mode = mode
+      if (mode === 'hidden') this.shown = false
+      else if (mode === 'view') this.shown = true
+    },
     async persist(): Promise<void> {
       await writeWidget({
         opacity: this.opacity,
@@ -68,6 +82,8 @@ export const useWidgetStore = defineStore('widget', {
         posY: this.posY,
         autoStart: this.autoStart,
         fontSize: this.fontSize,
+        autoHide: this.autoHide,
+        hoverHide: this.hoverHide,
       })
     },
     async setAutoStart(value: boolean): Promise<void> {
