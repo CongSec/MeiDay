@@ -12,18 +12,17 @@ import android.widget.RemoteViews;
 
 /**
  * 常驻通知：不可滑动清除（ongoing）。
- * 折叠态用自定义内容视图（RemoteViews）直接多行展示今日未完成任务名（一行一个），
+ * 折叠态用自定义内容视图（RemoteViews）紧凑展示今日未完成任务名
+ * （全角分号「；」连续拼接、自然换行填满，行数上限与现有卡片高度一致），
  * 解决部分国产 ROM（如 iQOO OriginOS）折叠态只显示一行 contentText 的问题；
- * 展开态用 BigTextStyle 完整展示全部任务。
+ * 总任务数在通知标题行「今日任务（共 N 项）」展示；
+ * 展开态用 BigTextStyle 完整展示全部任务（一行一个）。
  * 不依赖前台服务——通知由系统托管，进程被杀后仍保留；重启后由 BootReceiver 恢复。
  */
 public final class NotificationHelper {
 
     public static final String CHANNEL_ID = "meiday_today_tasks";
     public static final int NOTIF_ID = 1001;
-
-    /** 折叠态最多直接展示的任务行数（通知栏单卡高度有限，超出进展开态完整查看） */
-    private static final int COLLAPSED_MAX_LINES = 5;
 
     private NotificationHelper() {
     }
@@ -48,7 +47,7 @@ public final class NotificationHelper {
         PendingIntent pi = PendingIntent.getActivity(ctx, 2, open,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        // 折叠态：自定义内容视图，直接多行展示任务名（系统仍会自动在卡片底部显示应用名）
+        // 折叠态：自定义内容视图，直接紧凑展示任务名（系统仍会自动在卡片底部显示应用名）
         RemoteViews collapsed = new RemoteViews(ctx.getPackageName(), R.layout.notification_content);
         collapsed.setTextViewText(R.id.notif_tasks, collapsedText(names));
 
@@ -71,10 +70,11 @@ public final class NotificationHelper {
         } else {
             b = new Notification.Builder(ctx);
         }
+        String contentText = collapsedText(names);
         Notification notification = b
                 .setSmallIcon(R.drawable.ic_notification)
-                .setContentTitle("今日任务")
-                .setContentText(names.length == 0 ? "今日无任务" : names[0])
+                .setContentTitle(names.length == 0 ? "今日任务" : "今日任务（共 " + names.length + " 项）")
+                .setContentText(contentText)
                 .setCustomContentView(collapsed)
                 .setContentIntent(pi)
                 .setOngoing(true)
@@ -87,19 +87,16 @@ public final class NotificationHelper {
         nm.notify(NOTIF_ID, notification);
     }
 
-    /** 折叠态任务文本：一行一个；不超过 COLLAPSED_MAX_LINES 行直接全列，
-     *  超出则展示前 COLLAPSED_MAX_LINES-1 条并在末行附「… 等 N 项」提示。 */
+    /** 折叠态任务文本：任务名用全角分号「；」连续拼接（不换行），由 TextView 自然换行
+     *  填满每一行；行数上限由布局 maxLines 约束，溢出部分以省略号截断；
+     *  总任务数在标题行「今日任务（共 N 项）」展示。 */
     private static String collapsedText(String[] names) {
         if (names.length == 0) return "今日无任务";
         StringBuilder sb = new StringBuilder();
-        int shown = names.length <= COLLAPSED_MAX_LINES ? names.length : COLLAPSED_MAX_LINES - 1;
-        for (int i = 0; i < shown; i++) {
-            if (names[i] == null) continue;
-            if (sb.length() > 0) sb.append('\n');
-            sb.append(names[i]);
-        }
-        if (names.length > COLLAPSED_MAX_LINES) {
-            sb.append('\n').append("… 等 ").append(names.length - shown).append(" 项");
+        for (String n : names) {
+            if (n == null) continue;
+            if (sb.length() > 0) sb.append('；');
+            sb.append(n);
         }
         return sb.toString();
     }
