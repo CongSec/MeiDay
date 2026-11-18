@@ -109,7 +109,11 @@ const doneChips = computed<Chip[]>(() => {
     const endKey = dateKeyOf(end)
     if (endKey.slice(0, 7) !== props.month) continue
     const startKey = taskStart(t) ? dateKeyOf(taskStart(t)) : ''
-    const cross = startKey && startKey < endKey ? { start: startKey, end: endKey } : null
+    // BUG-38：重复任务的提醒日只是「上一次出现的锚点」（如周一提醒、周二才完成），
+    // 不能据此画跨天横条（会把两次独立出现连起来，见 doneBars 的 repeat 排除）；
+    // 而 chipsByDay 又会跳过所有 cross 非空的小块，结果是该完成记录在日历图上彻底消失。
+    // 故重复任务强制 cross=null：只按完成日画一个小块，与 doneBars 的排除语义对齐。
+    const cross = !t.repeat && startKey && startKey < endKey ? { start: startKey, end: endKey } : null
     out.push({ task: t, kind: 'done', day: endKey, sortKey: end, cross, row: 0 })
   }
   return out

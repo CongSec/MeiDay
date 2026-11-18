@@ -40,7 +40,15 @@ const overdue = computed(() => {
   if (rule && isNewStyleRepeat(rule) && rule.start) {
     if (todayKey() < rule.start) return false
   }
-  return new Date(props.task.reminderTime).getTime() <= now.value
+  // BUG-38：判定基准必须与卡片上「显示的提醒时间」一致（BUG-37 显示层会把重复任务的
+  // 提醒日期推进到今天/最近重复日），否则会出现两种自相矛盾：
+  //   ① 周二（非重复日）：显示还是周一 09:00，红铃铛提示周一那期已过——语义成立但观感多余；
+  //   ② 周三（重复日）09:00 前：显示已推进成“今天 09:00”（尚未到点），却仍标“已过提醒时间”。
+  // 这里统一改用显示值判定：仅在「显示的这次提醒确实已过」时才红——周二红（针对周一那期，
+  // 延续既有滞留常亮语义），周三 09:00 到点前不红、到点后红。
+  const shown = displayReminderTimeForRepeat(props.task.reminderTime, rule, props.task.status)
+  if (!shown) return false
+  return new Date(shown).getTime() <= now.value
 })
 
 /** 重复图标自定义气泡：悬停显示重复规则类型。
