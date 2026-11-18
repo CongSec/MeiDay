@@ -882,10 +882,16 @@ onUnmounted(() => {
       <form class="mt-3 space-y-2.5" @submit.prevent="submit">
         <div>
           <label class="text-xs text-slate-500 block mb-0.5">名称 *</label>
+          <!-- enterkeyhint="done"：手机端输入法动作键渲染成「确认/完成」而不是「继续」。
+               WebView 只有在该属性存在时才会把动作键发成 Enter 键事件（否则
+               Chromium 走 ACTION_NEXT 焦点前移，光标会跳到描述框且不保存）；
+               收到 Enter 后即与本表单的隐式提交一致（@submit.prevent → submit()），
+               与电脑端回车保存完全同一条路径 -->
           <input
             ref="nameInputRef"
             v-model="name"
             maxlength="200"
+            enterkeyhint="done"
             class="w-full border rounded-lg px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-brand/50"
             placeholder="任务名称"
             @paste="pasteImagesToAttachments"
