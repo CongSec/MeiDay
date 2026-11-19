@@ -13,7 +13,7 @@ import { idbGet, idbPut, idbDel } from '@/utils/idb'
 import { queueSyncChange } from '@/utils/syncReport'
 import { nowIso, todayKey } from '@/utils/time'
 import { logAudit, safeDetail } from '@/utils/audit'
-import type { DeletedProject, Profile, Project, RepeatMaster, Task, TombstoneEntry } from '@/types'
+import type { DeletedProject, Profile, Project, RepeatMaster, Task } from '@/types'
 
 const COLORS = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899']
 
@@ -334,7 +334,7 @@ export const useProjectsStore = defineStore('projects', {
       const tasksSnap = (tasks.tasks[id] ?? []).slice()
       const trashSnap = (tasks.trash[id] ?? []).slice()
       const repeatsSnap = (tasks.repeats[id] ?? []).slice()
-      const tombstonesSnap = (tasks.tombstones[id] ?? []).slice()
+      const tombstonesSnap = tasks.snapshotTombstones(id)
       // 变更内存
       this.projects = this.projects.filter((x) => x.id !== id)
       // 保留项目元数据（id/名称/颜色/图标 + 删除时间），供回收站「恢复整个项目」使用
@@ -426,12 +426,12 @@ export const useProjectsStore = defineStore('projects', {
       const tasksSnap = new Map<string, Task[]>()
       const trashSnap = new Map<string, Task[]>()
       const repeatsSnap = new Map<string, RepeatMaster[]>()
-      const tombstonesSnap = new Map<string, TombstoneEntry[]>()
+      const tombstonesSnap = new Map<string, ReturnType<typeof tasks.snapshotTombstones>>()
       for (const pid of pids) {
         tasksSnap.set(pid, (tasks.tasks[pid] ?? []).slice())
         trashSnap.set(pid, (tasks.trash[pid] ?? []).slice())
         repeatsSnap.set(pid, (tasks.repeats[pid] ?? []).slice())
-        tombstonesSnap.set(pid, (tasks.tombstones[pid] ?? []).slice())
+        tombstonesSnap.set(pid, tasks.snapshotTombstones(pid))
       }
       if (existing) {
         // 重名：不新建项目，把该项目的任务（含回收站）合并进同名现有项目，避免出现重名项目
@@ -476,7 +476,7 @@ export const useProjectsStore = defineStore('projects', {
           tasks: tasksSnap.get(pid) ?? [],
           trash: trashSnap.get(pid) ?? [],
           repeats: repeatsSnap.get(pid) ?? [],
-          tombstones: tombstonesSnap.get(pid) ?? [],
+          tombstones: tombstonesSnap.get(pid),
         })
       }
       if (auth.username) {
