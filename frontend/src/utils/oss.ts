@@ -591,8 +591,12 @@ export const paths = {
   trashShard: (username: string, projectId: string, month: string) => `users/${username}/projects/${projectId}/trash/${month}.json`,
   trashShardPrefix: (username: string, projectId: string) => `users/${username}/projects/${projectId}/trash/`,
   repeats: (username: string, projectId: string) => `users/${username}/projects/${projectId}/repeats.json`,
-  /** 墓碑日志（每项目一份紧凑文件，只存 {id, updatedAt}，日常同步条件 GET / 304 命中零下载） */
+  /** 墓碑「永久删除」长周期库（只存 purged:<id>，保留 180 天；旧版曾混存普通墓碑） */
   tombstones: (username: string, projectId: string) => `users/${username}/projects/${projectId}/tombstones.json`,
+  /** 墓碑按月分片：tombstones/{YYYY-MM}.json（只存普通墓碑 + 当月 purged 副本，
+   *  条目有效性由「所在分片月份」决定（读取窗口 = 当月 + 上月），不再按 updatedAt 裁剪 */
+  tombstonesShard: (username: string, projectId: string, month: string) => `users/${username}/projects/${projectId}/tombstones/${month}.json`,
+  tombstonesShardPrefix: (username: string, projectId: string) => `users/${username}/projects/${projectId}/tombstones/`,
   /** 隐私日记命名空间（独立于任务数据）：所有对象均为密文 */
   diary: (username: string) => `users/${username}/diary/`,
   diaryMeta: (username: string) => `users/${username}/diary/_meta.json`,
