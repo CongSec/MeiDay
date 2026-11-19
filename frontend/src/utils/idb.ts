@@ -108,8 +108,11 @@ export async function idbClearUserCache(username: string): Promise<void> {
     idbDeletePrefix(tx.objectStore('kv'), `etag:${prefix}`)
     // Last-Modified 条件请求缓存（读路径 If-Modified-Since 用），与 etag 一一对应，登出一并清除
     idbDeletePrefix(tx.objectStore('kv'), `lm:${prefix}`)
-    // 墓碑日志缓存（key 为 tombstones:{username}:{projectId}）
+    // 墓碑日志缓存：分片 key 为 tombshard:{username}:{projectId}:{YYYY-MM}，
+    // 永久删除长库 key 为 tombpurged:{username}:{projectId}（登出一并清除，避免跨账号残留）
     idbDeletePrefix(tx.objectStore('kv'), `tombstones:${username}:`)
+    idbDeletePrefix(tx.objectStore('kv'), `tombshard:${username}:`)
+    idbDeletePrefix(tx.objectStore('kv'), `tombpurged:${username}:`)
     // profile 直接用用户名作 key
     tx.objectStore('profile').delete(username)
     // 统计缓存：key 为 `stats:{username}`
