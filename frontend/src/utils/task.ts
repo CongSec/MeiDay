@@ -185,6 +185,44 @@ export function repeatAwareInsertIndexForIds(
   return at
 }
 
+/** 顺序表并集合并（todayOrder 的加载合并 / 多端冲突合并共用）：
+ *  以 base 的顺序为准（base 为空时等价于直接采用 extra 的权威顺序），
+ *  extra 里 base 没有的 id 按「与新建任务同一套落点」逐条插入。
+ *
+ *  三条不变量（这是「手动拖拽位置不被自动流程覆盖」的核心保障）：
+ *  1) 绝不删除 base 里的任何 id —— base 代表已被采纳的权威/手动顺序；
+ *  2) 绝不移动 base 里已有 id 的相对位置 —— 补登记只允许插入、不允许重排；
+ *  3) 内存里查不到的 id（项目尚未加载 / 历史死 id）原样保留在 base 内，不参与时间比较。
+ *
+ *  base 为空时直接返回 extra（新设备/无缓存时，云端顺序本身就是权威，
+ *  不能拿时间链重排一遍，否则会打乱他端已拖好的顺序）。 */
+export function mergeOrderIds(
+  base: string[],
+  extra: string[],
+  lookup: (id: string) => Task | undefined,
+): string[] {
+  const seen = new Set(base)
+  if (!base.length) {
+    const out = [...extra]
+    for (const id of out) seen.add(id)
+    return out
+  }
+  const out = [...base]
+  for (const id of extra) {
+    if (!id || seen.has(id)) continue
+    const t = lookup(id)
+    if (!t) {
+      // 未加载进内存的任务：无法判定落点，追加到末尾（展示层会按可见性过滤，不误导用户）
+      out.push(id)
+      seen.add(id)
+      continue
+    }
+    out.splice(repeatAwareInsertIndexForIds(out, t, lookup), 0, id)
+    seen.add(id)
+  }
+  return out
+}
+
 /** 统一排序链（带手动键）：手动排序 > 提醒时间 > 开始时间 > 创建时间。
  *  manualA / manualB 为手动顺序值（今日视图为 todayOrder 下标、项目/子任务为 sort）。
  *  注意：只有双方都有手动键时才比较该键；缺失的一侧按 Number.MAX_SAFE_INTEGER 处理，
