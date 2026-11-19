@@ -1,12 +1,21 @@
 import { defineStore } from 'pinia'
 import { useAuthStore } from './auth'
 import { createOssClient, describeOssError, paths } from '@/utils/oss'
-import { compareAndSwapPut, lastModifiedOf, lmKeyOf, mergeStats, mergeStatsAfterSave, sealOldDays, versionToken } from '@/utils/sync'
+import {
+  compareAndSwapPut,
+  lastModifiedOf,
+  lmKeyOf,
+  mergeStats,
+  mergeStatsAfterSave,
+  migrateLegacyStats,
+  reconcileStats,
+  versionToken,
+} from '@/utils/sync'
 import { enrichOssError } from '@/utils/ossDiag'
 import { idbGet, idbPut, idbDel } from '@/utils/idb'
 import { queueSyncChange } from '@/utils/syncReport'
 import { nowIso, todayKey } from '@/utils/time'
-import type { StatsDailyEntry, UserStats } from '@/types'
+import type { UserStats } from '@/types'
 /**
  * 用户统计 store（全部存于用户 OSS 的 stats.json，不上服务器）。
  *
@@ -16,16 +25,19 @@ import type { StatsDailyEntry, UserStats } from '@/types'
  *    严禁任何“从任务列表重新计算 / 清零”的逻辑；
  * 3. 即使服务器变更，stats.json 中的时间与计数也不可重算。
  *
- * 计数采用“按天净增量”结构：daily[日期] = { v, ts, tasks }，当前累计 = 所有 v 之和。
- * tasks 记录当天每个任务的最近完成/取消状态，供多端冲突合并时逐任务去重；
- * firstProjectAt 取最早非空，天然安全且不丢历史。
- *
- * 体积控制：超过 180 天的旧日期由 sealOldDays 封口（丢弃 tasks 明细、只留 {v, ts, sealed:true}），
- * 文件体积从此有上限、写放大可控；封口日合并「取 ts 新者、不叠加」，多端不会重复计数。
+ * 体积约束（用户明确要求：文件不能随使用时间增长）：
+ * - 真值只有两个数：firstProjectAt 与 totalCompleted（累计完成数）；
+ * - 不再保存任何按天明细 ——「某天完成了哪些任务」由回收站分片 trash/{YYYY-MM}.json 承担，
+ *   （时间胶囊的热力图/趋势图读的是回收站任务，不是本文件）；stats.json 不再重复存一份；
+ * - daily 为**过渡期兼容字段**（只含月键），供尚未升级的旧版客户端求和得到正确累计数；
+ *   旧端全部升级后可调用 purgeCompatDaily() 删除，文件收敛到 ≈120 B 且永久恒定。
  */
 let statsSaveTimer: number | undefined
+/** 本端上一次成功写入 stats.json 的 updated_at：用于判断“是否有旧端在写”（过渡清理）。 */
+const lastOwnWriteKey = (username: string): string => `stats:ownwrite:${username}`
+
 function emptyStats(): UserStats {
-  return { daily: {}, updated_at: nowIso() }
+  return { totalCompleted: 0, daily: {}, updated_at: nowIso() }
 }
 function isServerEmptyError(e: unknown): boolean {
   const err = e as { code?: string | number }
@@ -37,6 +49,10 @@ function cacheKey(username: string): string {
 function etagKey(username: string): string {
   return `etag:${username}:stats`
 }
+/** 日期键 → 月份键（YYYY-MM）：addDelta 的 date 参数可指向任意历史日 */
+function monthOf(dateKey: string): string {
+  return dateKey.slice(0, 7)
+}
 export const useStatsStore = defineStore('stats', {
   state: () => ({
     stats: null as UserStats | null,
@@ -44,12 +60,8 @@ export const useStatsStore = defineStore('stats', {
   }),
   getters: {
     firstProjectAt: (s) => s.stats?.firstProjectAt ?? '',
-    /** 累计完成任务数量 = 所有按天净增量之和（只读展示，绝不由此回写） */
-    completedCount: (s) => {
-      let total = 0
-      for (const k in s.stats?.daily ?? {}) total += s.stats!.daily[k].v
-      return total
-    },
+    /** 累计完成任务数量：直接读 totalCompleted（O(1)，绝不遍历历史、绝不回写） */
+    completedCount: (s) => Number(s.stats?.totalCompleted) || 0,
   },
   actions: {
     async ensureLoaded() {
@@ -63,7 +75,10 @@ export const useStatsStore = defineStore('stats', {
       // 避免“先改后查”把内存中刚写入的 firstProjectAt/当日增量被旧远端值覆盖掉（时间/计数不可变约束）。
       const hasPending = statsSaveTimer !== undefined
       const cached = await idbGet<UserStats>('kv', cacheKey(auth.username))
-      if (cached && !hasPending) this.stats = cached
+      if (cached && !hasPending) {
+        // 本地缓存也统一规范化：旧版本缓存可能是按天结构
+        this.stats = migrateLegacyStats(cached).stats
+      }
       if (!auth.creds) {
         this.loaded = true
         return
@@ -84,17 +99,17 @@ export const useStatsStore = defineStore('stats', {
           lm ? { headers: { 'If-Modified-Since': lm } } : undefined,
         )
         if (res.res.status !== 304) {
-          const remote = JSON.parse(res.content.toString()) as UserStats
-          // 读盘即封口：老版本写出的明细旧日期在此一次压缩，内存/IDB 立即收缩；
-          // 若确实发生了封口，顺手 CAS 写回（幂等，成功后下次加载 changed=false 不再写）。
-          const sealed = sealOldDays(remote)
-          this.stats = sealed.stats ?? remote
+          const raw = JSON.parse(res.content.toString()) as unknown
+          // 读盘即规范化：旧版按天明细（含 tasks）在此一次性压缩成月键兼容结构；
+          // totalCompleted 缺失（旧端写回时丢字段）时由 migrateLegacyStats 从 Σv 重建，绝不归零。
+          const migrated = migrateLegacyStats(raw)
+          this.stats = migrated.stats
           await idbPut('kv', cacheKey(auth.username), this.stats)
           const newEtag = versionToken(res.res.headers as Record<string, unknown>, res.content) ?? ''
           if (newEtag) await idbPut('kv', eKey, newEtag)
           const newLm = lastModifiedOf(res.res.headers as Record<string, unknown>)
           if (newLm) await idbPut('kv', lmKey, newLm)
-          if (sealed.changed) void this.save(this.stats)
+          if (migrated.changed) void this.save(this.stats)
         }
       } catch (e) {
         const err = e as { code?: string | number; status?: number }
@@ -109,9 +124,8 @@ export const useStatsStore = defineStore('stats', {
     _persist() {
       const auth = useAuthStore()
       if (!this.stats) this.stats = emptyStats()
-      // 写盘前先把超过窗口的旧日期封口：内存与快照同步收缩，之后 save 里的封口是幂等空跑
-      const sealed = sealOldDays(this.stats)
-      if (sealed.stats) this.stats = sealed.stats
+      // 写盘前核对 totalCompleted 与 Σdaily：旧端可能只改了其中一个
+      reconcileStats(this.stats, monthOf(todayKey()), nowIso())
       this.stats.updated_at = nowIso()
       if (auth.username) {
         void idbPut('kv', cacheKey(auth.username), JSON.parse(JSON.stringify(this.stats)))
@@ -135,9 +149,10 @@ export const useStatsStore = defineStore('stats', {
       let knownEtag = await idbGet<string>('kv', eKey)
       try {
         for (let attempt = 0; attempt < 3; attempt++) {
-          // 每次 PUT 前封口（含冲突合并后的重试轮）：OSS 上永远不会出现超窗口的明细条目
-          const sealed = sealOldDays(stats)
-          stats = sealed.stats ?? stats
+          // 每次 PUT 前规范化（含冲突合并后的重试轮）：
+          // OSS 上永远不会出现旧的按天明细结构，也永远不会出现 Σv ≠ totalCompleted
+          stats = migrateLegacyStats(stats).stats
+          reconcileStats(stats, monthOf(todayKey()), nowIso())
           const result = await compareAndSwapPut<UserStats>(client, key, stats, knownEtag)
           if (result.ok) {
             if (result.etag) await idbPut('kv', eKey, result.etag)
@@ -145,6 +160,7 @@ export const useStatsStore = defineStore('stats', {
             await idbDel('kv', lmKeyOf(eKey))
             queueSyncChange(auth.username, 'stats')
             await idbPut('kv', cacheKey(auth.username), stats)
+            await idbPut('kv', lastOwnWriteKey(auth.username), stats.updated_at)
             if (snapshot && this.stats) {
               // 快照保存成功不代表内存没有变化：远端合并结果只回填到未再改动的当天，
               // 快照之后新产生的本地改动继续保留，交给下一次 save 的 CAS 合并
@@ -155,7 +171,9 @@ export const useStatsStore = defineStore('stats', {
             return
           }
           if (result.remote) {
-            stats = mergeStats(stats, result.remote as UserStats)
+            // 远端可能是旧版按天结构：合并前先规范化
+            const remote = migrateLegacyStats(result.remote).stats
+            stats = mergeStats(stats, remote)
             knownEtag = result.remoteEtag ?? undefined
             if (!snapshot) {
               this.stats = stats
@@ -184,27 +202,21 @@ export const useStatsStore = defineStore('stats', {
       this.stats.firstProjectAt = nowIso()
       this._persist()
     },
-    /** 记录一次完成(+1) 或取消完成(-1)：按当天净增量累计，绝不清零重算。
-     *  taskId 用于记录该任务当天最近状态，合并时避免已同步的计数再次相加。
-     *  date（东八区 YYYY-MM-DD）可指定计入哪一天（默认今天），用于补记历史重复日完成。
+    /** 记录一次完成(+1) 或取消完成(-1)：只做增量累加，绝不清零重算。
+     *  date（东八区 YYYY-MM-DD）可指定计入哪一天（默认今天），用于补记历史重复日完成；
+     *  内部按该日所属月份归入月键（YYYY-MM），不保存按天明细。
      *  首次调用前先加载 OSS，避免用空统计覆盖已有历史（时间/计数不可变约束）。 */
-    async addDelta(delta: number, taskId?: string, date?: string) {
+    async addDelta(delta: number, _taskId?: string, date?: string) {
       if (!delta) return
       if (!this.loaded) await this.load()
-      const key = date ?? todayKey()
+      const dayKey = date ?? todayKey()
+      const mk = monthOf(dayKey)
       if (!this.stats) this.stats = emptyStats()
       if (!this.stats.daily) this.stats.daily = {}
       const ts = nowIso()
-      const prev = this.stats.daily[key]
-      const cur = prev?.v ?? 0
-      // 封口日被再次写入（如重复任务补记历史日）时先「开封」：保留已定型计数与时间，再累加并补回明细；
-      // 开封后的条目会在下一次封口（该日仍超窗口）时重新压缩，不会让体积长期膨胀。
-      const entry: StatsDailyEntry = prev && !prev.sealed ? { ...prev } : { v: prev?.v ?? 0, ts: prev?.ts ?? ts }
-      if (taskId) {
-        entry.tasks = entry.tasks ?? {}
-        entry.tasks[taskId] = { v: delta > 0 ? 1 : 0, ts }
-      }
-      this.stats.daily[key] = { ...entry, v: cur + delta, ts }
+      const prev = this.stats.daily[mk]
+      this.stats.daily[mk] = { v: (prev?.v ?? 0) + delta, ts: ts > (prev?.ts ?? '') ? ts : prev?.ts ?? ts }
+      this.stats.totalCompleted = (Number(this.stats.totalCompleted) || 0) + delta
       this._persist()
     },
     /** 立即落盘未保存的统计变更（页面隐藏/登出前调用） */

@@ -1,7 +1,6 @@
 import type { OssClient } from '@/utils/oss'
 import { canonicalJson } from '@/utils/task'
-import { addDaysKey, todayKey } from '@/utils/time'
-import type { DeletedProject, Profile, Project, StatsDailyEntry, StatsTaskDelta, Task, UserStats } from '@/types'
+import type { DeletedProject, Profile, Project, StatsMonthEntry, Task, UserStats } from '@/types'
 
 /**
  * 多端同步冲突处理：对 OSS 对象做“比较并交换”(Compare-And-Swap) 写入。
@@ -343,111 +342,136 @@ function mergeDeletedProjects(local: DeletedProject[], remote: DeletedProject[])
   return [...byId.values()]
 }
 
-/** stats.json 封口保留窗口（天）：与墓碑日志 TOMBSTONE_RETENTION_DAYS 保持一致。
- *  超过窗口的旧日期压缩为 {v, ts, sealed:true}（丢弃逐任务明细、计数不变），
- *  文件体积从此有上限、写放大可控；封口日合并「取 ts 新者、不叠加」，杜绝多端重复计数。 */
-export const STATS_SEAL_DAYS = 180
-/** 封口算法：把「早于窗口」且仍带 tasks 明细的日期条目压成 {v, ts, sealed:true}。
- *  幂等、可反复执行；返回是否发生了封口（用于决定是否需要写回）。 */
-export function sealOldDays(stats: UserStats | null | undefined, windowDays: number = STATS_SEAL_DAYS): { stats: UserStats | null; changed: boolean } {
-  if (stats == null) return { stats: null, changed: false }
-  const cutoff = addDaysKey(todayKey(), -windowDays)
-  let changed = false
-  const daily = stats.daily ?? {}
-  for (const key of Object.keys(daily)) {
-    const entry = daily[key]
-    // 无明细的旧数据（legacy）不加封口标记：合并仍走「叠加存量」语义，保持迁移期行为不变
-    if (!entry || entry.sealed || entry.tasks == null) continue
-    if (key >= cutoff) continue
-    daily[key] = { v: entry.v, ts: entry.ts, sealed: true }
-    changed = true
-  }
-  return { stats, changed }
+/** 月份键正则：daily 的键若匹配它，说明已是月级兼容结构 `YYYY-MM` */
+const MONTH_KEY_RE = /^\d{4}-\d{2}$/
+/** 日期键正则：旧版按天结构 `YYYY-MM-DD`（需要迁移） */
+const DAY_KEY_RE = /^\d{4}-\d{2}-\d{2}$/
+
+/** 旧版按天结构（含 tasks 明细 / sealed 标记）的读取形状，仅迁移期使用 */
+interface LegacyStatsEntry {
+  v?: number
+  ts?: string
+  tasks?: Record<string, { v?: number; ts?: string }>
+  sealed?: boolean
+}
+interface LegacyStats {
+  firstProjectAt?: string
+  daily?: Record<string, LegacyStatsEntry>
+  updated_at?: string
 }
 
-/**
- * 合并用户统计（多端冲突时用）：
- * - firstProjectAt：取最早的非空值，绝不覆盖/绝不清零（一旦写入永不变更）；
- * - daily：同一天取两端增量之和（不同天的记录自然累加）；新写入的任务状态按任务 ID
- *   逐项合并，避免已同步过的累计值再次相加。绝不从任务列表重算。
- * - sealed（封口）日：计数已定型，取 ts 较新的一侧、不叠加（叠加会把同一批历史事件重复计数）。
- */
+/** Σ 月度兼容字段的 v（= 旧版客户端看到的“累计完成数”口径） */
+export function sumMonthly(daily: Record<string, StatsMonthEntry> | undefined): number {
+  let total = 0
+  for (const k in daily ?? {}) total += Number(daily![k]?.v) || 0
+  return total
+}
+
+/** 把任意格式的 stats 规范化成「月键兼容结构 + totalCompleted」（幂等，可反复执行）：
+ *  - 旧版按天条目（YYYY-MM-DD，可能带 tasks 明细）→ 按月份求和归并；
+ *  - 已是月键条目 → 直接并入；
+ *  - totalCompleted：优先取显式字段；缺失（旧版写回时丢字段）→ 回退为 Σv，绝不归零；
+ *  - 最后强制 Σv === totalCompleted（旧端可能只改了 daily 没改 totalCompleted）。
+ *  返回值`changed` 表示结构确实变化（调用方据此决定是否写回 OSS）。
+ *  ★ 防归零核心：旧端写回时会把 totalCompleted 字段丢掉，这里必须能从 daily 重建。 */
+export function migrateLegacyStats(input: unknown): {
+  stats: UserStats
+  changed: boolean
+  /** 是否包含旧版按天明细（需要重新落盘压缩） */
+  hadDayKeys: boolean
+} {
+  const src = (input ?? {}) as LegacyStats
+  const before = JSON.stringify(src)
+  const daily: Record<string, StatsMonthEntry> = {}
+  let hadDayKeys = false
+  for (const key of Object.keys(src.daily ?? {})) {
+    const entry = (src.daily ?? {})[key] ?? {}
+    const keyIsMonth = MONTH_KEY_RE.test(key)
+    if (!keyIsMonth && DAY_KEY_RE.test(key)) hadDayKeys = true
+    // 非法键（既不是 YYYY-MM 也不是 YYYY-MM-DD）直接跳过：它们不可能来自本产品
+    if (!keyIsMonth && !hadDayKeys) continue
+    const mk = keyIsMonth ? key : key.slice(0, 7)
+    const v = Number(entry.v) || 0
+    const ts = typeof entry.ts === 'string' ? entry.ts : ''
+    const prev = daily[mk]
+    if (!prev) daily[mk] = { v, ts }
+    else {
+      prev.v += v
+      if (ts > prev.ts) prev.ts = ts
+    }
+  }
+  const monthlySum = sumMonthly(daily)
+  const declared = (src as { totalCompleted?: unknown }).totalCompleted
+  const hasDeclared = typeof declared === 'number' && Number.isFinite(declared)
+  // 有显式值以它为准（它记录了“无法从 daily 推导”的历史），否则回退 Σv（防归零）
+  const totalCompleted = hasDeclared ? Math.round(declared) : monthlySum
+  const stats: UserStats = {
+    firstProjectAt: typeof src.firstProjectAt === 'string' && src.firstProjectAt ? src.firstProjectAt : undefined,
+    totalCompleted,
+    daily,
+    updated_at: typeof src.updated_at === 'string' && src.updated_at ? src.updated_at : new Date().toISOString(),
+  }
+  const changed = JSON.stringify(stats) !== before
+  return { stats, changed, hadDayKeys }
+}
+
+/** 核对并修复 totalCompleted 与 Σdaily 的一致性（旧端可能只改了一个）：
+ *  - 两者不一致时以 totalCompleted 为准修正 daily 的“差额”到当月（保留旧端写入的月度结构）；
+ *  - 返回修复后的 stats（原地修改并返回同一对象）。 */
+export function reconcileStats(stats: UserStats, monthKey: string, ts: string): UserStats {
+  const monthlySum = sumMonthly(stats.daily)
+  const diff = (Number(stats.totalCompleted) || 0) - monthlySum
+  if (diff !== 0) {
+    if (!stats.daily) stats.daily = {}
+    const cur = stats.daily[monthKey]
+    stats.daily[monthKey] = { v: (cur?.v ?? 0) + diff, ts: ts > (cur?.ts ?? '') ? ts : cur?.ts ?? ts }
+  }
+  return stats
+}
+
+/** 过渡期兼容字段清理：删除 daily（旧端已全部升级后才可调用）。
+ *  删除后旧版客户端会显示 0，因此只允许在确认无旧端写入后手动/自动触发。 */
+export function purgeCompatDaily(stats: UserStats): { stats: UserStats; changed: boolean } {
+  if (stats.daily == null) return { stats, changed: false }
+  const next: UserStats = {
+    firstProjectAt: stats.firstProjectAt,
+    totalCompleted: stats.totalCompleted,
+    updated_at: new Date().toISOString(),
+  }
+  return { stats: next, changed: true }
+}
+
+/** 合并用户统计（多端冲突时用）：
+ *  - firstProjectAt：取最早的非空值，绝不覆盖/绝不清零（一旦写入永不变更）；
+ *  - totalCompleted：取 max（远端为 OSS 权威值）。**绝不相加**——两端都可能是同一批事件的
+ *    不同快照，相加会把同一批历史重复计数；取 max 保证任何一端都不会把总数改小（防归零）；
+ *  - daily（过渡期）：按月份取 ts 较新的一侧，保证 Σv 与 totalCompleted 的口径一致。
+ *  绝不从任务列表重算。 */
 export function mergeStats(local: UserStats, remote: UserStats): UserStats {
-  const daily: Record<string, StatsDailyEntry> = {}
-  const allKeys = new Set([
-    ...Object.keys(local.daily ?? {}),
-    ...Object.keys(remote.daily ?? {}),
-  ])
+  const daily: Record<string, StatsMonthEntry> = {}
+  const allKeys = new Set([...Object.keys(local.daily ?? {}), ...Object.keys(remote.daily ?? {})])
   for (const k of allKeys) {
     const a = local.daily?.[k]
     const b = remote.daily?.[k]
-    if (!a) daily[k] = b
-    else if (!b) daily[k] = a
-    else {
-      const aSealed = a.sealed === true
-      const bSealed = b.sealed === true
-      if (aSealed || bSealed) {
-        // 封口日：取 ts 较新的一侧（更接近定型值），绝不叠加；
-        // 若较新的一侧仍带明细（他端封口后又补记历史日），保留明细，下一次封口时再压缩。
-        daily[k] = a.ts >= b.ts ? a : b
-        continue
-      }
-      const aHasTasks = a.tasks != null
-      const bHasTasks = b.tasks != null
-      const ts = a.ts > b.ts ? a.ts : b.ts
-      if (!aHasTasks && !bHasTasks) {
-        daily[k] = { v: a.v + b.v, ts }
-      } else {
-        const tasks: Record<string, StatsTaskDelta> = {}
-        for (const map of [a.tasks, b.tasks]) {
-          if (!map) continue
-          for (const [id, entry] of Object.entries(map)) {
-            const cur = tasks[id]
-            if (!cur || compareTime(entry.ts, cur.ts) > 0) tasks[id] = { ...entry }
-          }
-        }
-        let v = 0
-        for (const entry of Object.values(tasks)) v += entry.v
-        // 旧数据没有逐任务记录时，把整条净增量当作独立的存量计入，避免迁移后丢数
-        if (!aHasTasks) v += a.v
-        if (!bHasTasks) v += b.v
-        daily[k] = { v, ts, tasks }
-      }
-    }
+    if (!a) daily[k] = { ...b! }
+    else if (!b) daily[k] = { ...a }
+    else daily[k] = a.ts >= b.ts ? { ...a } : { ...b }
   }
-  const candidates = [local.firstProjectAt, remote.firstProjectAt].filter(
-    (v): v is string => !!v,
-  )
+  const candidates = [local.firstProjectAt, remote.firstProjectAt].filter((v): v is string => !!v)
   candidates.sort((a, b) => (a < b ? -1 : 1))
   return {
     firstProjectAt: candidates[0] ?? undefined,
+    totalCompleted: Math.max(Number(local.totalCompleted) || 0, Number(remote.totalCompleted) || 0),
     daily,
     updated_at: new Date().toISOString(),
   }
 }
 
 /**
- * 快照保存完成后把合并结果回填内存：
- * - 远端新增的日期直接并入；
- * - 当天没有比快照更新的本地改动时，用合并后的条目替换，界面立即看到远端增量；
- * - 当天在快照之后又改过则保留内存版，避免覆盖新改动，下一次 save 的 CAS 再合并远端。
- */
-export function mergeStatsAfterSave(current: UserStats, saved: UserStats, snapshot: UserStats): UserStats {
-  const daily: Record<string, StatsDailyEntry> = { ...current.daily }
-  for (const [key, savedEntry] of Object.entries(saved.daily ?? {})) {
-    const currentEntry = current.daily?.[key]
-    const snapshotEntry = snapshot.daily?.[key]
-    if (!currentEntry) {
-      daily[key] = savedEntry
-    } else if (snapshotEntry && JSON.stringify(currentEntry) === JSON.stringify(snapshotEntry)) {
-      daily[key] = savedEntry
-    }
-  }
-  return {
-    firstProjectAt: current.firstProjectAt ?? saved.firstProjectAt,
-    daily,
-    updated_at: new Date().toISOString(),
-  }
+ * 快照保存完成后把合并结果回填内存（仅保留 firstProjectAt 的“不丢最早”语义；
+ * totalCompleted/daily 以保存成功的合并结果为准，因为合并只可能变大不会回退）。 */
+export function mergeStatsAfterSave(_current: UserStats, saved: UserStats, _snapshot: UserStats): UserStats {
+  return mergeStats(saved, _current)
 }
 
 /** 合并 profile：项目列表按 id 合并，updated_at 更新为最新 */

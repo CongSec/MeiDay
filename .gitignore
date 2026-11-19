@@ -131,6 +131,8 @@ frontend/apk/
 _tmp_pw/
 seed_real.py
 verify_real.py
+# 脚本打包产物（frontend/scripts 下 esbuild 生成的 *.out.mjs，不进仓库）
+*.out.mjs
 
 # ===== Playwright MCP 调试日志 =====
 .playwright-mcp/

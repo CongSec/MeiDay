@@ -1,6 +1,6 @@
 import type { OssClient } from '@/utils/oss'
 import { canonicalJson } from '@/utils/task'
-import type { DeletedProject, Profile, Project, StatsDailyEntry, StatsTaskDelta, Task, UserStats } from '@/types'
+import type { DeletedProject, Profile, Project, StatsMonthEntry, Task, UserStats } from '@/types'
 
 /**
  * 多端同步冲突处理：对 OSS 对象做“比较并交换”(Compare-And-Swap) 写入。
@@ -316,88 +316,36 @@ function mergeDeletedProjects(local: DeletedProject[], remote: DeletedProject[])
 }
 
 /**
- * 合并用户统计（多端冲突时用）：
- * - firstProjectAt：取最早的非空值，绝不覆盖/绝不清零（一旦写入永不变更）；
- * - daily：同一天取两端增量之和（不同天的记录自然累加）；新写入的任务状态按任务 ID
- *   逐项合并，避免已同步过的累计值再次相加。绝不从任务列表重算。
- * - sealed（封口）日：计数已定型，取 ts 较新的一侧、不叠加（叠加会把同一批历史事件重复计数）。
+ * 合并用户统计（多端冲突时用，与前端 stores/stats.ts 的语义保持一致）：
+ * - firstProjectAt：取最早的非空值，绝不覆盖/绝不清零；
+ * - totalCompleted：取 max（远端为 OSS 权威值），**绝不相加**——两端可能是同一批事件的
+ *   不同快照，相加会把历史重复计数；取 max 保证不会把总数改小（防归零）；
+ * - daily（过渡期月键）：按月取 ts 较新的一侧。
+ * 小组件是只读端，此函数仅供类型完整性与潜在复用，不参与写盘。
  */
 export function mergeStats(local: UserStats, remote: UserStats): UserStats {
-  const daily: Record<string, StatsDailyEntry> = {}
-  const allKeys = new Set([
-    ...Object.keys(local.daily ?? {}),
-    ...Object.keys(remote.daily ?? {}),
-  ])
+  const daily: Record<string, StatsMonthEntry> = {}
+  const allKeys = new Set([...Object.keys(local.daily ?? {}), ...Object.keys(remote.daily ?? {})])
   for (const k of allKeys) {
     const a = local.daily?.[k]
     const b = remote.daily?.[k]
-    if (!a) daily[k] = b
-    else if (!b) daily[k] = a
-    else {
-      const aSealed = a.sealed === true
-      const bSealed = b.sealed === true
-      if (aSealed || bSealed) {
-        // 封口日：取 ts 较新的一侧（更接近定型值），绝不叠加；
-        // 若较新的一侧仍带明细（他端封口后又补记历史日），保留明细，下一次封口时再压缩。
-        daily[k] = a.ts >= b.ts ? a : b
-        continue
-      }
-      const aHasTasks = a.tasks != null
-      const bHasTasks = b.tasks != null
-      const ts = a.ts > b.ts ? a.ts : b.ts
-      if (!aHasTasks && !bHasTasks) {
-        daily[k] = { v: a.v + b.v, ts }
-      } else {
-        const tasks: Record<string, StatsTaskDelta> = {}
-        for (const map of [a.tasks, b.tasks]) {
-          if (!map) continue
-          for (const [id, entry] of Object.entries(map)) {
-            const cur = tasks[id]
-            if (!cur || compareTime(entry.ts, cur.ts) > 0) tasks[id] = { ...entry }
-          }
-        }
-        let v = 0
-        for (const entry of Object.values(tasks)) v += entry.v
-        // 旧数据没有逐任务记录时，把整条净增量当作独立的存量计入，避免迁移后丢数
-        if (!aHasTasks) v += a.v
-        if (!bHasTasks) v += b.v
-        daily[k] = { v, ts, tasks }
-      }
-    }
+    if (!a) daily[k] = { ...b! }
+    else if (!b) daily[k] = { ...a }
+    else daily[k] = a.ts >= b.ts ? { ...a } : { ...b }
   }
-  const candidates = [local.firstProjectAt, remote.firstProjectAt].filter(
-    (v): v is string => !!v,
-  )
+  const candidates = [local.firstProjectAt, remote.firstProjectAt].filter((v): v is string => !!v)
   candidates.sort((a, b) => (a < b ? -1 : 1))
   return {
     firstProjectAt: candidates[0] ?? undefined,
+    totalCompleted: Math.max(Number(local.totalCompleted) || 0, Number(remote.totalCompleted) || 0),
     daily,
     updated_at: new Date().toISOString(),
   }
 }
 
-/**
- * 快照保存完成后把合并结果回填内存：
- * - 远端新增的日期直接并入；
- * - 当天没有比快照更新的本地改动时，用合并后的条目替换，界面立即看到远端增量；
- * - 当天在快照之后又改过则保留内存版，避免覆盖新改动，下一次 save 的 CAS 再合并远端。
- */
-export function mergeStatsAfterSave(current: UserStats, saved: UserStats, snapshot: UserStats): UserStats {
-  const daily: Record<string, StatsDailyEntry> = { ...current.daily }
-  for (const [key, savedEntry] of Object.entries(saved.daily ?? {})) {
-    const currentEntry = current.daily?.[key]
-    const snapshotEntry = snapshot.daily?.[key]
-    if (!currentEntry) {
-      daily[key] = savedEntry
-    } else if (snapshotEntry && JSON.stringify(currentEntry) === JSON.stringify(snapshotEntry)) {
-      daily[key] = savedEntry
-    }
-  }
-  return {
-    firstProjectAt: current.firstProjectAt ?? saved.firstProjectAt,
-    daily,
-    updated_at: new Date().toISOString(),
-  }
+/** 保存后回填：小组件只读，语义同前端（取合并结果，firstProjectAt 保留最早） */
+export function mergeStatsAfterSave(_current: UserStats, saved: UserStats, _snapshot: UserStats): UserStats {
+  return mergeStats(saved, _current)
 }
 
 /** 合并 profile：项目列表按 id 合并，updated_at 更新为最新 */

@@ -28,11 +28,15 @@ export const useStatsStore = defineStore('stats', {
   }),
   getters: {
     firstProjectAt: (s) => s.stats?.firstProjectAt ?? '',
-    /** 累计完成任务数量 = 所有按天净增量之和（只读展示，绝不由此回写） */
+    /** 累计完成任务数量：优先读 totalCompleted（O(1)）；旧文件无该字段时回退 Σdaily。
+     *  只读展示，绝不由此回写。 */
     completedCount: (s) => {
-      let total = 0
-      for (const k in s.stats?.daily ?? {}) total += s.stats!.daily[k].v
-      return total
+      const total = Number(s.stats?.totalCompleted)
+      if (Number.isFinite(total)) return total
+      let sum = 0
+      const daily = s.stats?.daily ?? {}
+      for (const k in daily) sum += Number(daily[k]?.v) || 0
+      return sum
     },
   },
   actions: {

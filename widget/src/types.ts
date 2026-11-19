@@ -101,35 +101,28 @@ export interface Profile {
   updated_at: string
 }
 
-/** 单任务当天完成/取消状态：v=1 表示当前已完成，v=0 表示当天已取消完成 */
-export interface StatsTaskDelta {
-  v: 0 | 1
-  ts: string
-}
-
-/** 单日净增记录：v 为当天“完成(+1)/取消完成(-1)”净增量，ts 为该日最后一次写入时间戳 */
-export interface StatsDailyEntry {
+/** 单月净增记录（过渡期兼容字段用）：v 为该月“完成(+1)/取消完成(-1)”净增量 */
+export interface StatsMonthEntry {
   v: number
   ts: string
-  /** 多端合并用的逐任务状态，key 为任务 id；旧数据可能缺失 */
-  tasks?: Record<string, StatsTaskDelta>
-  /** 封口标记：超过保留窗口的旧日期被压缩（丢弃 tasks 明细），v 为已定型的净增量。
-   *  mergeStats 对封口日“取 ts 新者、不叠加”，防止多端把同一批历史事件重复计数。 */
-  sealed?: boolean
 }
 
 /**
  * 用户统计（全部存于用户 OSS，不上服务器）：
  * - firstProjectAt：首次创建项目时间，一旦写入永不可修改、绝不回填重算；
- * - daily：按天净增量累计，当前累计完成任务数 = 所有 v 之和；
- *   tasks 记录当天各任务的最近完成/取消状态，用于多端合并去重。
+ * - totalCompleted：累计完成任务数（真值，O(1) 读取，文件体积恒定）；
+ * - daily：过渡期兼容字段（仅月键 YYYY-MM → { v, ts }），Σv 恒等于 totalCompleted；
+ *   新端清理后该字段消失，此时只能读 totalCompleted。
+ * 兼容旧文件：旧版按天结构（含 tasks 明细）需由 migrateLegacyStats 转换。
  * 注意：禁止任何“清零/从任务列表重算”的逻辑，只能做增量维护。
  */
 export interface UserStats {
   /** 首次创建项目时间（东八区 ISO），一旦写入不再修改 */
   firstProjectAt?: string
-  /** 按天净增量：{ '2026-08-21': { v: 2, ts: '2026-08-21T...', tasks } } */
-  daily: Record<string, StatsDailyEntry>
+  /** 累计完成任务数 */
+  totalCompleted?: number
+  /** 兼容旧版客户端/旧文件的月度净增量；可能是旧结构（按天），解析时需规范化 */
+  daily?: Record<string, StatsMonthEntry>
   updated_at: string
 }
 
