@@ -56,8 +56,15 @@ async function fullSync(): Promise<boolean> {
   await projects.flushProfile()
   await projects.load()
   await stats.load()
-  // 今日任务跨项目顺序表：独立小文件，随全量同步一并刷新
-  await tasks.loadTodayOrder()
+  // 今日任务跨项目顺序表：独立小文件，随全量同步一并刷新。
+  // loadTodayOrder 出错会抛出（不再静默吞）：此时不推进游标、下一轮重试，
+  // 避免「today_order 变更被消费但内容没拉到 → 本端顺序永久陈旧」。
+  try {
+    await tasks.loadTodayOrder()
+  } catch (e) {
+    console.error('全量同步：今日顺序加载失败（不推进游标，下轮重试）', e)
+    return false
+  }
   const projectIds = [...projects.projects.map((p) => p.id)]
   // 本地缓存不完整（全新设备/首登/缓存被清）时无法判断哪些项目今日有任务：
   // 必须全量同步所有项目，否则即使服务端要求全量，今日视图/侧栏角标仍是空的，
@@ -162,6 +169,9 @@ async function pollOnce(): Promise<boolean> {
     //      随轮询自动重试，避免"设了提醒却因一次请求失败永久缺失"
     const tasks = useTasksStore()
     await tasks.flushReminderSyncIfPending()
+    // 1.6) 今日顺序表补传：拖拽/对账写云失败（缺凭证、网络抖动、CAS 连撞）时本地已标 dirty，
+    //      这里每轮自动重试一次，成功后清脏标记——避免「本地是新手动顺序、云端还是旧值」长期不一致
+    if (tasks.todayOrderDirty) void tasks.saveTodayOrderNow()
     // 只用于"按 id 精确排除本端刚上报的事件"。**绝不能**用服务端返回的 version(MAX(id))
     // 抬高本地游标：那会连带跳过 (本地游标, MAX] 区间内其它设备刚产生、本端尚未拉取的
     // 事件，而它们已被视为"已消费"，后端不会再补发 → 该端永久陈旧。
@@ -191,7 +201,13 @@ async function pollOnce(): Promise<boolean> {
       const projects = useProjectsStore()
       const tasks = useTasksStore()
       await tasks.loadAllProgressive([...projects.projects.map((p) => p.id)])
-      await tasks.loadTodayOrder()
+      // 顺序表同样必须拿到权威值：失败则不推进游标（下轮重试），否则本端顺序会永久陈旧
+      try {
+        await tasks.loadTodayOrder()
+      } catch (e) {
+        console.error('新设备首同步：今日顺序加载失败（不推进游标，下轮重试）', e)
+        return false
+      }
       cursor = state.version
     }
     // 3) 只有全部拉取成功才推进本地版本游标；失败则不推进，下一轮重试失败资源

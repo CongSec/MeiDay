@@ -280,8 +280,12 @@ async function bootstrap() {
   await projects.load()
   // 恢复全部真实项目缓存，侧栏角标/今日计数在进入今日视图前也准确
   await tasks.loadFromIdb([...projects.projects.map((p) => p.id)])
-  // 今日任务跨项目顺序表：先从本地缓存恢复（不访问 OSS），再交由同步轮询刷新
-  await tasks.loadTodayOrder()
+  // 今日任务跨项目顺序表：先恢复本地缓存（保住手动拖拽位置），再条件 GET OSS 合并。
+  // 失败不再中断启动：保持本地手动顺序（todayOrderLoaded 由 loadTodayOrder 内部置位），
+  // 由同步轮询重试（轮询会因失败不推进游标，下轮重拉）。
+  await tasks.loadTodayOrder().catch((e) => {
+    console.warn('启动时加载今日顺序失败（保留本地顺序，等待轮询重试）', e)
+  })
   // 登录/自动解锁完成后启动同步协调轮询（幂等）。首轮 pollOnce 立即执行，
   // 会把未读公告一并带回（已合并进 /api/sync/state），经 st:announcements 事件弹窗。
   startSyncPoll()

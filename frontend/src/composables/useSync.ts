@@ -40,8 +40,16 @@ export function useSync() {
       await projects.load()
       // 统计文件一并从 OSS 同步（只读展示，不参与任务合并）
       await stats.load()
-      // 今日任务跨项目顺序表随手动刷新一并同步
-      await tasks.loadTodayOrder()
+      // 今日任务跨项目顺序表随手动刷新一并同步。
+      // 失败不阻断整体刷新（保留本地手动顺序），并由 fallback 让最终对账保持门闩，
+      // 避免基于过期顺序做补登记写回。
+      let todayOrderOk = true
+      try {
+        await tasks.loadTodayOrder()
+      } catch (e) {
+        todayOrderOk = false
+        console.warn('手动刷新：今日顺序加载失败（保留本地顺序）', e)
+      }
       const projectIds = [...projects.projects.map((p) => p.id)]
       // 本地缓存不完整（全新设备/首登）时无法判断哪些项目今日有任务：全量同步所有项目，
       // 否则手动刷新也拉不到未打开项目的任务（今日视图/项目列表一直为空）。
@@ -63,8 +71,10 @@ export function useSync() {
         ? projectIds
         : [...new Set([...todayIds, ...viewIds])]
       const failed = await tasks.syncAll(target)
-      // F0/F1：全部项目拉取成功 = 追平完成 → 最终对账 + 收敛被延迟的自动写回
-      if (failed === 0) await tasks.finalizeSyncCatchUp()
+      // F0/F1：全部项目拉取成功 = 追平完成 → 最终对账 + 收敛被延迟的自动写回。
+      // 今日顺序没成功拿到权威值时同样不算追平（否则会用过期顺序补登记覆盖手动位置），
+      // 保持追平门闩由下一轮轮询重试。
+      if (failed === 0 && todayOrderOk) await tasks.finalizeSyncCatchUp()
       if (failed > 0) {
         ui.toast(`同步完成，${failed} 个项目同步失败`, 'error')
       } else if (!silent) {
