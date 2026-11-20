@@ -43,8 +43,8 @@ function buildTask(item: { title: string; content: string; start_time: string },
     name: (item.title || '').trim() || '【MeiDay 通知】',
     description: item.content || '',
     startTime: start,
-    // 未指定结束时间：与界面新建任务一致，结束时间默认取开始时间
-    endTime: start,
+    // 远程任务不设截止时间：结束时间留空（空串表示未设置，与新建子任务一致）
+    endTime: '',
     reminderTime: null,
     projectId,
     status: 'pending',
