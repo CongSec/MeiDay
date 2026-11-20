@@ -40,6 +40,22 @@ def _get_prefs(username: str) -> dict:
     }
 
 
+def make_rcpt(smtp: dict | None) -> str:
+    """实际收件邮箱：配了收件邮箱就用它，留空则回落到发件邮箱；两者都空则返回空串（无法发信）。"""
+    if not smtp:
+        return ""
+    return (smtp.get("notify_email") or "").strip() or (smtp.get("smtp_user") or "").strip()
+
+
+def smtp_ready(smtp: dict | None) -> bool:
+    """能否发信：发件邮箱、授权码至少有值，且能确定收件人（收件邮箱为空时用发件邮箱）。"""
+    if not smtp:
+        return False
+    return bool((smtp.get("smtp_user") or "").strip()
+                and (smtp.get("smtp_pass") or "").strip()
+                and make_rcpt(smtp))
+
+
 def _get_smtp(username: str) -> dict | None:
     with get_conn() as conn:
         row = conn.execute(
@@ -61,7 +77,9 @@ async def notify_security_event(username: str, kind: str, ip: str = "") -> None:
         if not prefs.get(kind, True):
             return
         cred = _get_smtp(username)
-        if not cred or not cred.get("notify_email"):
+        rcpt = make_rcpt(cred)
+        # 发件邮箱/授权码缺失或连收件人都无法确定 → 发不出去，直接跳过（不影响业务请求）
+        if not smtp_ready(cred):
             return
         key = (username, kind)
         now = time.monotonic()
@@ -77,10 +95,10 @@ async def notify_security_event(username: str, kind: str, ip: str = "") -> None:
             return
         _last_sent[key] = now
         await send_security_email(
-            cred["smtp_user"], cred["smtp_pass"], cred["notify_email"],
+            cred["smtp_user"], cred["smtp_pass"], rcpt,
             kind, ip or "未知IP",
         )
-        log_action("email_send", username=username, detail=f"安全通知[{kind}] 收件 {cred['notify_email']}；来源IP {ip or '-'}")
+        log_action("email_send", username=username, detail=f"安全通知[{kind}] 收件 {rcpt}；来源IP {ip or '-'}")
     except Exception as exc:  # 邮件发送失败不影响业务
         log_action(
             "email_fail", username=username,
@@ -99,13 +117,15 @@ async def notify_cred_change_email(username: str, old_smtp: dict, ip: str = "") 
     - 发送成功/失败均写审计日志，不暴露密钥明文。
     """
     try:
-        if not old_smtp or not old_smtp.get("notify_email"):
+        rcpt = make_rcpt(old_smtp)
+        # 旧配置缺少发件邮箱/授权码，或连收件人都无法确定 → 发不出去，直接跳过
+        if not smtp_ready(old_smtp):
             return
         await send_security_email(
-            old_smtp["smtp_user"], old_smtp["smtp_pass"], old_smtp["notify_email"],
+            old_smtp["smtp_user"], old_smtp["smtp_pass"], rcpt,
             "cred_change", ip or "未知IP",
         )
-        log_action("email_send", username=username, detail=f"安全通知[cred_change] 收件 {old_smtp['notify_email']}；来源IP {ip or '-'}")
+        log_action("email_send", username=username, detail=f"安全通知[cred_change] 收件 {rcpt}；来源IP {ip or '-'}")
     except Exception as exc:
         log_action("email_fail", username=username, detail=f"安全通知[cred_change] 发送失败：{exc}")
         logger.warning("发送临终安全邮件失败 username=%s: %s", username, exc)

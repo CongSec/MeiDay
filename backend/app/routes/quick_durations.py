@@ -31,7 +31,9 @@ def _load_durations(username: str) -> list:
 
     - settings 表没有该账号的 key → 返回内置默认 [10, 30, 60]；
     - 已保存过但值为空数组 → 返回空数组（用户清空后不回退默认）；
-    - 存储值损坏（非列表 / 含非法条目）→ 防御性回退内置默认。
+    - 存储值里【个别】条目非法 / 类型损坏 → 只丢掉这些条目，保留其余合法值，
+      绝不再因为一条脏数据就把用户整个设置重置成默认；
+    - 整个值不是列表（结构彻底损坏，无法判断用户原本选了什么）→ 才回退内置默认。
     """
     with get_conn() as conn:
         row = conn.execute(
@@ -41,20 +43,23 @@ def _load_durations(username: str) -> list:
         return DEFAULT_QUICK_DURATIONS
     try:
         data = json.loads(row["value"])
-        if not isinstance(data, list):
-            return DEFAULT_QUICK_DURATIONS
-        out = []
-        for item in data:
-            # 只接受真正的整数（拒绝浮点/字符串截断，避免 30.5 被静默吞成 30）
-            if not isinstance(item, int) or isinstance(item, bool):
-                return DEFAULT_QUICK_DURATIONS
-            if not (QUICK_DURATION_MIN <= item <= QUICK_DURATION_MAX):
-                return DEFAULT_QUICK_DURATIONS
-            out.append(item)
-        return sorted(set(out))
     except Exception:
         logger.exception("读取快捷时长设置失败")
         return DEFAULT_QUICK_DURATIONS
+    if not isinstance(data, list):
+        # 结构损坏：没有可保留的条目，回退默认
+        return DEFAULT_QUICK_DURATIONS
+    out = []
+    for item in data:
+        # 只接受真正的整数（拒绝浮点/字符串/布尔，避免 30.5 被静默吞成 30 或 True 被当成 1）
+        if not isinstance(item, int) or isinstance(item, bool):
+            logger.warning("忽略非法的快捷时长条目 username=%s value=%r", username, item)
+            continue
+        if not (QUICK_DURATION_MIN <= item <= QUICK_DURATION_MAX):
+            logger.warning("忽略越界的快捷时长条目 username=%s value=%r", username, item)
+            continue
+        out.append(item)
+    return sorted(set(out))
 
 
 @router.get("/quick-durations", response_model=QuickDurations)

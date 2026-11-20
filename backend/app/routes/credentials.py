@@ -11,7 +11,7 @@ from ..audit import client_ip, log_action
 from ..auth import get_username
 from ..db import get_conn
 from ..schemas import CredentialsRequest, OssCheckRequest, RemindersSyncRequest
-from ..services.notifier import notify_cred_change_email
+from ..services.notifier import notify_cred_change_email, smtp_ready
 from ..services.repeat_calendar import add_days, compute_next_reminder, diff_days_key
 
 router = APIRouter(prefix="/api", tags=["credentials"])
@@ -97,33 +97,32 @@ def update_credentials(
             (body.encrypted_creds, now, username),
         )
         if body.smtp_plain is not None:
-            # 发件邮箱 / SMTP 授权码 / 收件邮箱均允许为空：三项全空 = 未配置邮件，
-            # 删除旧配置（不再发提醒/安全通知），避免残留旧邮箱继续发信；
-            # 全部非空才落库；任一项为空视为未配置（全有或全无，避免存出残缺配置）。
+            # 发件邮箱 / SMTP 授权码 / 收件邮箱均允许留空（设置页文案就是“可留空”），
+            # 留空时【原样保存空值】，绝不删除 smtp_creds 整行：
+            #   - 该行还承载 callback_id（消息通知回调开关），删行会连带把用户的回调设置清掉；
+            #   - 是否真能发信由发送时的取值规则决定：收件邮箱留空 → 用发件邮箱；
+            #     发件邮箱/授权码缺一 → 发不出去，按失败处理即可，不在这里拦、也不吞掉用户配置。
             smtp = body.smtp_plain
-            if smtp.smtp_user and smtp.smtp_pass and smtp.notify_email:
-                conn.execute(
-                    """
-                    INSERT INTO smtp_creds (username, smtp_user, smtp_pass, notify_email, updated_at)
-                    VALUES (?,?,?,?,?)
-                    ON CONFLICT(username) DO UPDATE SET
-                        smtp_user=excluded.smtp_user,
-                        smtp_pass=excluded.smtp_pass,
-                        notify_email=excluded.notify_email,
-                        updated_at=excluded.updated_at
-                    """,
-                    (username, smtp.smtp_user, smtp.smtp_pass, smtp.notify_email, now),
-                )
-            else:
-                conn.execute("DELETE FROM smtp_creds WHERE username=?", (username,))
-    if old_smtp and old_smtp.get("notify_email"):
+            conn.execute(
+                """
+                INSERT INTO smtp_creds (username, smtp_user, smtp_pass, notify_email, updated_at)
+                VALUES (?,?,?,?,?)
+                ON CONFLICT(username) DO UPDATE SET
+                    smtp_user=excluded.smtp_user,
+                    smtp_pass=excluded.smtp_pass,
+                    notify_email=excluded.notify_email,
+                    updated_at=excluded.updated_at
+                """,
+                (username, smtp.smtp_user, smtp.smtp_pass, smtp.notify_email, now),
+            )
+    if old_smtp and smtp_ready(old_smtp):
         # 用修改前的旧 SMTP 配置发“临终”邮件（响应后异步发送，不影响保存响应速度）
         background_tasks.add_task(notify_cred_change_email, username, old_smtp, ip)
     else:
-        # 首次配置：没有旧发件邮箱可用来发通知，不阻断保存，仅记录审计日志
+        # 首次配置（或旧配置缺发件邮箱/授权码）：没有可用凭据发通知，不阻断保存，仅记录审计日志
         log_action(
             "email_suppressed", username=username,
-            detail="加密保存：尚未配置发件邮箱，本次无法发送安全通知邮件",
+            detail="加密保存：旧配置缺少发件邮箱/授权码，本次无法发送安全通知邮件",
         )
     return {"ok": True}
 

@@ -34,6 +34,7 @@ from ..audit import client_ip, log_action
 from ..auth import get_username
 from ..db import get_conn
 from ..services.mailer import send_callback_email, send_callback_error_email
+from ..services.notifier import make_rcpt
 
 router = APIRouter(prefix="/api", tags=["callback"])
 
@@ -197,12 +198,13 @@ async def _echo_error(
     method: str,
     path: str,
 ) -> None:
-    """报错回显：把失败原因发往账号配置的收件邮箱；回显本身失败仅记日志。"""
+    """报错回显：把失败原因发往账号配置的收件邮箱（收件邮箱留空则回落发件邮箱）；回显本身失败仅记日志。"""
+    rcpt = make_rcpt(cred)
     try:
         await send_callback_error_email(
             cred["smtp_user"],
             cred["smtp_pass"],
-            cred["notify_email"],
+            rcpt,
             title=title,
             content=content,
             target=target,
@@ -212,7 +214,7 @@ async def _echo_error(
         log_action(
             "email_send", username=username, method=method, path=path, status=200,
             ip=ip,
-            detail=f"回调报错回显 收件 {cred['notify_email']}：{reason[:120]}；邮件标题：{_clip(title,200)}；正文预览：{_clip(content,300)}",
+            detail=f"回调报错回显 收件 {rcpt}：{reason[:120]}；邮件标题：{_clip(title,200)}；正文预览：{_clip(content,300)}",
         )
     except Exception as exc:
         log_action(
@@ -284,11 +286,13 @@ async def _handle_callback_impl(
             ip=ip, detail=detail,
         )
 
-    if not (cred["smtp_user"] and cred["smtp_pass"] and cred["notify_email"]):
-        _log_trigger(400, f"该账号未配置邮件发送（未发信）；{raw}")
+    if not (cred["smtp_user"] and cred["smtp_pass"] and make_rcpt(cred)):
+        # 收件邮箱留空时不拦：发送时回落到发件邮箱。只有“发件邮箱/授权码缺失”、
+        # 或连收件人都无法确定（发件邮箱也为空）时才发不出去，直接返回明确原因。
+        _log_trigger(400, f"该账号未配置可用的发件邮箱/授权码（未发信）；{raw}")
         return JSONResponse(
             status_code=400,
-            content={"ok": False, "detail": "该账号未配置邮件发送（请先在设置页配置发件邮箱/授权码/收件邮箱）"},
+            content={"ok": False, "detail": "该账号未配置可用的发件邮箱或授权码，无法发送（请在设置页填写发件邮箱与 SMTP 授权码）"},
         )
 
     target = (dst or "").strip()
@@ -302,7 +306,8 @@ async def _handle_callback_impl(
         )
         return JSONResponse(status_code=400, content={"ok": False, "detail": "dst 邮箱格式不正确"})
 
-    to = target or cred["notify_email"]
+    # 收件人：dst 优先 → 收件邮箱 → 发件邮箱（收件邮箱留空时）
+    to = target or make_rcpt(cred)
     try:
         await send_callback_email(cred["smtp_user"], cred["smtp_pass"], to, title, content)
     except Exception as exc:

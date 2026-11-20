@@ -281,9 +281,9 @@ async function testOss() {
 
 async function save() {
   err.value = ''
-  // 收件邮箱默认同发件邮箱：必须在提交之前补默认，避免空 notifyEmail 时后端收到空收件人
-  if (!form.notifyEmail) form.notifyEmail = form.smtpUser
-  // 发件邮箱 / SMTP 授权码 / 收件邮箱为可选项（optional），留空 = 不配置邮件
+  // 收件邮箱允许留空：留空按“与发件邮箱相同”处理，真正按发件邮箱发信，
+  // 这里不再把发件邮箱填进收件邮箱输入框（避免用户看到自己没填的值）。
+  // 发件邮箱 / SMTP 授权码 / 收件邮箱均为可选项（optional），留空就原样保存，不会删除配置
   const missing = FIELDS.filter((f) => !f.optional && !form[f.key].trim())
   if (missing.length) {
     err.value = `请填写：${missing.map((f) => f.label).join('、')}`

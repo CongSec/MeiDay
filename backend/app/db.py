@@ -146,6 +146,19 @@ CREATE TABLE IF NOT EXISTS announcements (
 );
 -- 提醒 worker 每 60 秒轮询未发送提醒（is_reminded=0）：联合索引避免大表全表扫描
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(is_reminded, reminder_time);
+-- 提醒发信失败进度（跨重启持久化）：同一提醒连续失败达到上限后不再重试。
+-- 只存“失败次数 / 已停止重试”这类运行时进度，属于后台任务的保护状态而非用户设置；
+-- 发送成功或提醒行消失后由 reminder_worker 删除对应行，避免无限增长。
+CREATE TABLE IF NOT EXISTS reminder_failures (
+    username TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    subtask_id TEXT NOT NULL DEFAULT '',
+    reminder_time TEXT NOT NULL,
+    fail_count INTEGER NOT NULL DEFAULT 0,
+    suppressed INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (username, task_id, subtask_id, reminder_time)
+);
 CREATE INDEX IF NOT EXISTS idx_sync_changes_user ON sync_changes(username, id);
 """
 
@@ -327,14 +340,13 @@ def init_db() -> None:
         _migrate_notify_prefs_diary(conn)
         _migrate_smtp_callback_id(conn)
         _migrate_users_last_seen(conn)
-        # 消息通知回调默认关闭：升级后清空存量账号已生成的回调 ID（幂等，二次启动为 no-op）。
-        # 外部凭旧 ID 的调用将全部失效，需用户在设置页手动「开启」重新生成新 ID。
-        conn.execute(
-            "UPDATE smtp_creds SET callback_id=NULL "
-            "WHERE callback_id IS NOT NULL AND callback_id != ''"
-        )
-        # 登录成功通知默认开启、查看密钥通知不可关闭：强制存量行也置为开启
-        conn.execute("UPDATE notify_prefs SET login_success=1, key_view=1")
+        # 注意：这里【不允许】再写任何“无条件覆盖用户设置”的语句。
+        # 曾经有两行：
+        #   1) UPDATE smtp_creds SET callback_id=NULL ...   → 每次重启都把所有人的消息通知回调关掉；
+        #   2) UPDATE notify_prefs SET login_success=1 ...  → 每次重启都把用户关掉的登录成功提醒重新打开。
+        # 两者都会让后端重启改变用户自己在系统里做的设置，已移除。
+        # 开关的默认值由建表默认值（notify_prefs 各列 DEFAULT 1）+ 用户操作决定，启动一律不介入。
+        # 如需“升级后一次性改某设置”，必须用 user_version 之类的一次性迁移，且不得在常规启动时执行。
         # 清理已删除用户遗留的孤儿提醒数据（可能来自外键关闭时期写入的旧库），
         # 否则向 sent_reminders 回填会触发外键约束失败，导致启动报错。
         conn.execute(
@@ -342,6 +354,10 @@ def init_db() -> None:
         )
         conn.execute(
             "DELETE FROM sent_reminders WHERE username NOT IN (SELECT username FROM users)"
+        )
+        # 同上：清掉已删除用户的发信失败进度（孤儿数据，非用户设置）
+        conn.execute(
+            "DELETE FROM reminder_failures WHERE username NOT IN (SELECT username FROM users)"
         )
         # 迁移历史：把已发送(is_reminded=1)的行回填到 sent_reminders，
         # 避免老数据在下次同步时被当作“未发送”而重新发信。
