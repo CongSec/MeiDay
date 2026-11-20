@@ -1,11 +1,15 @@
 """消息通知回调（Webhook）：外部系统调用本接口触发邮件通知。
 
-- GET  /api/callback?id=<10位随机数>&title=xxx&content=xxx&dst=xxx
-- POST /api/callback?id=<10位随机数>  （id 放 URL；title/content/dst 放请求体：JSON 或表单）
-- POST /api/callback                 （id/title/content/dst 全放请求体：JSON 或表单）
+- GET  /api/callback?id=<10位随机数>&title=xxx&content=xxx&dst=xxx&project=xxx
+- POST /api/callback?id=<10位随机数>  （id 放 URL；title/content/dst/project 放请求体：JSON 或表单）
+- POST /api/callback                 （id/title/content/dst/project 全放请求体：JSON 或表单）
   公开接口，无需登录，凭 id 鉴权到对应账号；用该账号的 SMTP 配置发信。
   - title 作邮件主题、content 作邮件正文；
   - dst 可选：合法则发往 dst，缺省/留空发往账号配置的收件邮箱；
+  - project 可选：项目名。填了就【在照常发信之后】额外投递一条远程任务——
+    标题取 title、描述取 content、开始时间取本次回调的服务器时刻，
+    由网页端/APP 端认领后写进该项目（桌面小组件只读，永不认领）。
+    project 缺省时行为与旧版完全一致，只发邮件不建任务；
   - dst 非法或发送失败：给账号配置的收件邮箱发一封「报错回显」邮件；
     回显邮件发送失败则仅记录日志，不重试、不影响响应。
 
@@ -13,9 +17,10 @@
   - content 也认 body/text/message/msg/description/summary/detail/data/payload 等；
   - title 也认 subject/heading/name/event/msg_type 等；
   - dst 也认 to/email/target/recipient 等；
+  - project 也认 project_name/projectName/category/分类/项目 等；
   - 自动递归下探嵌套对象（如企业微信 {"text":{"content":...}}、飞书 {"content":{"text":...}}，最多 3 层）；
   - POST 未命中任何内容字段时，把整个请求体序列化作为正文兜底，保证邮件内容不为空。
-  想增加识别的字段名：在下方 _TITLE_KEYS / _CONTENT_KEYS / _DST_KEYS 元组里追加即可。
+  想增加识别的字段名：在下方 _TITLE_KEYS / _CONTENT_KEYS / _DST_KEYS / _PROJECT_KEYS 元组里追加即可。
 
 账号侧接口（需登录，供设置页展示/开关消息通知回调）：
 - GET  /api/callback/info    查询当前账号回调开关状态与 ID（关闭时不生成 ID）
@@ -33,6 +38,7 @@ from fastapi.responses import JSONResponse
 from ..audit import client_ip, log_action
 from ..auth import get_username
 from ..db import get_conn
+from ..services import pending_tasks as pending_svc
 from ..services.mailer import send_callback_email, send_callback_error_email
 from ..services.notifier import make_rcpt
 
@@ -69,11 +75,15 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
-def _callback_params(title: str, content: str) -> str:
+def _callback_params(title: str, content: str, project: str = "") -> str:
     """回调请求携带的原始参数摘要，用于「外部回调触发」请求级日志（原样呈现，空值标 '(空)'）。"""
     t = _clip(title, 200)
     c = _clip(content, 600)
-    return f"参数标题：{t or '(空)'}；参数正文：{c or '(空)'}"
+    p = _clip(project, 100)
+    return (
+        f"参数标题：{t or '(空)'}；参数正文：{c or '(空)'}"
+        + (f"；项目：{p}" if p else "")
+    )
 
 
 # =====================================================================
@@ -102,6 +112,13 @@ _DST_KEYS = (
     "dst",            # 标准字段
     "to", "to_email", "email", "target", "recipient",
     "send_to", "notify_email", "mail", "mail_to", "address",
+)
+# 项目名（可选）：填了就额外投递一条远程任务到该项目。
+# 注意 "name"/"type" 等宽泛别名不能放进来——它们常被 title 用作事件名，会误判成项目。
+_PROJECT_KEYS = (
+    "project",        # 标准字段
+    "project_name", "projectName", "projectTitle",
+    "category", "category_name", "分类", "项目",
 )
 # 嵌套对象最多下探层数（如 data.payload.content 这种三层包裹）
 _NEST_DEPTH = 3
@@ -140,23 +157,25 @@ def _payload_fallback(data) -> str:
     return _clip(text, 1500)
 
 
-def _extract_callback_params(data, *, fallback_content: bool = True) -> tuple[str, str, str]:
-    """从请求体/查询参数中按别名提取 (title, content, dst)。
+def _extract_callback_params(data, *, fallback_content: bool = True) -> tuple[str, str, str, str]:
+    """从请求体/查询参数中按别名提取 (title, content, dst, project)。
 
     - 请求体本身是字符串（如 JSON 字符串 body）：直接当作正文；
     - POST 默认开启兜底（方案3）：未命中 content 且请求体非空时，整个请求体序列化作为正文；
-    - GET 关闭兜底（查询参数不该整包进正文），仍支持别名提取。
+    - GET 关闭兜底（查询参数不该整包进正文），仍支持别名提取；
+    - project 为空表示「只要邮件通知」的旧行为，不建任务。
     """
     if isinstance(data, str):
-        return "", data, ""
+        return "", data, "", ""
     if not isinstance(data, dict):
-        return "", "", ""
+        return "", "", "", ""
     title = _first_string(data, _TITLE_KEYS)
     content = _first_string(data, _CONTENT_KEYS)
     dst = _first_string(data, _DST_KEYS)
+    project = _first_string(data, _PROJECT_KEYS).strip()
     if fallback_content and not content and data:
         content = _payload_fallback(data)
-    return title, content, dst
+    return title, content, dst, project
 
 
 def _gen_callback_id(conn) -> str:
@@ -199,7 +218,7 @@ async def _echo_error(
     path: str,
 ) -> None:
     """报错回显：把失败原因发往账号配置的收件邮箱（收件邮箱留空则回落发件邮箱）；回显本身失败仅记日志。"""
-    rcpt = make_rcpt(cred)
+    rcpt = make_rcpt(dict(cred))
     try:
         await send_callback_error_email(
             cred["smtp_user"],
@@ -232,11 +251,12 @@ async def _handle_callback(
     title: str,
     content: str,
     dst: str,
+    project: str = "",
 ) -> JSONResponse:
     ip = client_ip(request)
     try:
         return await _handle_callback_impl(
-            request, method, path, id, title, content, dst, ip
+            request, method, path, id, title, content, dst, project, ip
         )
     except Exception:
         # /api/callback 已加入中间件 _SKIP_PATHS，这里兜底补一条 500 请求日志，
@@ -256,6 +276,7 @@ async def _handle_callback_impl(
     title: str,
     content: str,
     dst: str,
+    project: str,
     ip: str,
 ) -> JSONResponse:
     with get_conn() as conn:
@@ -277,7 +298,7 @@ async def _handle_callback_impl(
     # raw 则是请求携带的原始参数，便于对照"调用方传了什么"与"邮件发出了什么"
     subject = (title or "").strip() or "【MeiDay 通知】"
     body = (content or "").strip() or "（无内容）"
-    raw = _callback_params(title, content)
+    raw = _callback_params(title, content, project)
 
     def _log_trigger(status: int, detail: str) -> None:
         """请求级日志：归属到该回调 ID 所属账号，网页操作日志可见。"""
@@ -286,7 +307,7 @@ async def _handle_callback_impl(
             ip=ip, detail=detail,
         )
 
-    if not (cred["smtp_user"] and cred["smtp_pass"] and make_rcpt(cred)):
+    if not (cred["smtp_user"] and cred["smtp_pass"] and make_rcpt(dict(cred))):
         # 收件邮箱留空时不拦：发送时回落到发件邮箱。只有“发件邮箱/授权码缺失”、
         # 或连收件人都无法确定（发件邮箱也为空）时才发不出去，直接返回明确原因。
         _log_trigger(400, f"该账号未配置可用的发件邮箱/授权码（未发信）；{raw}")
@@ -307,7 +328,7 @@ async def _handle_callback_impl(
         return JSONResponse(status_code=400, content={"ok": False, "detail": "dst 邮箱格式不正确"})
 
     # 收件人：dst 优先 → 收件邮箱 → 发件邮箱（收件邮箱留空时）
-    to = target or make_rcpt(cred)
+    to = target or make_rcpt(dict(cred))
     try:
         await send_callback_email(cred["smtp_user"], cred["smtp_pass"], to, title, content)
     except Exception as exc:
@@ -323,7 +344,12 @@ async def _handle_callback_impl(
             reason=reason, ip=ip, username=username,
             method=method, path=path,
         )
-        return JSONResponse(status_code=500, content={"ok": False, "detail": "邮件发送失败"})
+        # 邮件失败也不阻断远程建任务：任务投递与邮件通知是两条独立的通道
+        queued = _enqueue_task(username, title, content, project, ip, method, path)
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "detail": "邮件发送失败", "task_queued": queued},
+        )
 
     _log_trigger(200, f"回调通知 收件 {to}；{raw}")
     log_action(
@@ -331,7 +357,36 @@ async def _handle_callback_impl(
         ip=ip,
         detail=f"回调通知 收件 {to}；邮件标题：{_clip(subject,200)}；邮件正文：{_clip(body,600)}",
     )
-    return JSONResponse(content={"ok": True, "sent_to": to})
+    queued = _enqueue_task(username, title, content, project, ip, method, path)
+    return JSONResponse(content={"ok": True, "sent_to": to, "task_queued": queued})
+
+
+def _enqueue_task(
+    username: str,
+    title: str,
+    content: str,
+    project: str,
+    ip: str,
+    method: str,
+    path: str,
+) -> bool:
+    """有项目名时投递一条远程任务（邮件之后执行）；投递异常不影响本次回调结果。"""
+    if not project:
+        return False
+    try:
+        pending_svc.enqueue(
+            username,
+            project_name=project,
+            title=(title or "").strip() or "【MeiDay 通知】",
+            content=content or "",
+        )
+        return True
+    except Exception as exc:
+        log_action(
+            "远程任务投递失败", username=username, method=method, path=path, status=500,
+            ip=ip, detail=f"入队失败 项目：{_clip(project,100)}；{_clip(str(exc),300)}",
+        )
+        return False
 
 
 @router.get("/callback")
@@ -341,16 +396,18 @@ async def callback_get(
     title: str = Query(default=""),
     content: str = Query(default=""),
     dst: str = Query(default=""),
+    project: str = Query(default=""),
 ):
-    """公开回调入口（GET）：?id=随机数&title=主题&content=正文&dst=可选收件邮箱；
-    title/content/dst 支持常见别名（如 ?body=正文&subject=主题&to=收件邮箱）"""
+    """公开回调入口（GET）：?id=随机数&title=主题&content=正文&dst=可选收件邮箱&project=可选项目名；
+    title/content/dst/project 支持常见别名（如 ?body=正文&subject=主题&to=收件邮箱&project_name=项目名）"""
     # 读取全部查询参数（含未声明的别名键，如 body/subject/to），再按别名提取
     params = dict(request.query_params)
     params.setdefault("title", title)
     params.setdefault("content", content)
     params.setdefault("dst", dst)
-    t, c, d = _extract_callback_params(params, fallback_content=False)
-    return await _handle_callback(request, "GET", "/api/callback", id, t, c, d)
+    params.setdefault("project", project)
+    t, c, d, p = _extract_callback_params(params, fallback_content=False)
+    return await _handle_callback(request, "GET", "/api/callback", id, t, c, d, p)
 
 
 @router.post("/callback")
@@ -359,11 +416,12 @@ async def callback_post(
     id: str = Query(default=""),
 ):
     """公开回调入口（POST）：id 可放 URL（?id=）或请求体（JSON/表单，URL 优先）；
-    title/content/dst 从请求体提取，支持常见字段别名（如 body/text/message/subject），
-    可自动下探嵌套对象；未命中内容字段时兜底为整个请求体文本（方案3）。"""
+    title/content/dst/project 从请求体提取，支持常见字段别名（如 body/text/message/subject/project_name），
+    可自动下探嵌套对象；未命中内容字段时兜底为整个请求体文本（方案3）。
+    带 project 时在发信之后额外投递一条远程任务。"""
     data = await _parse_post_body(request)
     body_id = str(data.get("id", "")) if isinstance(data, dict) else ""
-    title, content, dst = _extract_callback_params(data)
+    title, content, dst, project = _extract_callback_params(data)
     return await _handle_callback(
         request,
         "POST",
@@ -372,6 +430,7 @@ async def callback_post(
         title,
         content,
         dst,
+        project,
     )
 
 

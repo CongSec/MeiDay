@@ -6,6 +6,7 @@ import { useTasksStore } from '@/stores/tasks'
 import { useStatsStore } from '@/stores/stats'
 import { idbGet, idbPut } from '@/utils/idb'
 import { flushPendingSyncReports } from '@/utils/syncReport'
+import { drainPendingTasks } from './usePendingTasks'
 
 /**
  * 同步协调轮询：每隔固定间隔向中心服务器查询"总版本号 + 变更列表"，
@@ -165,7 +166,12 @@ async function pollOnce(): Promise<boolean> {
   try {
     // 1) 先把本地（含离线期间）的待发上报补报给中心服务器
     const reported = await flushPendingSyncReports(auth.username)
-    // 1.5) BUG-1 修复：提醒清单待报补报——上报失败/离线期间标记保留，网络恢复后
+    // 1.5) 远程任务投递：认领「消息通知回调带项目名」暂存在服务端的任务并写进 OSS。
+    //      只有网页端/APP 会调用（桌面小组件只读，不引入本模块）；服务端原子认领 +
+    //      60 秒租约保证同一行只会被一个端拿到，多端同时在线也不会重复写入。
+    //      失败不阻断后续同步：真正的失败由服务端计数并在超限后发邮件通知。
+    await drainPendingTasks()
+    // 1.6) BUG-1 修复：提醒清单待报补报——上报失败/离线期间标记保留，网络恢复后
     //      随轮询自动重试，避免"设了提醒却因一次请求失败永久缺失"
     const tasks = useTasksStore()
     await tasks.flushReminderSyncIfPending()

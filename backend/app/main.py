@@ -20,6 +20,7 @@ from .routes import captcha as captcha_routes
 from .routes import credentials as cred_routes
 from .routes import logs as logs_routes
 from .routes import notify as notify_routes
+from .routes import pending_tasks as pending_tasks_routes
 from .routes import quick_durations as quick_durations_routes
 from .routes import sync as sync_routes
 from .services.log_cleanup_worker import log_cleanup_worker
@@ -75,6 +76,9 @@ _SKIP_PATHS = {
     # 消息通知回调：请求级日志改由 /api/callback 路由自行写入并归属到对应账号
     # （含标题/正文），中间件跳过，避免再产生一条无用户的匿名重复记录
     "/api/callback",
+    # 远程任务认领：跟随 2 秒同步轮询高频请求，逐条记请求日志会刷爆 LogsView；
+    # 入队/落库/失败由 services/pending_tasks 自行写业务日志
+    "/api/pending-tasks/claim",
 }
 
 # 安全敏感写操作：这些请求的审计日志自动附上"安全"标签（is_security=True），
@@ -165,6 +169,7 @@ app.include_router(notify_routes.router)
 app.include_router(quick_durations_routes.router)
 app.include_router(sync_routes.router)
 app.include_router(callback_routes.router)
+app.include_router(pending_tasks_routes.router)
 
 
 @app.get("/api/health")

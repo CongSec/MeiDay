@@ -439,6 +439,38 @@ export const api = {
   closeCallback() {
     return request<CallbackInfo>('POST', '/api/callback/close')
   },
+  /** 远程任务投递：认领待写进 OSS 的任务（只有网页端/APP 可认领；桌面小组件只读，会被拒）。
+   *  同一行同一时刻只会被一个端拿到，避免多端同时写入产生重复任务。
+   *  silent：跟随 2 秒同步轮询，不驱动云朵状态。 */
+  claimPendingTasks(client: 'web' = 'web') {
+    return request<{ ok: true; items: PendingTaskItem[] }>(
+      'POST',
+      '/api/pending-tasks/claim',
+      { client },
+      undefined,
+      { silent: true },
+    )
+  },
+  /** 远程任务投递：写入 OSS 成功后回执，服务端删除对应记录 */
+  ackPendingTasks(ids: string[]) {
+    return request<{ ok: true; removed: number }>(
+      'POST',
+      '/api/pending-tasks/ack',
+      { ids },
+      undefined,
+      { silent: true },
+    )
+  },
+  /** 远程任务投递：上报一次失败（「无此项目」由服务端直接判失败并发邮件通知） */
+  failPendingTasks(id: string, reason: string) {
+    return request<{ ok: boolean; failed?: boolean; fail_count?: number; detail?: string }>(
+      'POST',
+      '/api/pending-tasks/fail',
+      { id, reason },
+      undefined,
+      { silent: true },
+    )
+  },
   /** 中心公告：一次性拉取未读公告列表（id 升序，旧→新）。
    *  注意：同步轮询已把未读公告合并进 /api/sync/state 的 announcements 字段，
    *  常规在线场景无需调用本方法，仅保留给一次性查询场景。 */
@@ -463,6 +495,17 @@ export interface AnnouncementItem {
 export interface CallbackInfo {
   enabled: boolean
   id: string | null
+}
+
+/** 远程任务投递条目（消息通知回调带 project 项目名时由服务端暂存）：
+ *  project_name 为项目名，客户端按名字精确匹配到项目 id 后写入任务数据。 */
+export interface PendingTaskItem {
+  id: string
+  project_name: string
+  title: string
+  content: string
+  /** 开始时间：回调到达服务端的时刻（ISO，带时区），直接用作任务的 startTime */
+  start_time: string
 }
 
 /** 同步协调中心：客户端可上报的资源类型（与各 store 一一对应） */

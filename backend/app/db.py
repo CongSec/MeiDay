@@ -160,6 +160,25 @@ CREATE TABLE IF NOT EXISTS reminder_failures (
     PRIMARY KEY (username, task_id, subtask_id, reminder_time)
 );
 CREATE INDEX IF NOT EXISTS idx_sync_changes_user ON sync_changes(username, id);
+-- 远程任务投递（消息通知回调带 project 项目名时入队）：服务端不接触业务数据，
+-- 只暂存“要在哪个项目下建什么任务”；网页/APP 端认领后写入 OSS，写入成功回执删行。
+-- 桌面小组件为只读端，永不认领（见 services/pending_tasks.py 的 client 白名单）。
+CREATE TABLE IF NOT EXISTS pending_tasks (
+    id               TEXT PRIMARY KEY,
+    username         TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+    project_name     TEXT NOT NULL,          -- 项目名（项目元数据在 OSS，服务端不存 id）
+    title            TEXT NOT NULL,
+    content          TEXT,
+    start_time       TEXT NOT NULL,          -- 入队时刻（服务器时间，带时区）
+    status           TEXT NOT NULL DEFAULT 'pending',  -- pending | failed
+    fail_count       INTEGER NOT NULL DEFAULT 0,
+    last_error       TEXT,
+    claimed_by       TEXT,                   -- 当前认领的端标识
+    claim_expires_at TEXT,                   -- 认领租约到期时刻（过期可被其它端重新认领）
+    notified         INTEGER NOT NULL DEFAULT 0,  -- 失败邮件是否已发（只发一次）
+    created_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pending_tasks_user ON pending_tasks(username, status);
 """
 
 
@@ -301,6 +320,17 @@ def _migrate_smtp_callback_id(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE smtp_creds ADD COLUMN callback_id TEXT")
 
 
+def _migrate_pending_tasks(conn: sqlite3.Connection) -> None:
+    """旧库没有 pending_tasks 表时补齐（远程任务投递，消息通知回调带项目字段时使用）。
+
+    表结构已在 SCHEMA 中定义（CREATE TABLE IF NOT EXISTS），这里只负责给
+    「建表早于本功能」的旧库补建索引；后续若给该表加列，也在这里做 ALTER。
+    """
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pending_tasks_user ON pending_tasks(username, status)"
+    )
+
+
 def _migrate_users_last_seen(conn: sqlite3.Connection) -> None:
     """旧库 users 表没有 last_seen_announcement_id 列，启动时补齐（公告已读游标）。
 
@@ -339,6 +369,7 @@ def init_db() -> None:
         _migrate_users_v2(conn)
         _migrate_notify_prefs_diary(conn)
         _migrate_smtp_callback_id(conn)
+        _migrate_pending_tasks(conn)
         _migrate_users_last_seen(conn)
         # 注意：这里【不允许】再写任何“无条件覆盖用户设置”的语句。
         # 曾经有两行：

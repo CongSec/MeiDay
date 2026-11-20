@@ -41,6 +41,12 @@ ACTION_LABELS = {
     ("GET", "/api/callback/info"): "查询回调设置",
     ("POST", "/api/callback/open"): "开启消息通知回调",
     ("POST", "/api/callback/close"): "关闭消息通知回调",
+    # 远程任务投递（消息通知回调带「项目」字段时）：claim 是 2 秒级轮询，不能逐条记请求日志，
+    # 因此认领本身不落请求审计（由 services/pending_tasks 在入队/落库/失败时记录业务动作）；
+    # 被拒（只读端误调）仍记一条，便于排查。
+    ("POST", "/api/pending-tasks/claim"): "认领远程任务",
+    ("POST", "/api/pending-tasks/ack"): "远程任务落库",
+    ("POST", "/api/pending-tasks/fail"): "远程任务投递失败",
 }
 
 # 后台邮件操作的行为名（非 HTTP 请求，由 reminder worker 写入）

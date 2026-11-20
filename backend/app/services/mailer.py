@@ -163,6 +163,69 @@ async def send_callback_error_email(
     await _smtp_send(msg, smtp_user=smtp_user, smtp_pass=smtp_pass)
 
 
+# ---- 远程任务投递失败邮件（消息通知回调带 project 项目名时） ----
+# 来自回调的「远程建任务」一直没能写进用户 OSS 时发往账号收件邮箱，只发一次、不含任何凭证。
+PENDING_TASK_FAILED_TEMPLATE = """<!DOCTYPE html>
+<html lang="zh-CN">
+<body style="font-family: Arial, sans-serif; max-width: 560px; margin: 0 auto; padding: 24px;">
+  <h2 style="color:#dc2626;">🔔 远程任务投递失败</h2>
+  <p style="font-size:15px;color:#1f2937;line-height:1.7;">通过「消息通知回调」提交的一条任务没能写进你的任务数据，原因：<b>{reason}</b></p>
+  <table style="border-collapse: collapse; width: 100%; margin-top: 12px;">
+    <tr><td style="padding:6px 0;color:#666;width:100px;">项目</td><td style="padding:6px 0;font-weight:600;">{project}</td></tr>
+    <tr><td style="padding:6px 0;color:#666;">任务标题</td><td style="padding:6px 0;font-weight:600;">{title}</td></tr>
+    <tr><td style="padding:6px 0;color:#666;">任务描述</td><td style="padding:6px 0;">{content}</td></tr>
+    <tr><td style="padding:6px 0;color:#666;">开始时间</td><td style="padding:6px 0;font-weight:600;">{start}</td></tr>
+    <tr><td style="padding:6px 0;color:#666;">失败次数</td><td style="padding:6px 0;font-weight:600;">{count}</td></tr>
+    <tr><td style="padding:6px 0;color:#666;">时间</td><td style="padding:6px 0;font-weight:600;">{time}</td></tr>
+  </table>
+  <p style="color:#999;font-size:12px;margin-top:24px;">该记录已保留但不再自动重试，可在网页端「操作日志」中查看。请检查项目名是否与现有项目完全一致、以及任务数据是否可正常同步。本邮件由 MeiDay 自动发送，请勿回复。</p>
+</body>
+</html>"""
+
+
+async def send_pending_task_failed_email(
+    smtp_user: str,
+    smtp_pass: str,
+    to: str,
+    *,
+    project_name: str,
+    title: str,
+    content: str,
+    start_time: str,
+    reason: str,
+    fail_count: int,
+) -> None:
+    """远程任务投递失败通知：告知项目/标题/描述/开始时间与失败原因（只发一次）。"""
+    now = datetime.now(timezone(timedelta(hours=8))).isoformat(timespec="seconds").replace("T", " ")
+    preview = " ".join((content or "").split())[:200] or "（无描述）"
+    subject = "【MeiDay 通知】远程任务投递失败"
+    msg = EmailMessage()
+    msg["From"] = smtp_user
+    msg["To"] = to
+    msg["Subject"] = subject
+    text = (
+        f"通过「消息通知回调」提交的一条任务没能写进你的任务数据，原因：{reason}\n\n"
+        f"项目：{project_name or '-'}\n任务标题：{(title or '').strip() or '-'}\n"
+        f"任务描述：{preview}\n开始时间：{start_time or '-'}\n失败次数：{fail_count}\n"
+        f"时间：{now}\n\n"
+        "该记录已保留但不再自动重试，可在网页端「操作日志」中查看。"
+    )
+    msg.set_content(text)
+    msg.add_alternative(
+        PENDING_TASK_FAILED_TEMPLATE.format(
+            reason=_esc(reason),
+            project=_esc(project_name or "-"),
+            title=_esc((title or "").strip() or "-"),
+            content=_esc(preview),
+            start=_esc(start_time or "-"),
+            count=fail_count,
+            time=_esc(now),
+        ),
+        subtype="html",
+    )
+    await _smtp_send(msg, smtp_user=smtp_user, smtp_pass=smtp_pass)
+
+
 # ---- 安全通知邮件（登录 / 密钥 / 隐私日记相关） ----
 # 文案与主题按类型区分；仅含 IP 与时间，绝不包含任何密钥/凭证明文。
 # cred_change 为“临终邮件”：在加密保存动作发生前用【修改前】的 SMTP 配置发送，
