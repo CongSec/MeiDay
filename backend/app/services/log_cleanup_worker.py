@@ -18,11 +18,15 @@ CLEANUP_INTERVAL_HOURS = 6
 SYNC_CHANGES_RETENTION_HOURS = 7 * 24
 
 
-async def _run_cleanup_once() -> None:
+def _run_cleanup_sync() -> None:
     """按每用户各自的保留天数清理过期日志（未设置的用户回退全局默认）。
 
     清理留痕：仅在有删除时才写一条汇总审计日志，detail 列出“哪个用户按多少天
     清了多少条”，避免周期性噪音，同时保留用户粒度的可观测性。
+
+    并发：本函数全部是同步 SQLite 调用，必须在线程中执行
+    （见 log_cleanup_worker 中的 asyncio.to_thread），否则会阻塞事件循环，
+    导致清理期间所有 HTTP 请求一起排队。
     """
     try:
         global_days = get_log_retention_days()  # 全局默认（系统日志与未设置用户兜底）
@@ -55,8 +59,12 @@ async def _run_cleanup_once() -> None:
 
 
 async def log_cleanup_worker() -> None:
-    """后台自动清理任务：启动立即执行一次，之后每 6 小时清理一次过期日志。"""
-    await _run_cleanup_once()
+    """后台自动清理任务：启动立即执行一次，之后每 6 小时清理一次过期日志。
+
+    清理放到 asyncio.to_thread 中执行：SQLite 调用是同步阻塞的，若直接在事件循环里跑，
+    一次重日志量的清理会让登录、同步轮询等所有请求一起卡住（2h2g 上可达十几秒）。
+    """
+    await asyncio.to_thread(_run_cleanup_sync)
     while True:
         await asyncio.sleep(CLEANUP_INTERVAL_HOURS * 3600)
-        await _run_cleanup_once()
+        await asyncio.to_thread(_run_cleanup_sync)

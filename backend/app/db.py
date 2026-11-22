@@ -188,8 +188,11 @@ def get_conn() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     # WAL：读写不互斥，显著降低并发下的写锁冲突（database is locked）
     conn.execute("PRAGMA journal_mode = WAL")
-    # busy_timeout：锁等待最多 5 秒，瞬时竞争时等待而不是直接报错
-    conn.execute("PRAGMA busy_timeout = 5000")
+    # busy_timeout：锁等待最多 10 秒，瞬时竞争时等待而不是直接报错。
+    # 日志清理已改为「先提交备份、再分批删除」（见 audit.delete_logs_older_than），
+    # 单次写锁的持有时间降到几十毫秒级；这里放宽到 10 秒只是给偶发的重事务留余量，
+    # 避免清理/大批量写入时把用户的审计日志静默丢掉。
+    conn.execute("PRAGMA busy_timeout = 10000")
     return conn
 
 

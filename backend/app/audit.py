@@ -16,6 +16,12 @@ logger = logging.getLogger("meiday.audit")
 DEFAULT_LOG_RETENTION_DAYS = 30
 RETENTION_KEY = "log_retention_days"
 
+# 归档/删除时的分批大小：每批独立事务、提交后立即释放写锁。
+# SQLite（WAL）同一时刻只允许一个写者，写锁从第一条写入一直持有到 COMMIT；
+# 一次性 DELETE 几十万行会让其它用户的写入排队十几秒并超时（审计日志静默丢失），
+# 因此按主键分批删除，把单次写锁压缩到几十毫秒级。
+_CLEANUP_BATCH = 2000
+
 # 受信反向代理网段（配合 client_ip 取真实来源 IP，BUG-10 安全加固）。
 # 默认仅信任本机回环 127.0.0.1/::1，覆盖 README 描述的「网页版走 Nginx 同源反代」部署；
 # 若代理部署在其他主机/网段，可用环境变量 TRUSTED_PROXIES 追加（英文逗号分隔的 IP 或 CIDR）。
@@ -336,6 +342,59 @@ def set_log_retention_days(days: int, username: Optional[str] = None) -> int:
     return days
 
 
+# ---------- 清理（归档到 audit_logs_backup 后删除） ----------
+#
+# 并发设计（2h2g 小机器、SQLite 单写者）：
+#   1) 先「一次性备份并提交」：INSERT OR IGNORE 天然幂等，备份失败则整体回滚，
+#      绝不进入删除阶段 —— 保证「删了一定备份过」；
+#   2) 再「按主键分批删除」：每批 _CLEANUP_BATCH 行一个独立事务，提交即释放写锁，
+#      其它用户的写入最多等几十毫秒，而不是被一个十几秒的大事务堵住后超时。
+#   中途崩溃最坏结果只是「备份里多了几行但没删掉」，下次清理会跳过重复行继续删，
+#   不会出现「删了没备份」。调用方（log_cleanup_worker）需在线程中执行本函数，
+#   避免阻塞事件循环。
+
+
+def _archive_for_cleanup(scope_sql: str, scope_params: list, archived_by: str) -> None:
+    """把命中 scope 的日志原样复制到 audit_logs_backup（保留原 id），单独事务提交。"""
+    now = datetime.now(TZ).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        conn.execute(
+            f"""INSERT OR IGNORE INTO audit_logs_backup
+               (id, created_at, username, action, method, path, status, ip,
+                user_agent, detail, duration_ms, is_security, is_high_risk,
+                acknowledged_at, remind_count, archived_at, archived_by)
+               SELECT id, created_at, username, action, method, path, status, ip,
+                      user_agent, detail, duration_ms, is_security, is_high_risk,
+                      acknowledged_at, remind_count, ?, ?
+               FROM audit_logs WHERE {scope_sql}""",
+            # 绑定顺序：SELECT 列里的 ?(archived_at, archived_by) 先于 WHERE 里的占位符
+            [now, archived_by, *scope_params],
+        )
+
+
+def _delete_for_cleanup(scope_sql: str, scope_params: list) -> int:
+    """按主键分批删除命中 scope 的日志，每批独立事务，返回删除总条数。"""
+    total = 0
+    while True:
+        # 1) 只读事务：取本批 id（不持写锁）
+        with get_conn() as conn:
+            rows = conn.execute(
+                f"SELECT id FROM audit_logs WHERE {scope_sql} ORDER BY id LIMIT ?",
+                [*scope_params, _CLEANUP_BATCH],
+            ).fetchall()
+        ids = [int(r["id"]) for r in rows]
+        if not ids:
+            break
+        # 2) 写事务：只删这一批，提交后释放写锁
+        marks = ",".join("?" * len(ids))
+        with get_conn() as conn:
+            cur = conn.execute(f"DELETE FROM audit_logs WHERE id IN ({marks})", ids)
+            total += cur.rowcount
+        if len(ids) < _CLEANUP_BATCH:
+            break
+    return total
+
+
 def delete_logs_older_than(
     days: int,
     *,
@@ -346,8 +405,8 @@ def delete_logs_older_than(
 
     安全留痕：删除前先把过期日志原样复制到 audit_logs_backup 备份表
     （保留原 id，archived_at 记录归档时间；archived_by 为空串表示自动清理触发），
-    随后才从 audit_logs 删除，确保自动清理后服务器侧仍保留可审计的备份。
-    两步在同一事务中执行：复制失败则整体回滚，绝不清掉日志却丢备份。
+    **备份事务提交成功后**才分批从 audit_logs 删除，确保清理后服务器侧仍有可审计的备份，
+    且清理期间不会长时间占用数据库写锁（其它用户仍可正常读写）。
 
     清理范围（按用户独立保留后由清理 worker 逐用户调用）：
     - username="alice"               → 只清该用户超过其保留期的日志；
@@ -355,32 +414,17 @@ def delete_logs_older_than(
     - username=None + null_only=False → 不限定用户，按同一 cutoff 全量清理（兼容旧行为）。
     """
     cutoff = (datetime.now(TZ) - timedelta(days=days)).isoformat(timespec="seconds")
-    now = datetime.now(TZ).isoformat(timespec="seconds")
     if username is not None:
-        scope_sql, scope_params = "username = ?", [username]
+        scope_sql, scope_params = "username = ? AND created_at < ?", [username, cutoff]
     elif null_only:
-        scope_sql, scope_params = "(username IS NULL OR username = '')", []
+        scope_sql, scope_params = (
+            "(username IS NULL OR username = '') AND created_at < ?",
+            [cutoff],
+        )
     else:
-        scope_sql, scope_params = "1 = 1", []
-    with get_conn() as conn:
-        conn.execute(
-            f"""INSERT OR IGNORE INTO audit_logs_backup
-               (id, created_at, username, action, method, path, status, ip,
-                user_agent, detail, duration_ms, is_security, is_high_risk,
-                acknowledged_at, remind_count, archived_at, archived_by)
-               SELECT id, created_at, username, action, method, path, status, ip,
-                      user_agent, detail, duration_ms, is_security, is_high_risk,
-                      acknowledged_at, remind_count, ?, ''
-               FROM audit_logs WHERE {scope_sql} AND created_at < ?""",
-            # 注意绑定顺序:SELECT 列里的 ?(archived_at)先于 WHERE 里的占位符,
-            # 所以 now 必须排在 scope 参数之前,否则 archived_at 会被绑成 scope 值。
-            [now, *scope_params, cutoff],
-        )
-        cur = conn.execute(
-            f"DELETE FROM audit_logs WHERE {scope_sql} AND created_at < ?",
-            [*scope_params, cutoff],
-        )
-        return cur.rowcount
+        scope_sql, scope_params = "created_at < ?", [cutoff]
+    _archive_for_cleanup(scope_sql, scope_params, "")
+    return _delete_for_cleanup(scope_sql, scope_params)
 
 
 def clear_user_logs(username: str) -> int:
@@ -388,21 +432,9 @@ def clear_user_logs(username: str) -> int:
 
     安全留痕：清理执行前，先把该用户当前的全部日志原样复制到 audit_logs_backup
     备份表（保留原 id，并记录归档时间 archived_at 与触发归档的用户 archived_by），
-    随后才从 audit_logs 删除，确保用户手动清理后服务器侧仍保留可审计的备份。
-    两步在同一事务中执行：复制失败则整体回滚，绝不清掉日志却丢备份。
+    备份事务提交成功后才分批从 audit_logs 删除，确保用户手动清理后服务器侧仍保留可审计的备份，
+    且清理大日志量时不会长时间锁住数据库、影响其他用户。
     """
-    now = datetime.now(TZ).isoformat(timespec="seconds")
-    with get_conn() as conn:
-        conn.execute(
-            """INSERT INTO audit_logs_backup
-               (id, created_at, username, action, method, path, status, ip,
-                user_agent, detail, duration_ms, is_security, is_high_risk,
-                acknowledged_at, remind_count, archived_at, archived_by)
-               SELECT id, created_at, username, action, method, path, status, ip,
-                      user_agent, detail, duration_ms, is_security, is_high_risk,
-                      acknowledged_at, remind_count, ?, ?
-               FROM audit_logs WHERE username=?""",
-            (now, username, username),
-        )
-        cur = conn.execute("DELETE FROM audit_logs WHERE username=?", (username,))
-        return cur.rowcount
+    scope_sql, scope_params = "username = ?", [username]
+    _archive_for_cleanup(scope_sql, scope_params, username)
+    return _delete_for_cleanup(scope_sql, scope_params)
