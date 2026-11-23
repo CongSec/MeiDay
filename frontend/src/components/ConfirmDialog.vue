@@ -11,8 +11,10 @@ withDefaults(
     danger?: boolean
     /** 确认/取消按钮禁用（异步保存进行中防重复提交） */
     disabled?: boolean
+    /** 遮罩层叠层级：默认 z-50；嵌在已有 z-50 弹窗内时传 z-[60]，避免被父弹窗遮罩压住/点穿 */
+    zIndex?: string
   }>(),
-  { confirmText: '确认', danger: false, disabled: false },
+  { confirmText: '确认', danger: false, disabled: false, zIndex: 'z-50' },
 )
 const emit = defineEmits<{ confirm: []; cancel: [] }>()
 </script>
@@ -20,7 +22,8 @@ const emit = defineEmits<{ confirm: []; cancel: [] }>()
 <template>
   <div
     v-if="open"
-    class="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-sm flex items-center justify-center px-4"
+    class="fixed inset-0 bg-slate-900/55 backdrop-blur-sm flex items-center justify-center px-4"
+    :class="zIndex"
   >
     <div class="modal-panel rounded-2xl p-6 w-full max-w-sm animate-modal-pop">
       <div class="text-base font-semibold">{{ title }}</div>

@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { api } from '@/api/client'
 import { useUiStore } from '@/stores/ui'
+import ConfirmDialog from './ConfirmDialog.vue'
 
 /**
  * 提醒时间「快捷时长」小标签组：
@@ -33,6 +34,8 @@ const addValue = ref('')
 const addUnit = ref<'min' | 'hour'>('min')
 const addErr = ref('')
 const saving = ref(false)
+/** 待删除的快捷时长（分钟）：非 null 时弹出确认框；× 很窄，避免误触直接删掉清单 */
+const pendingRemove = ref<number | null>(null)
 
 onMounted(() => {
   void load()
@@ -70,13 +73,27 @@ function applyDuration(mins: number) {
   emit('apply', fmtApplied(mins))
 }
 
-async function removeDuration(mins: number) {
+/** 点 × 只记录待删项并弹确认框，不立即发请求（防误触） */
+function askRemoveDuration(mins: number) {
   if (saving.value) return
+  pendingRemove.value = mins
+}
+
+function cancelRemove() {
+  pendingRemove.value = null
+}
+
+/** 确认删除：写入账号快捷清单（服务器，多端同步）；失败提示并保持原清单 */
+async function confirmRemove() {
+  const mins = pendingRemove.value
+  if (saving.value || mins === null) return
   const next = durations.value.filter((m) => m !== mins)
   saving.value = true
   try {
     await api.setQuickDurations(next)
     durations.value = next
+    // 删除失败时保留待删项与弹窗，用户可直接重试或取消
+    pendingRemove.value = null
   } catch {
     ui.toast('快捷时长删除失败，请重试', 'error')
   } finally {
@@ -161,8 +178,8 @@ async function saveAdd() {
         {{ label(m) }}
         <span
           class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full text-slate-400 hover:bg-red-100 hover:text-red-500"
-          title="删除该快捷时长"
-          @click.stop="removeDuration(m)"
+          title="删除该快捷时长（会先确认）"
+          @click.stop="askRemoveDuration(m)"
         >×</span>
       </button>
 
@@ -208,5 +225,18 @@ async function saveAdd() {
       <span v-if="!durations.length && !adding" class="text-[11px] text-slate-400">无快捷时长</span>
     </div>
     <p v-if="adding && addErr" class="mt-0.5 text-[11px] text-red-500">{{ addErr }}</p>
+
+    <!-- 删除确认：挂在任务编辑弹窗（同为 z-50）内部，需更高的层级才不会被父遮罩压住 -->
+    <ConfirmDialog
+      :open="pendingRemove !== null"
+      z-index="z-[60]"
+      title="删除快捷时长"
+      :message="`确定删除「${pendingRemove === null ? '' : label(pendingRemove)}」这条快捷时长？\n删除后需重新添加，不影响已设置的提醒时间。`"
+      confirm-text="删除"
+      danger
+      :disabled="saving"
+      @confirm="confirmRemove"
+      @cancel="cancelRemove"
+    />
   </div>
 </template>
