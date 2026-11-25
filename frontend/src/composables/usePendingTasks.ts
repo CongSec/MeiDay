@@ -26,6 +26,23 @@ const MAX_PER_ROUND = 10
 /** 同一时刻只允许一轮在跑：多个调用方（轮询/回到前台）并发会重复处理同一批 */
 let inFlight: Promise<void> | null = null
 
+/** 上一轮有没有「没处理干净的尾巴」：
+ *  - claim 成功拿到条目但写 OSS/ack/fail 没走完（网络抖动、OSS 失败）；
+ *  - ack / fail 上报失败（服务端不知道已落库，需要下一轮补发）。
+ *  同步轮询据此在「服务端标记 pending_remote=false」时也补跑一轮 claim，
+ *  保证回执不会因为「标记已清」而被静默丢弃。 */
+let unfinished = false
+
+/** 本地是否还有未处理干净的远程任务投递（供同步轮询判断是否要补跑一轮）。 */
+export function hasUnfinishedPendingTasks(): boolean {
+  return unfinished
+}
+
+/** 手动放行一次认领（老版本服务器不返回 pending_remote 标记时使用：退回「每轮都问」）。 */
+export function forcePendingTasksNextRound(): void {
+  unfinished = true
+}
+
 /** 按项目名找项目 id：精确匹配全部同名项目（重名时每个项目各加一条），不做模糊匹配、不看回收站。 */
 function matchProjectIds(name: string): string[] {
   const projects = useProjectsStore()
@@ -75,10 +92,15 @@ async function drainOnce(): Promise<void> {
     }
     return
   }
-  if (!items.length) return
+  if (!items.length) {
+    // 认领结果为空：服务端标记可能刚好过期（另一台设备已经处理完），本轮没有尾巴
+    unfinished = false
+    return
+  }
 
   const tasks = useTasksStore()
   const okIds: string[] = []
+  const pendingFails: { id: string; reason: string }[] = []
   for (const item of items.slice(0, MAX_PER_ROUND)) {
     const ids = matchProjectIds(item.project_name)
     if (!ids.length) {
@@ -86,7 +108,8 @@ async function drainOnce(): Promise<void> {
       try {
         await api.failPendingTasks(item.id, REASON_NO_PROJECT)
       } catch {
-        /* 上报失败保持待认领，下一轮重试 */
+        /* 上报失败：记录下来，下一轮补发（服务端会重新发放该条） */
+        pendingFails.push({ id: item.id, reason: REASON_NO_PROJECT })
       }
       continue
     }
@@ -110,21 +133,27 @@ async function drainOnce(): Promise<void> {
       console.warn('[pending-tasks] 写入远程任务失败', e)
     }
     if (allOk) okIds.push(item.id)
-    else {
-      try {
-        await api.failPendingTasks(item.id, '写入 OSS 失败')
-      } catch {
-        /* 上报失败：租约到期后可被任意端重新认领 */
-      }
-    }
+    else pendingFails.push({ id: item.id, reason: '写入 OSS 失败' })
   }
+
+  let clean = pendingFails.length === 0
   if (okIds.length) {
     try {
       await api.ackPendingTasks(okIds)
     } catch {
-      /* 回执失败：记录仍会被重新认领，靠 id 幂等避免重复 */
+      /* 回执失败：记录仍会被重新认领，靠 id 幂等避免重复；下一轮继续补发 */
+      clean = false
     }
   }
+  for (const f of pendingFails) {
+    try {
+      await api.failPendingTasks(f.id, f.reason)
+    } catch {
+      /* 上报失败：租约到期后可被任意端重新认领 */
+      clean = false
+    }
+  }
+  unfinished = !clean
 }
 
 /** 处理一轮远程任务投递（幂等、可重复调用；已有在跑的一轮时直接复用）。 */
@@ -132,7 +161,8 @@ export function drainPendingTasks(): Promise<void> {
   if (inFlight) return inFlight
   inFlight = drainOnce()
     .catch(() => {
-      /* 任何异常都不影响同步轮询 */
+      /* 任何异常都不影响同步轮询；保守起见留一个尾巴，下一轮再补问一次 */
+      unfinished = true
     })
     .finally(() => {
       inFlight = null

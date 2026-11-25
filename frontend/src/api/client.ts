@@ -527,4 +527,9 @@ export interface SyncState {
   changes: SyncStateItem[]
   /** 合并进轮询响应的未读公告（id 升序；无未读时为空数组） */
   announcements: AnnouncementItem[]
+  /** 该账号是否还有待认领的远程任务（消息通知回调带项目名时入队）。
+   *  只有它为 true 时才需要请求 /api/pending-tasks/claim：
+   *  普通账号没有远程任务时，每轮轮询就只剩本接口这一个请求。
+   *  老版本服务器不返回该字段（undefined）时客户端退回「每轮都问」的老行为。 */
+  pending_remote?: boolean
 }

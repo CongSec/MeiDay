@@ -22,6 +22,7 @@ pending_tasks 表，由客户端认领后写入 OSS。
 
 import asyncio
 import sqlite3
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -46,6 +47,97 @@ REASON_NO_PROJECT = "无此项目"
 
 # 允许认领的端类型白名单：只有网页/APP。桌面小组件（exe）只读，永不写入 OSS。
 CLIENT_WHITELIST = {"web"}
+
+# ---------------- 「有货」快照（进程内） ----------------
+# 目的：省掉客户端每 2 秒一次的空 claim。GET /api/sync/state 每轮只读地带上
+# 「该用户有没有待认领的远程任务」，客户端只有标记为真时才去 claim。
+#
+# - 标记只在 enqueue() 真正写库成功之后置真（写库抛出异常时根本不会走到置位），
+#   因此标记不会长期误报；
+# - 标记的清除只发生在「本公司已经在库里做过一次读」的地方：
+#   ① 客户端 claim/ack/fail 时顺带调用 _clear_if_drained（本来就在同一连接上，
+#      不额外增加连接或事务）；
+#   ② 进程启动后该用户第一次查询时做一次数据库实查（重启会把集合清零，
+#      这一步保证重启不会永久漏掉启动前已入队的任务）。
+#   注意：投递失败的行会一直保留（status 从 pending 改成 failed 但不删除），
+#   所以不存在「标记来源被删掉、客户端却还在空跑 claim」的长期误报。
+# - 多进程/多端互不影响：每台服务器进程各持一份集合，即便两个端同时看到「有货」
+#   去 claim，也不会重复写 OSS——行级互斥仍由下面的原子 UPDATE + 租约保证。
+_pending_flag: set[str] = set()
+_pending_flag_lock = threading.Lock()
+# 进程启动后尚未做过数据库实查的用户（重启后首次查询走实查，之后走快照）
+_pending_unchecked: set[str] = set()
+_pending_unchecked_lock = threading.Lock()
+
+
+def _mark_pending(username: str) -> None:
+    """置该用户的「有货」标记（仅内存，不抛异常）。"""
+    with _pending_flag_lock:
+        _pending_flag.add(username)
+
+
+def _clear_pending(username: str) -> None:
+    """去掉该用户的「有货」标记。"""
+    with _pending_flag_lock:
+        _pending_flag.discard(username)
+
+
+def _flag_present(username: str) -> bool:
+    with _pending_flag_lock:
+        return username in _pending_flag
+
+
+def _take_first_check(username: str) -> bool:
+    """返回 True 表示这是本进程对该用户的第一次「有货」查询（需要数据库实查）。"""
+    with _pending_unchecked_lock:
+        if username in _pending_unchecked:
+            return False
+        _pending_unchecked.add(username)
+        return True
+
+
+def refresh_pending_snapshot(username: str) -> bool:
+    """重新读取该用户的「有货」标记（已在 GET /api/sync/state 中调用）。
+
+    - 进程内首次查询该用户：数据库实查一次（覆盖「启动前已入队」的任务），此后走快照；
+    - 之后：纯内存读取，不访问数据库——这是「每轮只发一个请求」的前提。
+    """
+    first = _take_first_check(username)
+    if first:
+        has = False
+        try:
+            with get_conn() as conn:
+                has = pending_exists(conn, username)
+        except (sqlite3.Error, OSError):
+            # 读库失败按「有货」处理：宁可让客户端多问一次 claim，也不能漏掉任务
+            has = True
+        if has:
+            _mark_pending(username)
+            return True
+        return _flag_present(username)
+    return _flag_present(username)
+
+
+def pending_exists(conn: sqlite3.Connection, username: str) -> bool:
+    """库里是否还有该用户待认领的记录（纯 SELECT，走 (username,status) 索引）。"""
+    row = conn.execute(
+        "SELECT 1 FROM pending_tasks WHERE username=? AND status='pending' LIMIT 1",
+        (username,),
+    ).fetchone()
+    return row is not None
+
+
+def _clear_if_drained(conn: sqlite3.Connection, username: str) -> None:
+    """在已有连接上补一次读：库里已无待认领记录时清掉「有货」标记。
+
+    只在 claim / ack / fail 里调用（这几个请求本来就要连库），因此不增加任何连接。
+    读库异常时保持标记不变——宁可让客户端多问一次 claim，也不能漏掉任务。
+    """
+    try:
+        if not pending_exists(conn, username):
+            _clear_pending(username)
+    except (sqlite3.Error, OSError):
+        pass
 
 
 def now_iso() -> str:
@@ -88,6 +180,9 @@ def enqueue(
                VALUES (?,?,?,?,?,?,'pending',?)""",
             (rid, username, project_name, title, content or "", ts, ts),
         )
+    # 写库成功后才置「有货」标记：异常路径（上面的 INSERT 抛出）不会执行到这里，
+    # 客户端也就不会被误导去空跑 claim。
+    _mark_pending(username)
     log_action(
         "远程任务入队",
         username=username,
@@ -242,6 +337,11 @@ def claim(username: str, client: str, claimer: str) -> list[dict]:
                 "AND claim_expires_at=? AND status='pending' ORDER BY created_at ASC",
                 (username, claimer, lease_until),
             ).fetchall()
+        # 顺带刷新「有货」快照：本轮没抢满（说明库里已无剩余可认领行）就清标记，
+        # 下一轮 state 不再让客户端空跑 claim。认领时本来就开了库连接，这里不额外增加连接；
+        # 全部行都处于「被别的端租用中」时 cur.rowcount 仍为 0，但库里确实还有 pending 行，
+        # _clear_if_drained 不会清标记，租约到期后本端会继续抢。
+        _clear_if_drained(conn, username)
     notify_failed(username, newly_failed)
     return [
         {
@@ -267,6 +367,9 @@ def ack(username: str, ids: list[str]) -> int:
                 (rid, username),
             )
             removed += cur.rowcount
+        # 顺带刷新「有货」快照：删完再看一眼库里还有没有剩余 pending 行。
+        if removed:
+            _clear_if_drained(conn, username)
     if removed:
         log_action(
             "远程任务落库", username=username, path="/api/pending-tasks/ack",
@@ -300,6 +403,8 @@ def fail(username: str, rid: str, reason: str) -> dict:
         if should_fail:
             _mark_failed(conn, rid, reason)
         row = conn.execute("SELECT * FROM pending_tasks WHERE id=?", (rid,)).fetchone()
+        # 顺带刷新「有货」快照：判失败会把该行移出 pending，若这是最后一行就立刻清标记
+        _clear_if_drained(conn, username)
     log_action(
         "远程任务投递失败", username=username, path="/api/pending-tasks/fail", status=200,
         detail=(

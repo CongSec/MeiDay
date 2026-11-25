@@ -8,6 +8,7 @@ from ..schemas import (
     SyncStateItem,
     SyncStateResponse,
 )
+from ..services import pending_tasks as pending_svc
 
 router = APIRouter(prefix="/api/sync", tags=["sync"])
 
@@ -42,7 +43,10 @@ def state(
     - full_sync=true 表示本地版本号落后过多（超出服务端事件保留窗口），
       应放弃增量、做一次全量同步，避免漏掉保留窗口之前的变化；
     - announcements 返回该用户当前未读公告（合并进同一响应：客户端每轮轮询
-      只需发一个请求，不再单独请求 /api/announcements/unread）。
+      只需发一个请求，不再单独请求 /api/announcements/unread）；
+    - pending_remote 返回该用户是否还有待认领的远程任务（消息通知回调带项目名时入队）。
+      客户端只在它是 true 时才请求 /api/pending-tasks/claim，因此普通账号每轮轮询
+      只有本接口一个请求。该值来自进程内快照，不额外查库，本接口仍保持纯只读。
     """
     with get_conn() as conn:
         version = get_sync_version(conn, username)
@@ -61,6 +65,8 @@ def state(
                 (username, since, _STATE_LIMIT),
             ).fetchall()
         unread = get_unread_announcements(conn, username)
+    # 纯内存快照；只有进程启动后该用户的第一次查询会实查一次库（覆盖重启前已入队的任务）
+    pending_remote = pending_svc.refresh_pending_snapshot(username)
     # 服务端保留窗口内的最早事件 id。客户端 since 若指向已不存在的事件（早于 oldest，
     # 或事件已被全部清理、oldest 回到 0），说明中间有事件被删过，只给增量会漏数据，
     # 必须让客户端全量同步。全新设备（since=0）由登录/bootstrap 加载权威数据，无需强制全量。
@@ -74,4 +80,5 @@ def state(
         full_sync=full_sync,
         changes=changes,
         announcements=[AnnouncementItem(**a) for a in unread],
+        pending_remote=pending_remote,
     )

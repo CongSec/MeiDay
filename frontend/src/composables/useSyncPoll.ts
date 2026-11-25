@@ -6,13 +6,17 @@ import { useTasksStore } from '@/stores/tasks'
 import { useStatsStore } from '@/stores/stats'
 import { idbGet, idbPut } from '@/utils/idb'
 import { flushPendingSyncReports } from '@/utils/syncReport'
-import { drainPendingTasks } from './usePendingTasks'
+import { drainPendingTasks, forcePendingTasksNextRound, hasUnfinishedPendingTasks } from './usePendingTasks'
 
 /**
  * 同步协调轮询：每隔固定间隔向中心服务器查询"总版本号 + 变更列表"，
  * 有变化时只从 OSS 拉取变化的资源并与本地合并（沿用现有 updatedAt + CAS 逻辑）。
  *
  * - 纯 2 秒轮询（无 SSE）：十几人在线时峰值约 7~8 req/s，2h4g 服务器无压力；
+ * - 稳态只发一个请求：远程任务认领（claim）不再每轮都发，而是看 /api/sync/state
+ *   响应里的 pending_remote 标记（该账号是否还有待认领的远程任务）——标记为假时不认领，
+ *   普通账号每轮轮询就只剩 /api/sync/state 这一个请求；本地若还有 ack/fail 没回收成功
+ *   （hasUnfinishedPendingTasks），也会补跑一轮，保证回执不会被静默丢弃；
  * - 上报(报告变更)与拉取分离：本端先补报离线期间的待发上报，再判断是否需要拉取，
  *   避免把自己刚上报的变更再拉回来一次；
  * - 失败退避：网络/后端不可达时逐步拉长间隔（最多 30s），恢复后立即重试；
@@ -166,11 +170,6 @@ async function pollOnce(): Promise<boolean> {
   try {
     // 1) 先把本地（含离线期间）的待发上报补报给中心服务器
     const reported = await flushPendingSyncReports(auth.username)
-    // 1.5) 远程任务投递：认领「消息通知回调带项目名」暂存在服务端的任务并写进 OSS。
-    //      只有网页端/APP 会调用（桌面小组件只读，不引入本模块）；服务端原子认领 +
-    //      60 秒租约保证同一行只会被一个端拿到，多端同时在线也不会重复写入。
-    //      失败不阻断后续同步：真正的失败由服务端计数并在超限后发邮件通知。
-    await drainPendingTasks()
     // 1.6) BUG-1 修复：提醒清单待报补报——上报失败/离线期间标记保留，网络恢复后
     //      随轮询自动重试，避免"设了提醒却因一次请求失败永久缺失"
     const tasks = useTasksStore()
@@ -185,6 +184,17 @@ async function pollOnce(): Promise<boolean> {
     let cur = await loadVersion(auth.username)
     // 2) 查询服务端版本与变更；未读公告已合并进同一响应（无需再单独请求）
     const state = await api.getSyncState(cur)
+    // 2.5) 远程任务投递：认领「消息通知回调带项目名」暂存在服务端的任务并写进 OSS。
+    //      只有网页端/APP 会调用（桌面小组件只读，不引入本模块）；服务端原子认领 +
+    //      60 秒租约保证同一行只会被一个端拿到，多端同时在线也不会重复写入。
+    //      这里不再每轮都发 claim：pending_remote 为假且本地没有未回收的回执时直接跳过，
+    //      稳态下每轮只剩上面那一个 state 请求（多端各持一票的是服务端标记，互不影响）。
+    //      老版本服务器不返回该字段（undefined）时退回「每轮都问」，行为与升级前一致。
+    //      认领失败不阻断后续同步：真正的失败由服务端计数并在超限后发邮件通知。
+    if (state.pending_remote !== false || hasUnfinishedPendingTasks()) {
+      if (state.pending_remote === undefined) forcePendingTasksNextRound()
+      await drainPendingTasks()
+    }
     let pulledAll = true
     let cursor = cur
     if (state.full_sync) {

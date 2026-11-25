@@ -178,7 +178,9 @@ CREATE TABLE IF NOT EXISTS pending_tasks (
     notified         INTEGER NOT NULL DEFAULT 0,  -- 失败邮件是否已发（只发一次）
     created_at       TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_pending_tasks_user ON pending_tasks(username, status);
+-- 「有没有待认领记录」是每轮轮询都要回答的问题（/api/sync/state 的 pending_remote、
+-- claim 前的存在性判断），把租约列纳入索引后可覆盖 status='pending' 的判定。
+CREATE INDEX IF NOT EXISTS idx_pending_tasks_user ON pending_tasks(username, status, claim_expires_at);
 """
 
 
@@ -326,11 +328,20 @@ def _migrate_smtp_callback_id(conn: sqlite3.Connection) -> None:
 def _migrate_pending_tasks(conn: sqlite3.Connection) -> None:
     """旧库没有 pending_tasks 表时补齐（远程任务投递，消息通知回调带项目字段时使用）。
 
-    表结构已在 SCHEMA 中定义（CREATE TABLE IF NOT EXISTS），这里只负责给
-    「建表早于本功能」的旧库补建索引；后续若给该表加列，也在这里做 ALTER。
+    表结构已在 SCHEMA 中定义（CREATE TABLE IF NOT EXISTS），这里只负责：
+      - 给「建表早于本功能」的旧库补建索引；
+      - 把旧版 (username, status) 索引换成 (username, status, claim_expires_at)：
+        后者的前缀已覆盖「该用户还有没有 status='pending' 的记录」这一每轮轮询都要回答的
+        判定，索引名不变，其他查询不受影响。旧库启动时自动重建一次（表很小时瞬时完成）。
     """
+    schema = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_pending_tasks_user'"
+    ).fetchone()
+    if schema is None or "claim_expires_at" not in (schema["sql"] or ""):
+        conn.execute("DROP INDEX IF EXISTS idx_pending_tasks_user")
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_pending_tasks_user ON pending_tasks(username, status)"
+        "CREATE INDEX IF NOT EXISTS idx_pending_tasks_user "
+        "ON pending_tasks(username, status, claim_expires_at)"
     )
 
 

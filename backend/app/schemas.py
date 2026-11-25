@@ -520,3 +520,8 @@ class SyncStateResponse(BaseModel):
     # 合并进同步轮询响应：客户端每 2 秒只发一个请求即可同时拿到
     # 同步协调状态与未读公告（公告无变化时为空列表）
     announcements: List[AnnouncementItem] = []
+    # 该账号是否还有待认领的远程任务（消息通知回调带项目名时入队）。
+    # 客户端只有该项为 true 时才去请求 /api/pending-tasks/claim：
+    # 普通账号没有远程任务时，每轮轮询就只剩本接口这一个请求。
+    # 取值来自内存快照（见 services/pending_tasks.refresh_pending_snapshot），本接口仍是纯只读。
+    pending_remote: bool = False
