@@ -76,6 +76,10 @@ export interface Task {
   repeatProcessed?: Record<string, 'completed' | 'deleted'>
   /** 单日记录标记（只写在回收站 trash 单日记录上）：指向所属重复链根任务与目标日，用于恢复/永久删除时定位 */
   repeatOccurrence?: { rootId: string; date: string; kind: 'completed' | 'deleted' }
+  /** 本次完成所对应的「那一次重复出现日」（YYYY-MM-DD）：提前完成未来某次出现时它 != 完成当天，
+   *  取消完成时据此精确清除 repeatProcessed 标记（否则标记清不掉，该日永久回不来）。
+   *  注意：它只记录出现日，updatedAt 恒为真实完成时刻，两者不可复用。 */
+  repeatDoneDay?: string
 }
 
 /** 未分类分组的项目 id：仅回收站「无分类」分组使用（today_trash.json / today_repeats.json / today_order.json）。

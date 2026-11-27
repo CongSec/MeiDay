@@ -16,6 +16,7 @@ import { deleteAttachments, downloadAttachment, formatSize } from '@/utils/attac
 import { saveBlobToDevice, saveToastText } from '@/utils/saveBlob'
 import { createOssClient } from '@/utils/oss'
 import { dateKeyOf, formatTodayTitle, nowIso, todayKey } from '@/utils/time'
+import { mergeRepeatProcessed } from '@/utils/repeat'
 import { logAudit, logAttachmentDeletion, type AttachmentDeletionFile } from '@/utils/audit'
 import { UNCATEGORIZED, type AttachmentMeta, type DeletedProject, type Project, type RepeatRule, type Task } from '@/types'
 
@@ -458,12 +459,13 @@ const repeatMastersForCalendar = computed(() =>
     // 墓碑（R4）：已删除规则不参与日历图
     .filter((m) => !m.deletedAt)
     .map((m) => {
-      // 根任务已处理日期（完成/删除）可能只写在根任务上：合并到模板，供日历图跳过已处理的未来重复日
+      // 根任务已处理日期（完成/删除）可能只写在根任务上：与模板自身的标记**取并集**，
+      // 供日历图跳过已处理的未来重复日。旧实现用根覆盖模板（root ?? template），一旦某次
+      // 处理只写在模板上（多端竞态 / 模板侧推进），日历就会把该日重新枚举成待办小块。
       const rootId = m.rootTaskId ?? m.template.repeatRootId ?? m.id
       const root = tasks.all.find((x) => x.id === rootId)
-      return root?.repeatProcessed
-        ? { ...m, template: { ...m.template, repeatProcessed: root.repeatProcessed } }
-        : m
+      const merged = mergeRepeatProcessed(m.template.repeatProcessed, root?.repeatProcessed)
+      return Object.keys(merged).length ? { ...m, template: { ...m.template, repeatProcessed: merged } } : m
     }),
 )
 /** 项目名（多视图组件展示用） */

@@ -254,6 +254,19 @@ export function firstOccurrenceDate(rule: RepeatRule, today: string): string {
   return currentOrNextOccurrence(rule, today, today)
 }
 
+/** 合并「已处理重复日」标记：模板侧与根任务侧**取并集**（根侧同键优先）。
+ *  时间胶囊日历图的模板列表、未来任务收集都依赖它：标记可能只写在根任务上、
+ *  也可能只写在模板上（多端竞态 / 模板侧推进），只取一侧会让已处理的未来重复日重新冒出来
+ *  （表现为「点了提前完成，那一天的待办还在」）。 */
+export function mergeRepeatProcessed(
+  templateProcessed?: Record<string, 'completed' | 'deleted'>,
+  rootProcessed?: Record<string, 'completed' | 'deleted'>,
+): Record<string, 'completed' | 'deleted'> {
+  const base = templateProcessed ?? {}
+  if (!rootProcessed) return base
+  return { ...base, ...rootProcessed }
+}
+
 /** 两个重复规则的「形状」是否一致（不含 start 相位锚点、不含 endAfter 结束日期）。
  *  编辑时仅改内容 / 只改 start / 只改 endAfter 都不视为规则变化，避免每次保存重置周期相位；
  *  改 type / interval / 星期 / 每月日 / 指定日期列表 视为规则变化，需按新规则重排后续出现。 */
@@ -476,6 +489,8 @@ export function buildOccurrenceTemplate(
     repeatRootId: task.repeatRootId ?? task.id,
     repeatProcessed: task.repeatProcessed,
     repeatOccurrence: undefined,
+    // 「本次完成对应哪一次出现」只对完成那一刻的任务有意义，模板是未来的待办，必须清空
+    repeatDoneDay: undefined,
   }
   return { template, dueDate: date }
 }

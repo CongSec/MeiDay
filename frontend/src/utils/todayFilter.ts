@@ -1,6 +1,6 @@
 import type { RepeatMaster, RepeatRule, Subtask, Task } from '@/types'
 import { addDaysKey, addMonthsKey, dateKeyOf, diffDaysKey } from './time'
-import { isNewStyleRepeat } from './repeat'
+import { isNewStyleRepeat, mergeRepeatProcessed } from './repeat'
 import { compareTasksByTime } from './task'
 
 /** 今日/未来某天可见判断所需的公共字段（主任务与子任务共用同一套核心逻辑） */
@@ -133,10 +133,11 @@ export function collectFutureVisibleTasks(
       if (m.deletedAt) continue
       if (m.dueDate > today && m.dueDate <= last && isTaskVisibleOn(m.template, m.dueDate)) {
         // 该重复日已被单日完成/入舱处理，不再出现在未来任务区
+        // 标记可能只写在根任务或只写在模板上：取并集判定，避免任一侧缺失导致该日又冒出来
         const rootId = m.rootTaskId ?? m.template.repeatRootId ?? m.id
         const root = rootById.get(rootId)
-        const processed = root?.repeatProcessed ?? m.template.repeatProcessed
-        if (processed?.[m.dueDate]) continue
+        const processed = mergeRepeatProcessed(m.template.repeatProcessed, root?.repeatProcessed)
+        if (processed[m.dueDate]) continue
         out.push({ task: m.template, date: m.dueDate })
       }
     }

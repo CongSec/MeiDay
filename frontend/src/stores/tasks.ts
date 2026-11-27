@@ -695,7 +695,8 @@ function masterFromActiveTask(t: Task, day: string): RepeatMaster {
     sourceTaskId: rootIdOf(t),
     rootTaskId: rootIdOf(t),
     dueDate: day,
-    template: { ...t, status: 'pending', isReminded: false, repeatOccurrence: undefined },
+    // 「本次完成对应哪一次出现」只属于完成态任务本身，转成未来模板时必须清空
+    template: { ...t, status: 'pending', isReminded: false, repeatOccurrence: undefined, repeatDoneDay: undefined },
     createdAt: now,
     updatedAt: now,
   }
@@ -4341,56 +4342,96 @@ export const useTasksStore = defineStore('tasks', {
     toggleComplete(id: string) {
       this._flipComplete(id, true)
     },
-    /** 完成任务/取消完成的核心翻转（applyStats=false 时跳过统计，供确认式流程在 OSS 成功后补记） */
-    _flipComplete(id: string, applyStats: boolean): boolean {
+    /** 完成任务/取消完成的核心翻转（applyStats=false 时跳过统计，供确认式流程在 OSS 成功后补记）。
+     *  occurrenceDay：本次完成的是「哪一次重复出现」（YYYY-MM-DD）。正常完成（今天做今天那期）不传，
+     *  等价于 todayKey()；「提前完成未来某一次出现」时必须传入那一天，否则会把标记写到非重复日的今天，
+     *  下一次出现也会从今天起算而重新长出那一天的待办（用户反馈 Bug）。
+     *  约定：updatedAt 恒为真实完成时刻（决定日历/胶囊/热力图归到哪天），
+     *        repeatProcessed / repeatDoneDay 只表示出现日（决定哪一天不再出现）。两者绝不复用。 */
+    _flipComplete(id: string, applyStats: boolean, occurrenceDay?: string): boolean {
       const task = this.all.find((t) => t.id === id)
       if (!task) return false
       const completing = task.status !== 'completed'
       if (completing && task.repeat) {
-        // 标记完成日：与单日完成路径（_completeOccurrence 写 repeatProcessed[day]='completed'）保持一致。
-        // 否则日历图会把已完成当天继续枚举成"未完成"小块（同一天重复显示）；该标记会随模板/后续
-        // 物化任务继承，使已完成的过去日不再作为待办出现（模板 / 物化对这一天自动跳过）。
-        task.repeatProcessed = { ...(task.repeatProcessed ?? {}), [todayKey()]: 'completed' }
+        // 标记「被完成的那一次」为已处理：与单日完成路径（_completeOccurrence 写 repeatProcessed[day]='completed'）
+        // 保持一致。否则日历图会把该日继续枚举成"未完成"小块（同一天重复显示）；该标记会随模板/后续
+        // 物化任务继承，使已完成的重复日不再作为待办出现（模板 / 物化对这一天自动跳过）。
+        // 提前完成未来某次出现时，这里必须是那一天而不是今天（今天可能根本不是重复日）。
+        const doneDay = occurrenceDay || todayKey()
+        task.repeatProcessed = { ...(task.repeatProcessed ?? {}), [doneDay]: 'completed' }
+        // 记录出现日，供「取消完成」精确回滚（updatedAt 是完成时刻，不能用它反推出现日）
+        task.repeatDoneDay = doneDay
         // 重复任务完成：不立即生成下一次，而是把下一次出现存成模板（等重复当天再显示）。
         // 提醒邮件由服务器按周期规则继续按时发送，即使不打开 App 也会每天提醒；
         // 模板 id 沿用源任务 id，保证服务器提醒行不被打断。
-        const occ = buildRepeatOccurrence(task, todayKey())
-        if (occ) {
-          const masters = this.repeats[task.projectId] ?? []
-          // 已存在存活模板则跳过；墓碑（规则曾被删除）不算，允许本次完成重新创建
-          if (!masters.some((m) => m.sourceTaskId === task.id && !m.deletedAt)) {
+        // 下一次出现必须严格晚于「被完成的那一次」（doneDay），否则提前完成后这一天会被重新生成。
+        const occ = buildRepeatOccurrence(task, doneDay)
+        const masters = this.repeats[task.projectId] ?? []
+        const live = masters.find((m) => m.sourceTaskId === task.id && !m.deletedAt)
+        if (live) {
+          // 已存在存活模板：内容/相位保持不变，但若其 dueDate 恰在「已处理日」上必须推进到下一个
+          // 未处理重复日（无剩余则写墓碑结束链条），否则未来任务区 / 日历图仍会显示那一天
+          // —— 这正是「点了提前完成，那一天的待办又长回来」的直接来源。
+          const rule = task.repeat
+          const dueDate = live.dueDate
+          const processed = task.repeatProcessed ?? {}
+          if (processed[dueDate]) {
+            const advanced = rule ? skipProcessedRepeatDays(rule, dueDate, processed) : null
+            const idx = masters.indexOf(live)
             const now = nowIso()
-            const newMaster: RepeatMaster = {
-              id: task.id,
-              projectId: task.projectId,
-              sourceTaskId: task.id,
-              rootTaskId: rootIdOf(task),
-              dueDate: occ.dueDate,
-              template: occ.template,
-              createdAt: now,
-              updatedAt: now,
+            const next = [...masters]
+            if (advanced && !(rule?.endAfter && advanced > rule.endAfter)) {
+              next[idx] = {
+                ...live,
+                dueDate: advanced,
+                template: shiftTaskTimes(
+                  { ...live.template, repeatProcessed: processed },
+                  diffDaysKey(dueDate, advanced),
+                ),
+                updatedAt: now,
+              }
+            } else {
+              // 无剩余未处理重复日：写墓碑结束链条（R4：防离线端把已结束链条并集写回）
+              next[idx] = { ...live, deletedAt: now, updatedAt: now }
             }
-            // 若存在同 id 墓碑（规则曾被删除），原地复活它，避免同 id 墓碑+存活两条并存
-            const tombIdx = masters.findIndex((m) => m.id === newMaster.id && m.deletedAt)
-            this.repeats[task.projectId] =
-              tombIdx >= 0
-                ? [...masters.slice(0, tombIdx), newMaster, ...masters.slice(tombIdx + 1)]
-                : [...masters, newMaster]
+            this.repeats[task.projectId] = next
             this._persistRepeats(task.projectId)
-            logAudit('生成重复任务模板', safeDetail(`任务ID：${task.id}，项目ID：${task.projectId}，周期：${task.repeat.type}`))
+            logAudit('推进重复任务模板', safeDetail(`任务ID：${task.id}，项目ID：${task.projectId}，处理日：${dueDate}`))
           }
+        } else if (occ) {
+          // 无存活模板：新建（墓碑（规则曾被删除）不算，允许本次完成重新创建）
+          const now = nowIso()
+          const newMaster: RepeatMaster = {
+            id: task.id,
+            projectId: task.projectId,
+            sourceTaskId: task.id,
+            rootTaskId: rootIdOf(task),
+            dueDate: occ.dueDate,
+            template: occ.template,
+            createdAt: now,
+            updatedAt: now,
+          }
+          // 若存在同 id 墓碑（规则曾被删除），原地复活它，避免同 id 墓碑+存活两条并存
+          const tombIdx = masters.findIndex((m) => m.id === newMaster.id && m.deletedAt)
+          this.repeats[task.projectId] =
+            tombIdx >= 0
+              ? [...masters.slice(0, tombIdx), newMaster, ...masters.slice(tombIdx + 1)]
+              : [...masters, newMaster]
+          this._persistRepeats(task.projectId)
+          logAudit('生成重复任务模板', safeDetail(`任务ID：${task.id}，项目ID：${task.projectId}，周期：${task.repeat.type}`))
         }
       } else if (!completing && task.repeat) {
         // 取消完成：删除该任务的重复模板，恢复由任务自己承担提醒；
         // 服务器端同一 task_id 行的推进时间由“服务端时间较新则保留”逻辑兜底，不重复发信。
-        // 同时移除完成日标记（此刻 task.updatedAt 仍是完成时间）：否则今日页 / 日历会一直把
-        // 这一天当作“已处理”过滤掉，任务恢复待办后反而不显示。
-        const doneDay = dateKeyOf(task.updatedAt)
+        // 同时移除「那一次出现」的已处理标记：提前完成时它 != 完成当天，若用 updatedAt 反推会清不掉，
+        // 该重复日将永久回不来。优先用 repeatDoneDay；老数据/缺字段时回退到 updatedAt 日期。
+        const doneDay = task.repeatDoneDay || dateKeyOf(task.updatedAt)
         if (task.repeatProcessed?.[doneDay]) {
           task.repeatProcessed = { ...task.repeatProcessed }
           delete task.repeatProcessed[doneDay]
           if (!Object.keys(task.repeatProcessed).length) task.repeatProcessed = undefined
         }
+        task.repeatDoneDay = undefined
         this._deleteMasterForTask(task.id)
       }
       task.status = completing ? 'completed' : 'pending'
@@ -4416,8 +4457,10 @@ export const useTasksStore = defineStore('tasks', {
       return completing
     },
     /** 确认式完成/取消完成：先翻转，立即写盘（重复任务同时写重复模板），OSS 全部成功才返回 true；
-     *  失败回滚任务与重复模板并返回 false（统计在成功后补记，避免失败导致计数漂移）。 */
-    async toggleCompleteConfirmed(id: string): Promise<boolean> {
+     *  失败回滚任务与重复模板并返回 false（统计在成功后补记，避免失败导致计数漂移）。
+     *  occurrenceDay：本次完成的是「哪一次重复出现」（提前完成未来某次出现时由
+     *  completeFutureOccurrence 传入），缺省等价于今天。 */
+    async toggleCompleteConfirmed(id: string, opts?: { occurrenceDay?: string }): Promise<boolean> {
       if (toggleSaving.has(id)) return false
       toggleSaving.add(id)
       try {
@@ -4432,7 +4475,7 @@ export const useTasksStore = defineStore('tasks', {
         // 注意：任务对象是 Vue reactive 代理，structuredClone 会抛 DataCloneError，
         // 必须改用 JSON 深拷贝（Task/Subtask 字段均为 JSON 可序列化数据）。
         const taskSnap = JSON.parse(JSON.stringify(task))
-        const completing = this._flipComplete(id, false)
+        const completing = this._flipComplete(id, false, opts?.occurrenceDay)
         const okTasks = await this.saveProjectNow(pid)
         const repeatsChanged = !!task.repeat && JSON.stringify(this.repeats[pid]) !== JSON.stringify(repeatsSnap)
         const okRepeats = repeatsChanged ? await this.saveRepeatsNow(pid) : true
@@ -5237,8 +5280,11 @@ export const useTasksStore = defineStore('tasks', {
           }
         }
       }
-      // 生成单日已删除记录（入回收站，按当天分片）
-      const occTime = source.reminderTime ?? source.startTime ?? source.endTime ?? `${day}T00:00:00+08:00`
+      // 生成单日已删除记录（入回收站，按操作当天分片）
+      // 归属日约定：updatedAt = 真实操作时刻（决定项目图/日历图/热力图归到哪天、落哪个分片），
+      // repeatOccurrence.date = 被入舱的那一次出现日（决定哪一天不再作为待办出现）。
+      // 旧实现把 updatedAt 写成 source.reminderTime（出现日），「提前存入时间胶囊」的记录
+      // 会跑到未来那一天，与「落在操作那天」的约定相反。
       // 单日处理（入舱/删除）后，若该重复模板的 dueDate 恰好在已处理日上，立即推进到下一个未处理重复日：
       // 否则未来任务区 / 日历图会一直看不到下一次，直到下次加载/同步触发物化才推进。
       // 无剩余未处理重复日则删除模板（链条自然结束）。
@@ -5268,7 +5314,7 @@ export const useTasksStore = defineStore('tasks', {
         ...source,
         id: `${rootId}::${day}`,
         status: 'deleted' as const,
-        updatedAt: occTime,
+        updatedAt: nowIso(),
         projectId: trashPid,
         repeatOccurrence: { rootId, date: day, kind: 'deleted' },
       })
@@ -5371,12 +5417,17 @@ export const useTasksStore = defineStore('tasks', {
           return await this._completeOccurrence(taskId, date, rootId, root, master.template, masterPid, trashPid)
         }
         // 2) 活跃任务：非重复任务走正常完成；重复任务只把「未来重复日」单日完成，
-        //    任务自己所属的那一天仍走正常完成（翻转状态 + 生成未来模板）
+        //    任务自己所属的那一天走正常完成（翻转状态 + 生成未来模板）。
         const active = this.all.find((x) => x.id === taskId)
         if (!active) return false
         if (!active.repeat) return this.toggleCompleteConfirmed(taskId)
         const ownDay = dateKeyOf(active.reminderTime || active.startTime || active.endTime)
-        if (!ownDay || date === ownDay) return this.toggleCompleteConfirmed(taskId)
+        // 「任务自己所属的那一次」可能就是未来日（新建的重复任务首次出现日还没到，
+        // 它只出现在未来任务区 / 日历图的未来重复日上）。此时整条任务完成是正确的语义
+        // （完成后由模板承接后续周期），但必须把「被完成的是哪一次」传下去：
+        // 否则 _flipComplete 会把标记写到今天（可能根本不是重复日），并以今天为基准算出
+        // 下一次 = 那个未来日本身 → 那一天的待办重新长回来（用户反馈 Bug）。
+        if (!ownDay || date === ownDay) return this.toggleCompleteConfirmed(taskId, { occurrenceDay: date })
         const rootId = rootIdOf(active)
         const root = this.all.find((x) => x.id === rootId) ?? this.allTrash.find((x) => x.id === rootId)
         return await this._completeOccurrence(taskId, date, rootId, root, active, undefined, active.projectId)
@@ -5457,8 +5508,6 @@ export const useTasksStore = defineStore('tasks', {
           }
         }
       }
-      const occTime =
-        source.reminderTime ?? source.startTime ?? source.endTime ?? `${day}T00:00:00+08:00`
       // 单日处理后，若该重复模板的 dueDate 恰好在已处理日上，立即推进到下一个未处理重复日：
       // 否则未来任务区 / 日历图会一直看不到下一次，直到下次加载/同步触发物化才推进
       // （即用户感受到的「要多刷新几次才更新」）。无剩余未处理重复日则删除模板（链条自然结束）。
@@ -5488,7 +5537,10 @@ export const useTasksStore = defineStore('tasks', {
         ...source,
         id: `${rootId}::${day}`,
         status: 'completed' as const,
-        updatedAt: occTime,
+        // 归属日约定：updatedAt = 真实完成时刻（画在完成那天 / 落该月分片），
+        // repeatOccurrence.date = 被完成的那一次出现日（跳过那一天）。
+        // 旧实现写 source.reminderTime（出现日），「提前完成」的记录会跑到未来那一天。
+        updatedAt: nowIso(),
         projectId: trashPid,
         repeatOccurrence: { rootId, date: day, kind: 'completed' },
       })
@@ -5505,7 +5557,9 @@ export const useTasksStore = defineStore('tasks', {
       if (rootInTrash && rootInTrash !== trashPid) jobs.push(this.saveTrashNow(rootInTrash))
       const ok = (await Promise.all(jobs)).every(Boolean)
       if (ok) {
-        await useStatsStore().addDelta(1, root?.id ?? rootId, day)
+        // 统计归到真实完成日（月键 = 完成月），与热力图/趋势图（按 updatedAt 归月）保持一致；
+        // 旧实现用 day（出现日），提前完成跨月时会把完成数记到未来月份。
+        await useStatsStore().addDelta(1, root?.id ?? rootId, dateKeyOf(nowIso()))
         this._syncReminders()
         logAudit('完成任务', safeDetail(`任务ID：${rootId}，日期：${day}，项目ID：${trashPid}`))
         return true

@@ -812,6 +812,7 @@ async function submit() {
   task.repeatRootId = props.task?.repeatRootId
   task.repeatProcessed = props.task?.repeatProcessed
   task.repeatOccurrence = props.task?.repeatOccurrence
+  task.repeatDoneDay = props.task?.repeatDoneDay
   // 记住新建任务时选择的项目：下次在今日视图新建任务时默认用它
   if (!props.task) rememberProject(task.projectId)
   // 点保存立即关闭弹窗；提示由回显后的 toast 负责（成功才提示，失败回滚并弹错误提示）
